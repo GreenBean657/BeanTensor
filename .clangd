@@ -1,0 +1,11 @@
+CompileFlags:
+  Add:
+    - -D__HIP_PLATFORM_AMD__=1
+    - -I/opt/rocm/include
+  Compiler: /opt/rocm/llvm/bin/clang++
+
+If:
+  PathMatch: .*\.cpp
+  CompileFlags:
+    Add:
+      - -D__HIP_PLATFORM_AMD__=1
