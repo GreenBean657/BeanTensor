@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(/home/greenbean/.local/share/JetBrains/Toolbox/apps/clion/bin/cmake/linux/x64/bin/cmake --build /mnt/schoolwork/BeanTensorV4/cmake-build-debug --target BeanTensorV4 -j 30)"
-    ]
-  }
-}

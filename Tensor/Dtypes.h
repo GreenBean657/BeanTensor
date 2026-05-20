@@ -1,9 +1,10 @@
 #pragma once
+#include <cassert>
 #include <cstdint>
 #include <string>
 
 
-#if defined(USE_HIP)
+#if defined(USE_HIP) && defined(__clang__)
 #include <hip/hip_fp16.h>
 #include <hip/hip_bf16.h>
 #elif defined(USE_CUDA)
@@ -12,7 +13,7 @@
 #endif
 
 namespace BeanTensor::Casting {
-#if defined(USE_HIP)
+#if defined(USE_HIP) && defined(__clang__)
     using float16_t  = __half;
     using bfloat16_t = __hip_bfloat16;
 
@@ -21,7 +22,6 @@ namespace BeanTensor::Casting {
     using bfloat16_t = __nv_bfloat16;
 
 #else
-    // CPU-only: raw storage types, no GPU headers needed
     enum class float16_t  : uint16_t {};
     enum class bfloat16_t : uint16_t {};
     inline uint16_t raw(float16_t  x) { return static_cast<uint16_t>(x); }
@@ -30,21 +30,25 @@ namespace BeanTensor::Casting {
     inline float16_t  as_f16 (uint16_t x) { return static_cast<float16_t> (x); }
     inline bfloat16_t as_bf16(uint16_t x) { return static_cast<bfloat16_t>(x); }
 #endif
-
+    using float32_t = float;
+    using float64_t = double;
     enum class DType {
-        Float16,
         BFloat16,
+        Float16,
         Float32,
         Float64,
-        Int32,
         Int64,
+        Int32,
         Int16,
         Int8,
-        UInt32,
         UInt64,
+        UInt32,
         UInt16,
         UInt8
     };
+
+
+
 
     inline size_t dtype_size(const DType& dt) {
         switch (dt) {
@@ -60,6 +64,7 @@ namespace BeanTensor::Casting {
             case DType::UInt64:  return sizeof(uint64_t);
             case DType::UInt16:  return sizeof(uint16_t);
             case DType::UInt8:   return sizeof(uint8_t);
+                
         }
         return 0;
     }
@@ -91,6 +96,76 @@ namespace BeanTensor::Casting {
     }
 
     inline bool dtype_is_int(const DType dt) {
-        return !dtype_is_float(dt);
+        return (dt == DType::Int8)
+            || (dt == DType::Int16)
+            || (dt == DType::Int32)
+            || (dt == DType::Int64);
+    }
+
+    inline bool dtype_is_uint(const DType dt) {
+        return (dt == DType::UInt8)
+        || (dt == DType::UInt16)
+        || (dt == DType::UInt32)
+        || (dt == DType::UInt64);
+    }
+
+}
+namespace BeanTensor::Casting::detail {
+    inline uint8_t dtype_rank(const DType& dt) {
+        switch (dt) {
+            case DType::Float16:  return 0;
+            case DType::BFloat16:  return 1;
+            case DType::Float32: return 2;
+            case DType::Float64: return 3;
+
+            case DType::Int8:   return 0;
+            case DType::Int16:  return 1;
+            case DType::Int32:  return 2;
+            case DType::Int64:  return 3;
+
+            case DType::UInt8:  return 10;
+            case DType::UInt16: return 11;
+            case DType::UInt32: return 12;
+            case DType::UInt64: return 13;
+
+
+            default: return -1;
+        }
+    }
+    inline bool operator>(const DType& a, const DType& b) {
+        return a >= b;
+    }
+
+    inline bool operator<(const DType& a, const DType& b) {
+        if (a == b) return false;
+
+        if (dtype_is_int(a) && dtype_is_int(b)) {
+            return dtype_rank(a) < dtype_rank(b);
+        }
+        if (dtype_is_uint(a) && dtype_is_uint(b)) {
+            return dtype_rank(a) < dtype_rank(b);
+        }
+        if (dtype_is_float(a) && dtype_is_float(b)) {
+            return dtype_rank(a) < dtype_rank(b);
+        }
+
+        if ((dtype_is_int(a) && dtype_is_float(b)) || (dtype_is_float(a) && dtype_is_int(b))) {
+            // Float always wins over int
+            return dtype_is_int(a);
+        }
+        if ((dtype_is_uint(a) && dtype_is_float(b)) || (dtype_is_float(a) && dtype_is_uint(b))) {
+            // Float always wins over uint
+            return dtype_is_uint(a);
+        }
+        if ((dtype_is_int(a) && dtype_is_uint(b)) || (dtype_is_uint(a) && dtype_is_int(b))) {
+            // Int vs uint: signed int wins only if it has strictly more bits (can represent
+            // all uint values); otherwise unsigned wins (larger positive range at equal width).
+            DType int_dt  = dtype_is_int(a)  ? a : b;
+            DType uint_dt = dtype_is_uint(a) ? a : b;
+            bool int_wins = dtype_size(int_dt) > dtype_size(uint_dt);
+            return int_wins ? dtype_is_uint(a) : dtype_is_int(a);
+        }
+
+        return false;
     }
 }

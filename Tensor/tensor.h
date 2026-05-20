@@ -10,6 +10,14 @@
 #include <cstdlib>
 #include <sstream>
 #include <stdexcept>
+
+#define BT_TENSOR_MAX_DIMS 8
+#define BT_TENSOR_MAX_PARENTS 3
+#include <iostream>
+#include <random>
+
+#include "tensor.h"
+#include "tensor_convert.h"
 #ifdef USE_HIP
 #include <hip/hip_runtime.h>
 #include <hip/hip_runtime_api.h>
@@ -19,39 +27,85 @@
 
 #endif
 
-#define BT_TENSOR_MAX_DIMS 8
+namespace BeanTensor::Tensors::detail {
+    template<typename T>
+    void print_recursive(std::ostringstream& os, const T* data,
+                     const size_t* shape, const size_t ndim,
+                     size_t& idx, const size_t depth) {
+        os << "[";
+        if (ndim == 1) {
+            for (size_t i = 0; i < shape[0]; ++i) {
+                os << data[idx++];
+                if (i < shape[0] - 1) os << ", ";
+            }
+        } else {
+            for (size_t i = 0; i < shape[0]; ++i) {
+                print_recursive(os, data, shape + 1, ndim - 1, idx, depth + 1);
+                if (i < shape[0] - 1) os << ",\n" << std::string(depth + 1, ' ');
+            }
+        }
+        os << "]";
+    }
+
+}
+
+
 namespace BeanTensor::Tensors {
+    enum class Device {
+        CPU,
+        GPU
+    };
+
+    struct Tensor;
+
+    Tensor make_tensor(
+        );
+
+    struct Node;
+
+    struct Tensor {
+
+        size_t _shape[BT_TENSOR_MAX_DIMS]{}; // Multinational tensor indexing
+        size_t _strides[BT_TENSOR_MAX_DIMS]{}; // Multidimensional tensor indexing
+        size_t _ndim = 0; // length of(shape)
+        size_t _numel = 0; // Number of elements, flat
+        size_t _nbytes = 0; // Number of bytes
+
+        void* _stream = nullptr; // hipStream_t / cudaStream_t (GPU Only)
+        uint32_t _gpu_id = 0; //Owner GPU
+
+        bool _owns_data = false; // Is this tensor the owner of its data?
+        size_t _offset = 0; // How far in the data is this tensor? (in elements)
+        bool _is_contiguous = true; // Is this tensor contiguous in memory?
+
+        Casting::DType _dtype = Casting::DType::Float32; // What datatype is this tensor?
+
+        Device _device = Device::CPU; // What device type owns this tensors' data?
+
+        void* _data{};   // CPU or GPU pointer
+
+        bool _requires_grad = false; // Does this tensor require grad?
+        Tensor* _grad = nullptr; // Accumulated gradient of same tensor shape
+        Node* _grad_fn = nullptr; // Parent grad functions?
+        Tensor* _parents[BT_TENSOR_MAX_PARENTS] = {}; //Parent tensors?
+        uint8_t _n_parents = 0; //Parent count (for 2-4)
+        bool _is_leaf = true; // Autograd property
+
+        Tensor() = default;
+        // Declare only — no body yet
+        Tensor(const size_t* shape, uint32_t ndim,
+               Casting::DType dtype = Casting::DType::Float32,
+               Device device = Device::CPU,
+               bool requires_grad = false);
+    };
 
 
-    struct Tensor { // 256
-
-        size_t shape[BT_TENSOR_MAX_DIMS]{}; // Multinational tensor indexing
-        size_t strides[BT_TENSOR_MAX_DIMS]{}; // Multi-dimensional tensor indexing
-        uint32_t ndim = 0; // lengthof(shape)
-        size_t numel = 0; // Number of elements, flat
-        size_t nbytes = 0; // Number of bytes
-
-        void* stream = nullptr; // hipStream_t / cudaStream_t (GPU Only)
-        uint32_t gpu_id = 0; //Owner GPU
-
-        bool owns_data = false; // Is this tensor the owner of its data?
-        size_t offset = 0; // How far in the data is this tensor?
-        bool is_contiguous = true; // Is this tensor contiguous in memory?
-
-        Casting::DType dtype = Casting::DType::Float32; // What datatype is this tensor?
-
-        enum class Device {
-            CPU,
-            GPU
-        } device = Device::CPU; // What device type owns this tensors' data?
-
-        void* data{};   // CPU or GPU pointer
-
-        bool requires_grad = false; // Does this tensor require grad?
-        struct Node* grad_fn{}; // Parent grad functions?
-        Tensor* parents[4] = {}; //Parent tensors?
-        uint8_t n_parents = 0; //Parent count (for 2-4)
-        bool is_leaf = true; // Autograd property
+    struct Node {
+        void (*_backward_fn)(Tensor* output_grad, Tensor** inputs, size_t n_inputs);
+        Tensor* _inputs[BT_TENSOR_MAX_PARENTS];
+        size_t _n_inputs;
+        Tensor* _saved[BT_TENSOR_MAX_PARENTS];
+        size_t _n_saved;
     };
 
     inline void _compute_strides(const size_t* shape, size_t* strides, const uint32_t ndim) {
@@ -60,14 +114,19 @@ namespace BeanTensor::Tensors {
             strides[i] = strides[i + 1] * shape[i + 1];
     }
 
+    /* Returns a byte pointer to the start of the tensor's data, accounting for element offset */
+    inline std::byte* data_ptr(const Tensor& t) {
+        return static_cast<std::byte*>(t._data) + t._offset * Casting::dtype_size(t._dtype);
+    }
+
     /* Get a value at a tensor based on idx (tensor[1][4] = {1, 4})*/
     template<typename T>
     T* at_location(Tensor* tensor, const std::initializer_list<int> idx) {
-        assert(static_cast<int>(idx.size()) == tensor->ndim);
-        auto* base = static_cast<T*>(tensor->data) + tensor->offset;
-        for (unsigned int i = 0; i < tensor->ndim; ++i) {
-            assert(idx.begin()[i] >= 0 && idx.begin()[i] < tensor->shape[i]);
-            base += idx.begin()[i] * tensor->strides[i];
+        assert(static_cast<int>(idx.size()) == tensor->_ndim);
+        auto* base = static_cast<T*>(tensor->_data) + tensor->_offset;
+        for (unsigned int i = 0; i < tensor->_ndim; ++i) {
+            assert(idx.begin()[i] >= 0 && idx.begin()[i] < tensor->_shape[i]);
+            base += idx.begin()[i] * tensor->_strides[i];
         }
         return base;
     }
@@ -76,58 +135,64 @@ namespace BeanTensor::Tensors {
     inline Tensor make_tensor(const size_t* shape,
         const uint32_t ndim,
         const Casting::DType dtype = Casting::DType::Float32,
-        const Tensor::Device device = Tensor::Device::CPU,
+        const Device device = Device::CPU,
         const bool requires_grad = false
         ) {
         if (ndim == 0 || ndim > BT_TENSOR_MAX_DIMS) {
             throw std::invalid_argument("Tensor dimension exceeds maximum supported dimensions");
         }
         Tensor new_tensor{};
-        new_tensor.ndim = ndim;
-        new_tensor.dtype = dtype;
-        new_tensor.device = device;
-        new_tensor.requires_grad = requires_grad;
-        new_tensor.owns_data = true;
+        new_tensor._ndim = ndim;
+        new_tensor._dtype = dtype;
+        new_tensor._device = device;
+        new_tensor._requires_grad = requires_grad;
+        new_tensor._owns_data = true;
 
-        new_tensor.numel = 1;
+        new_tensor._numel = 1;
         for (uint32_t i = 0; i < ndim; ++i) {
-            new_tensor.shape[i] = shape[i];
-            new_tensor.numel *= shape[i];
+            new_tensor._shape[i] = shape[i];
+            new_tensor._numel *= shape[i];
         }
-        new_tensor.nbytes = new_tensor.numel * (BeanTensor::Casting::dtype_size(dtype));
+        new_tensor._nbytes = new_tensor._numel * (Casting::dtype_size(dtype));
 
-        _compute_strides(new_tensor.shape, new_tensor.strides, new_tensor.ndim);
+        _compute_strides(new_tensor._shape, new_tensor._strides, new_tensor._ndim);
 
-        if (device == Tensor::Device::CPU) {
-            new_tensor.data = std::malloc(new_tensor.nbytes);
-            assert(new_tensor.data != nullptr);
+        if (device == Device::CPU) {
+            new_tensor._data = std::malloc(new_tensor._nbytes);
+            assert(new_tensor._data != nullptr);
         } else {
 #if defined(USE_CUDA)
             int curr;
             cudaGetDevice(&curr);
-            new_tensor.gpu_id = curr;
-            cudaMalloc(&new_tensor.data, new_tensor.nbytes);
+            new_tensor._gpu_id = curr;
+            cudaMalloc(&new_tensor._data, new_tensor._nbytes);
 #elif defined(USE_HIP)
             int curr;
             hipGetDevice(&curr);
-            new_tensor.gpu_id = curr;
-            hipMalloc(&new_tensor.data, new_tensor.nbytes);
+            new_tensor._gpu_id = curr;
+            hipMalloc(&new_tensor._data, new_tensor._nbytes);
 #else
-assert(false);
+            assert(false && "Attempted GPU tensor on CPU build");
 #endif
         }
         return new_tensor;
     }
+
+    inline Tensor::Tensor(const size_t *shape, const uint32_t ndim, const Casting::DType dtype, const Device device, const bool requires_grad) {
+        *this = make_tensor(shape, ndim, dtype, device, requires_grad);
+    }
+
+
     /* Free a tensor */
     inline void free_tensor(Tensor* tensor) {
-        if (tensor->owns_data) {
-            if (tensor->device == Tensor::Device::CPU) {
-                std::free(tensor->data);
+        if (tensor->_owns_data) {
+            if (tensor->_device == Device::CPU) {
+                std::free(tensor->_data);
             } else {
 #if defined(USE_CUDA)
-                cudaFree(tensor->data);
+                cudaFree(tensor->_data);
 #elif defined(USE_HIP)
-                hipFree(tensor->data);
+                hipFree(tensor->_data);
 #else
                 assert(false);
 #endif
@@ -136,90 +201,213 @@ assert(false);
     }
 
     /* make a shallow "view" copy */
-    inline Tensor make_view(const Tensor& parent_tensor) {
+    [[nodiscard]] inline Tensor make_view(const Tensor& parent_tensor) {
         Tensor child_tensor = parent_tensor;
-        child_tensor.owns_data = false;
+        child_tensor._owns_data = false;
         return child_tensor;
     }
 
     /* Swap two stride and shape dims, and get a shallow copy */
-    inline Tensor transpose(const Tensor& tensor, const uint32_t dim0, const uint32_t dim1) {
+    [[nodiscard]] inline Tensor transpose(const Tensor& tensor, const uint32_t dim0, const uint32_t dim1) {
         auto transposed = make_view(tensor);
-        transposed.owns_data = false;
-        std::swap(transposed.shape[dim0], transposed.shape[dim1]);
-        std::swap(transposed.strides[dim0], transposed.strides[dim1]);
-        transposed.is_contiguous = false;
+        transposed._owns_data = false;
+        std::swap(transposed._shape[dim0], transposed._shape[dim1]);
+        std::swap(transposed._strides[dim0], transposed._strides[dim1]);
+        transposed._is_contiguous = false;
         return transposed;
     }
 
-    inline Tensor deep_copy(const Tensor& src) {
-     Tensor dst = src;
-        dst.owns_data = true;
-        dst.offset = 0;
+    [[nodiscard]] inline Tensor deep_copy(const Tensor& src) {
+        Tensor dst = src;
+        dst._owns_data = true;
+        dst._offset = 0;
 
-        if (src.device == Tensor::Device::CPU) {
-            dst.data = std::malloc(src.nbytes);
-            assert(dst.data != nullptr);
-            std::memcpy(dst.data, src.data, src.nbytes);
+        if (src._device == Device::CPU) {
+            dst._data = std::malloc(src._nbytes);
+            assert(dst._data != nullptr);
+            std::memcpy(dst._data, data_ptr(src), src._nbytes);
         } else {
 #if defined(USE_CUDA)
             int curr;
             cudaGetDevice(&curr);
-            assert(curr == src.gpu_id);
-            cudaMalloc(&dst.data, src.nbytes);
-            cudaMemcpy(dst.data, src.data + src.offset, src.nbytes, cudaMemcpyDeviceToDevice);
+            assert(curr == src._gpu_id);
+            cudaMalloc(&dst._data, src._nbytes);
+            cudaMemcpy(dst._data, data_ptr(src), src._nbytes, cudaMemcpyDeviceToDevice);
 #elif defined(USE_HIP)
             int curr;
             hipGetDevice(&curr);
-            assert(curr == (int)src.gpu_id);
-            hipMalloc(&dst.data, src.nbytes);
-            hipMemcpy(dst.data, (static_cast<char*>(src.data) + src.offset), src.nbytes, hipMemcpyDeviceToDevice);
+            assert(curr == (int)src._gpu_id);
+            hipMalloc(&dst._data, src._nbytes);
+            hipMemcpy(dst._data, data_ptr(src), src._nbytes, hipMemcpyDeviceToDevice);
 #else
             assert(false);
 #endif
         }
         return dst;
     }
-    inline bool is_same_device(const Tensor& t1, const Tensor& t2) {
-        if (t1.device != t2.device) {
+
+    [[nodiscard]] inline bool is_same_device(const Tensor& t1, const Tensor& t2) {
+        if (t1._device != t2._device) {
             return false;
         }
-        if (t1.device == Tensor::Device::CPU && t2.device == Tensor::Device::CPU) {
+        if (t1._device == Device::CPU && t2._device == Device::CPU) {
             return true;
         }
-        return (t1.gpu_id == t2.gpu_id);
-    }
-    inline bool is_same_shape(const Tensor& t1, const Tensor& t2) {
-        return (t1.ndim == t2.ndim) && std::equal(t1.shape, t1.shape + t1.ndim, t2.shape);
+        return (t1._gpu_id == t2._gpu_id);
     }
 
-    inline std::string shape_to_string(const Tensor& tensor) {
+    [[nodiscard]] inline bool is_same_shape(const Tensor& t1, const Tensor& t2) {
+        return (t1._ndim == t2._ndim) && std::equal(t1._shape, t1._shape + t1._ndim, t2._shape);
+    }
+
+    [[nodiscard]] inline Tensor make_slice(const Tensor& parent, const size_t dim, const size_t index) {
+        assert(parent._ndim > 1); // slicing a 1D tensor would produce a 0-dim scalar;
+        assert(dim < parent._ndim);
+        assert(index < parent._shape[dim]);
+
+        Tensor child = parent;
+        child._owns_data = false;
+
+        child._offset = parent._offset + index * parent._strides[dim];
+
+        for (size_t i = dim; i < parent._ndim - 1; ++i) {
+            child._shape[i]   = parent._shape[i + 1];
+            child._strides[i] = parent._strides[i + 1];
+        }
+        child._ndim  -= 1;
+        child._numel  = 1;
+        for (size_t i = 0; i < child._ndim; ++i)
+            child._numel *= child._shape[i];
+        child._nbytes = child._numel * Casting::dtype_size(child._dtype);
+
+        return child;
+    }
+
+    [[nodiscard]] inline std::string shape_to_string(const Tensor& tensor) {
         std::ostringstream os;
         os << "{";
-        for (uint32_t i = 0; i < tensor.ndim; ++i) {
-            os << tensor.shape[i];
-            if (i < tensor.ndim - 1) os << ", ";
+        for (uint32_t i = 0; i < tensor._ndim; ++i) {
+            os << tensor._shape[i];
+            if (i < tensor._ndim - 1) os << ", ";
         }
         os <<"}";
         return os.str();
     }
 
-    inline std::string to_string(const Tensor& tensor) {
+    [[nodiscard]] inline std::string to_string(const Tensor& tensor) {
         std::ostringstream os;
         os << "Tensor(shape=" << shape_to_string(tensor) << "\nstrides=[";
-        for (uint32_t i = 0; i < tensor.ndim; ++i) {
-            os << tensor.strides[i];
-            if (i < tensor.ndim - 1) os << ", ";
+        for (uint32_t i = 0; i < tensor._ndim; ++i) {
+            os << tensor._strides[i];
+            if (i < tensor._ndim - 1) os << ", ";
         }
-        os << "]\nbytes=[" << tensor.nbytes << "]";
+        os << "]\nbytes=[" << tensor._nbytes << "]";
         os << "\ndevice[";
-        if (tensor.device == Tensor::Device::CPU) {
+        if (tensor._device == Device::CPU) {
             os << "CPU";
         } else {
-            os << "GPU:" << tensor.gpu_id;
+            os << "GPU:" << tensor._gpu_id;
         }
         os << "]";
 
         return os.str();
     }
+    /*
+    *  template <typename T>
+  __global__ void my_kernel(T* data, size_t n) {
+
+    }
+
+void launch(DType dt, void* data, size_t n) {
+    switch (dt) {
+        case DType::Float32: my_kernel<float><<<...>>>(static_cast<float*>(data), n); break;
+        case DType::Float64: my_kernel<double><<<...>>>(static_cast<double*>(data), n); break;
+            // ...
+    }
 }
+     *
+     *
+     *
+     *
+    */
+    inline void convert_dtype(Tensor& t, const Casting::DType& new_dtype) {
+        if (t._dtype == new_dtype) return;
+        Tensor new_tensor = deep_copy(t);
+        new_tensor._dtype = new_dtype;
+
+        detail::launch_convert(t._dtype, new_dtype, t._data, new_tensor._data, new_tensor._numel);
+        free_tensor(&t);
+        new_tensor._nbytes = new_tensor._numel * Casting::dtype_size(new_dtype);
+        t = new_tensor;
+    }
+
+    inline void set_zero(const Tensor& t) {
+        if (t._device == Device::CPU) {
+            std::memset(t._data, 0, t._nbytes);
+        } else {
+            //TODO: Enable GPU Zero
+            assert(false);
+        }
+    }
+    inline void set_one(const Tensor& t) {
+        if (t._device == Device::CPU) {
+            std::memset(t._data, 1, t._nbytes);
+        } else {
+            // TODO: Enable GPU One
+            assert(false);
+        }
+    }
+    inline void set_random(const Tensor& t, const uint32_t seed = std::random_device()()) {
+        //TODO: Other DType support
+        assert(t._dtype == Casting::DType::Float32);
+        if (t._device == Device::CPU) {
+            auto rng = std::mt19937(seed);
+            //TODO: Parallize CPU and GPU fill
+            auto dist = std::uniform_real_distribution<float>(0.0f, 1.0f);
+            float* data = static_cast<float*>(t._data);
+            for (size_t i = 0; i < t._numel; ++i) {
+                data[i] = dist(rng);
+            }
+        } else {
+            // TODO: Enable gpu set_random
+            assert(false);
+        }
+    }
+    //TODO: Shared "SetRandom" detail
+    inline void set_random_minmax(const Tensor& t, const uint32_t seed = std::random_device()(), const double& min = 0.0, const double& max = 1.0) {
+        assert(min < max);
+        assert(max < MAXFLOAT); //TODO: Enable better support
+        assert(min > -MAXFLOAT); //TODO YEah this is awful, fix this.
+        //TODO: Other DType support
+        assert(t._dtype == Casting::DType::Float32);
+        if (t._device == Device::CPU) {
+            auto rng = std::mt19937(seed);
+            //TODO: Parallize CPU and GPU fill
+            auto dist = std::uniform_real_distribution<double>(min, max);
+            auto* data = static_cast<float*>(t._data);
+            for (size_t i = 0; i < t._numel; ++i) {
+                data[i] = static_cast<float>(dist(rng));
+            }
+        } else {
+            // TODO: Enable gpu set_random
+            assert(false);
+        }
+    }
+
+
+    [[nodiscard]] inline std::string print_tensor(Tensor &t) {
+        std::ostringstream os;
+        size_t idx = 0; //Required isolation for recursive
+        if (t._dtype == Casting::DType::Float32) {
+            detail::print_recursive(os, static_cast<float*>(t._data), t._shape, t._ndim, idx, 0);
+        } else if (t._dtype == Casting::DType::BFloat16) {
+            convert_dtype(t, Casting::DType::Float32);
+            detail::print_recursive(os, static_cast<float*>(t._data), t._shape, t._ndim, idx, 0);
+        } else {
+            //TODO: Fix
+            assert(false);
+        }
+        return os.str();
+    }
+}
+
