@@ -52,4 +52,5 @@ namespace BeanTensor::Hardware {
             "\nThreads: " + std::to_string(CPU().threads);
         return CPUString;
     }
+
 }

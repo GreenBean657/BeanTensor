@@ -1,6 +1,5 @@
 #pragma once
 
-#include <vector>
 #include <memory>
 #include <functional>
 #include "Dtypes.h"
@@ -28,6 +27,61 @@
 #endif
 
 namespace BeanTensor::Tensors::detail {
+
+    template<typename T>
+    void fill_random_impl(void* data, const size_t numel, const size_t seed, const double min, const double max) {
+        const auto threads = Hardware::CPU().threads;
+        auto* ptr = static_cast<T*>(data);
+        if constexpr (std::is_integral_v<T>) {
+
+            auto worker = [&](const size_t t_start, const size_t t_end, const size_t l_seed, const double t_min, const double t_max) {
+                thread_local std::mt19937 l_rng(l_seed);
+                thread_local auto dist = std::uniform_int_distribution(
+                static_cast<int64_t>(t_min),
+                static_cast<int64_t>(t_max));
+                for (size_t i = t_start; i < t_end; ++i) {
+                    ptr[i] = static_cast<T>(dist(l_rng));
+                }
+            };
+            if (numel <= threads * 64) {
+                worker(0, numel, seed, min, max);
+                return;
+            }
+            std::vector<std::thread> thread_pool(threads);
+            const size_t chunk_size = (numel + threads - 1) / threads;
+            for (size_t t = 0; t < threads; ++t) {
+                size_t t_start = t * chunk_size;
+                size_t t_end = std::min(t_start + chunk_size, numel);
+                thread_pool[t] = std::thread(worker, t_start, t_end, seed + t, min, max);
+            }
+            for (size_t t = 0; t < threads; ++t) {
+                thread_pool[t].join();
+            }
+        } else {
+            auto worker = [&](const size_t t_start, const size_t t_end, const size_t l_seed, const double t_min, const double t_max) {
+                thread_local std::mt19937 l_rng(l_seed);
+                thread_local auto dist = std::uniform_real_distribution<>(t_min, t_max);
+                for (size_t i = t_start; i < t_end; ++i) {
+                    ptr[i] = static_cast<T>(dist(l_rng));
+                }
+            };
+            if (numel <= threads * 64) {
+                worker(0, numel, seed, min, max);
+                return;
+            }
+            std::vector<std::thread> thread_pool(threads);
+            const size_t chunk_size = (numel + threads - 1) / threads;
+            for (size_t t = 0; t < threads; ++t) {
+                size_t t_start = t * chunk_size;
+                size_t t_end = std::min(t_start + chunk_size, numel);
+                thread_pool[t] = std::thread(worker, t_start, t_end, seed + t, min, max);
+            }
+            for (size_t t = 0; t < threads; ++t) {
+                thread_pool[t].join();
+            }
+        }
+    }
+
     template<typename T>
     void print_recursive(std::ostringstream& os, const T* data,
                      const size_t* shape, const size_t ndim,
@@ -312,33 +366,22 @@ namespace BeanTensor::Tensors {
 
         return os.str();
     }
-    /*
-    *  template <typename T>
-  __global__ void my_kernel(T* data, size_t n) {
 
-    }
-
-void launch(DType dt, void* data, size_t n) {
-    switch (dt) {
-        case DType::Float32: my_kernel<float><<<...>>>(static_cast<float*>(data), n); break;
-        case DType::Float64: my_kernel<double><<<...>>>(static_cast<double*>(data), n); break;
-            // ...
-    }
-}
-     *
-     *
-     *
-     *
-    */
     inline void convert_dtype(Tensor& t, const Casting::DType& new_dtype) {
         if (t._dtype == new_dtype) return;
-        Tensor new_tensor = deep_copy(t);
-        new_tensor._dtype = new_dtype;
-
-        detail::launch_convert(t._dtype, new_dtype, t._data, new_tensor._data, new_tensor._numel);
+        const size_t new_nbytes = t._numel * Casting::dtype_size(new_dtype);
+        void* dst = nullptr;
+        if (t._device == Device::CPU) {
+            dst = std::malloc(new_nbytes);
+            assert(dst != nullptr);
+        }
+        // TODO: GPU allocation
+        detail::launch_convert(t._dtype, new_dtype, t._data, dst, t._numel);
         free_tensor(&t);
-        new_tensor._nbytes = new_tensor._numel * Casting::dtype_size(new_dtype);
-        t = new_tensor;
+        t._data = dst;
+        t._dtype = new_dtype;
+        t._nbytes = new_nbytes;
+        t._owns_data = true;
     }
 
     inline void set_zero(const Tensor& t) {
@@ -357,41 +400,30 @@ void launch(DType dt, void* data, size_t n) {
             assert(false);
         }
     }
-    inline void set_random(const Tensor& t, const uint32_t seed = std::random_device()()) {
-        //TODO: Other DType support
-        assert(t._dtype == Casting::DType::Float32);
-        if (t._device == Device::CPU) {
-            auto rng = std::mt19937(seed);
-            //TODO: Parallize CPU and GPU fill
-            auto dist = std::uniform_real_distribution<float>(0.0f, 1.0f);
-            float* data = static_cast<float*>(t._data);
-            for (size_t i = 0; i < t._numel; ++i) {
-                data[i] = dist(rng);
-            }
-        } else {
-            // TODO: Enable gpu set_random
-            assert(false);
+    inline void set_random(const Tensor& t, const size_t seed = std::random_device()(), const double& min = 0.0, const double& max = 1.0) {
+        using FillFn = void(*)(void*, size_t, size_t, double, double);
+        using DType = Casting::DType;
+
+        static const std::unordered_map<DType, FillFn> fill_fns = {
+            {DType::Int8,    detail::fill_random_impl<int8_t>},
+            {DType::Int16,   detail::fill_random_impl<int16_t>},
+            {DType::Int32,   detail::fill_random_impl<int32_t>},
+            {DType::Int64,   detail::fill_random_impl<int64_t>},
+            {DType::UInt8,   detail::fill_random_impl<uint8_t>},
+            {DType::UInt16,  detail::fill_random_impl<uint16_t>},
+            {DType::UInt32,  detail::fill_random_impl<uint32_t>},
+            {DType::UInt64,  detail::fill_random_impl<uint64_t>},
+            {DType::Float16, detail::fill_random_impl<Casting::float16_t>},
+            {DType::BFloat16, detail::fill_random_impl<Casting::bfloat16_t>},
+            {DType::Float32, detail::fill_random_impl<float>},
+            {DType::Float64, detail::fill_random_impl<double>}
+        };
+        if (t._device != Device::CPU) {
+            assert(false); //TODO: GPU Support
         }
-    }
-    //TODO: Shared "SetRandom" detail
-    inline void set_random_minmax(const Tensor& t, const uint32_t seed = std::random_device()(), const double& min = 0.0, const double& max = 1.0) {
-        assert(min < max);
-        assert(max < MAXFLOAT); //TODO: Enable better support
-        assert(min > -MAXFLOAT); //TODO YEah this is awful, fix this.
-        //TODO: Other DType support
-        assert(t._dtype == Casting::DType::Float32);
-        if (t._device == Device::CPU) {
-            auto rng = std::mt19937(seed);
-            //TODO: Parallize CPU and GPU fill
-            auto dist = std::uniform_real_distribution<double>(min, max);
-            auto* data = static_cast<float*>(t._data);
-            for (size_t i = 0; i < t._numel; ++i) {
-                data[i] = static_cast<float>(dist(rng));
-            }
-        } else {
-            // TODO: Enable gpu set_random
-            assert(false);
-        }
+        const auto it = fill_fns.find(t._dtype);
+        assert(it != fill_fns.end());
+        it->second(t._data, t._numel, seed, min, max);
     }
 
 
