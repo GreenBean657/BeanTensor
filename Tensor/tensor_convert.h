@@ -18,6 +18,15 @@ namespace BeanTensor::Tensors::detail {
 
         auto worker = [&](const size_t start, const size_t end) {
             std::size_t i = start;
+
+            for (; i + 32 <= end; i += 32) {
+                __m256bh lo = _mm512_cvtneps_pbh(_mm512_loadu_ps(src + i));
+                __m256bh hi = _mm512_cvtneps_pbh(_mm512_loadu_ps(src + i + 16));
+                const auto packed = _mm512_inserti64x4(
+                    _mm512_castsi256_si512(reinterpret_cast<__m256i>(lo)), reinterpret_cast<__m256i>(hi), 1);
+                _mm512_storeu_si512(dst + i, packed);
+            }
+
             for ( ; i + 16 <= end; i += 16 ) {
                 const __m512 vec = _mm512_loadu_ps(src + i);
                 __m256bh result  = _mm512_cvtneps_pbh(vec);
@@ -31,13 +40,13 @@ namespace BeanTensor::Tensors::detail {
                 std::memcpy(&dst[i], &raw, sizeof(raw));
             }
         };
-        // TODO: Benchmark other modes
+        // TODO: Benchmark other thread thresholds
         if (n <= t * 64) {
             worker(0, n);
             return;
         }
         std::vector<std::thread> threads(t);
-        const size_t chunk_size = (n + t - 1) / t;
+        const size_t chunk_size = ((n / t + 15) / 16) * 16;
         for (size_t thread_id = 0; thread_id < t; ++thread_id) {
             size_t start = thread_id * chunk_size;
             size_t end = std::min(start + chunk_size, n);
@@ -67,7 +76,7 @@ namespace BeanTensor::Tensors::detail {
         }
 
         std::vector<std::thread> threads(t);
-        const size_t chunk_size = (n + t - 1) / t;
+        const size_t chunk_size = ((n / t + 15) / 16) * 16;
         for (size_t thread_id = 0; thread_id < t; ++thread_id) {
             size_t start = thread_id * chunk_size;
             size_t end = std::min(start + chunk_size, n);
@@ -97,12 +106,12 @@ namespace BeanTensor::Tensors::detail {
                 dst[i] = std::bit_cast<float>(bits);
             }
         };
-        if (n <= t * 64) {
+        if (n <= t * (sizeof(float) * 16)) {
             worker(0, n);
             return;
         }
-        std::vector<std::thread> threads(t);
-        const size_t chunk_size = (n + t - 1) / t;
+        static std::vector<std::thread> threads(t);
+        const size_t chunk_size = ((n / t + 15) / 16) * 16;
         for (size_t thread_id = 0; thread_id < t; ++thread_id) {
             size_t start = thread_id * chunk_size;
             size_t end = std::min(start + chunk_size, n);

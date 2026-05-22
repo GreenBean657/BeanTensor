@@ -1,0 +1,1 @@
+perf stat -e cache-misses,cache-references cmake-build-debug/BeanTensorV4

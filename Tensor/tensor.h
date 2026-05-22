@@ -1,5 +1,6 @@
 #pragma once
-
+#define BT_TENSOR_MAX_DIMS 8 // PUT BEFORE INCLUDES
+#define BT_TENSOR_MAX_PARENTS 3 // THIS HAS TO BE AT THE TOP
 #include <memory>
 #include <functional>
 #include "Dtypes.h"
@@ -9,9 +10,6 @@
 #include <cstdlib>
 #include <sstream>
 #include <stdexcept>
-
-#define BT_TENSOR_MAX_DIMS 8
-#define BT_TENSOR_MAX_PARENTS 3
 #include <iostream>
 #include <random>
 
@@ -31,9 +29,26 @@ namespace BeanTensor::Tensors::detail {
     template<typename T>
     void fill_random_impl(void* data, const size_t numel, const size_t seed, const double min, const double max) {
         const auto threads = Hardware::CPU().threads;
+        const static std::string err = "Random number generation range is out of supported range";
         auto* ptr = static_cast<T*>(data);
+        if constexpr (std::is_same_v<T, Casting::bfloat16_t> || std::is_same_v<T, Casting::float16_t>) {
+            if constexpr (std::is_same_v<T, Casting::bfloat16_t>) {
+                if (min < Casting::detail::BF16_MIN || max > Casting::detail::BF16_MAX) {
+                    throw std::invalid_argument(err);
+                }
+            } else {
+                if (min < Casting::detail::F16_MIN || max > Casting::detail::F16_MAX) {
+                    throw std::invalid_argument(err);
+                }
+            }
+        } else {
+            auto max_supported = std::numeric_limits<T>::max();
+            auto min_supported = std::numeric_limits<T>::lowest();
+            if (min < min_supported || max > max_supported) {
+                throw std::invalid_argument(err);
+            }
+        }
         if constexpr (std::is_integral_v<T>) {
-
             auto worker = [&](const size_t t_start, const size_t t_end, const size_t l_seed, const double t_min, const double t_max) {
                 thread_local std::mt19937 l_rng(l_seed);
                 thread_local auto dist = std::uniform_int_distribution(
@@ -82,19 +97,30 @@ namespace BeanTensor::Tensors::detail {
         }
     }
 
+    inline void compute_strides(const size_t* shape, size_t* strides, const uint32_t ndim) {
+        strides[ndim - 1] = 1;
+        for (int i = static_cast<int>(ndim) - 2; i >= 0; --i)
+            strides[i] = strides[i + 1] * shape[i + 1];
+    }
+
     template<typename T>
-    void print_recursive(std::ostringstream& os, const T* data,
+    void print_recursive(std::ostringstream& os, const void* data,
                      const size_t* shape, const size_t ndim,
                      size_t& idx, const size_t depth) {
+        const T* ptr = static_cast<const T*>(data);
         os << "[";
         if (ndim == 1) {
             for (size_t i = 0; i < shape[0]; ++i) {
-                os << data[idx++];
+                if constexpr (std::is_same_v<T, Casting::bfloat16_t> || std::is_same_v<T, Casting::float16_t>) {
+                    os << static_cast<float>(ptr[idx++]);
+                } else {
+                    os << ptr[idx++];
+                }
                 if (i < shape[0] - 1) os << ", ";
             }
         } else {
             for (size_t i = 0; i < shape[0]; ++i) {
-                print_recursive(os, data, shape + 1, ndim - 1, idx, depth + 1);
+                print_recursive<T>(os, ptr, shape + 1, ndim - 1, idx, depth + 1);
                 if (i < shape[0] - 1) os << ",\n" << std::string(depth + 1, ' ');
             }
         }
@@ -147,10 +173,14 @@ namespace BeanTensor::Tensors {
 
         Tensor() = default;
         // Declare only — no body yet
-        Tensor(const size_t* shape, uint32_t ndim,
-               Casting::DType dtype = Casting::DType::Float32,
-               Device device = Device::CPU,
-               bool requires_grad = false);
+        explicit Tensor(const std::vector<size_t>& shape,
+                        Casting::DType dtype = Casting::DType::Float32,
+                        Device device = Device::CPU,
+                        bool requires_grad = false);
+
+        Tensor(const std::vector<size_t> &shape, uint32_t ndim, Casting::DType dtype, Device device,
+               bool requires_grad);
+
     };
 
 
@@ -162,36 +192,41 @@ namespace BeanTensor::Tensors {
         size_t _n_saved;
     };
 
-    inline void _compute_strides(const size_t* shape, size_t* strides, const uint32_t ndim) {
-        strides[ndim - 1] = 1;
-        for (int i = static_cast<int>(ndim) - 2; i >= 0; --i)
-            strides[i] = strides[i + 1] * shape[i + 1];
-    }
 
     /* Returns a byte pointer to the start of the tensor's data, accounting for element offset */
-    inline std::byte* data_ptr(const Tensor& t) {
+    [[nodiscard]] inline std::byte* data_ptr(const Tensor& t) {
         return static_cast<std::byte*>(t._data) + t._offset * Casting::dtype_size(t._dtype);
     }
 
-    /* Get a value at a tensor based on idx (tensor[1][4] = {1, 4})*/
+
+    /*
+    /* Get a value at a tensor based on idx (tensor[1][4] = {1, 4})
     template<typename T>
-    T* at_location(Tensor* tensor, const std::initializer_list<int> idx) {
-        assert(static_cast<int>(idx.size()) == tensor->_ndim);
+    [[nodiscard]] T* at(Tensor* tensor, const std::initializer_list<size_t> idx) {
+        if (idx.size() != tensor->_ndim) {
+            throw std::invalid_argument("Tensor index size does not match tensor dimensions");
+        }
         auto* base = static_cast<T*>(tensor->_data) + tensor->_offset;
-        for (unsigned int i = 0; i < tensor->_ndim; ++i) {
-            assert(idx.begin()[i] >= 0 && idx.begin()[i] < tensor->_shape[i]);
-            base += idx.begin()[i] * tensor->_strides[i];
+        for (size_t i = 0; i < tensor->_ndim; ++i) {
+            if (idx.begin()[i] < tensor->_shape[i]) {
+                base += idx.begin()[i] * tensor->_strides[i];
+                continue;
+            }
+            throw std::invalid_argument("Tensor index size goes out of bounds.");
+
         }
         return base;
     }
+    */
+
 
     /* Make a new tensor */
-    inline Tensor make_tensor(const size_t* shape,
-        const uint32_t ndim,
+    [[nodiscard]] inline Tensor make_tensor(const std::vector<size_t>& shape,
         const Casting::DType dtype = Casting::DType::Float32,
         const Device device = Device::CPU,
         const bool requires_grad = false
         ) {
+        const size_t ndim = shape.size();
         if (ndim == 0 || ndim > BT_TENSOR_MAX_DIMS) {
             throw std::invalid_argument("Tensor dimension exceeds maximum supported dimensions");
         }
@@ -209,7 +244,7 @@ namespace BeanTensor::Tensors {
         }
         new_tensor._nbytes = new_tensor._numel * (Casting::dtype_size(dtype));
 
-        _compute_strides(new_tensor._shape, new_tensor._strides, new_tensor._ndim);
+        detail::compute_strides(new_tensor._shape, new_tensor._strides, new_tensor._ndim);
 
         if (device == Device::CPU) {
             new_tensor._data = std::malloc(new_tensor._nbytes);
@@ -232,8 +267,8 @@ namespace BeanTensor::Tensors {
         return new_tensor;
     }
 
-    inline Tensor::Tensor(const size_t *shape, const uint32_t ndim, const Casting::DType dtype, const Device device, const bool requires_grad) {
-        *this = make_tensor(shape, ndim, dtype, device, requires_grad);
+    inline Tensor::Tensor(const std::vector<size_t>& shape, const uint32_t ndim, const Casting::DType dtype, const Device device, const bool requires_grad) {
+        *this = make_tensor(shape, dtype, device, requires_grad);
     }
 
 
@@ -356,7 +391,7 @@ namespace BeanTensor::Tensors {
             if (i < tensor._ndim - 1) os << ", ";
         }
         os << "]\nbytes=[" << tensor._nbytes << "]";
-        os << "\ndevice[";
+        os << "\ndevice=[";
         if (tensor._device == Device::CPU) {
             os << "CPU";
         } else {
@@ -392,15 +427,7 @@ namespace BeanTensor::Tensors {
             assert(false);
         }
     }
-    inline void set_one(const Tensor& t) {
-        if (t._device == Device::CPU) {
-            std::memset(t._data, 1, t._nbytes);
-        } else {
-            // TODO: Enable GPU One
-            assert(false);
-        }
-    }
-    inline void set_random(const Tensor& t, const size_t seed = std::random_device()(), const double& min = 0.0, const double& max = 1.0) {
+    inline void set_random(const Tensor& t, const double& min = 0.0, const double& max = 1.0, const size_t seed = std::random_device()()) {
         using FillFn = void(*)(void*, size_t, size_t, double, double);
         using DType = Casting::DType;
 
@@ -425,20 +452,45 @@ namespace BeanTensor::Tensors {
         assert(it != fill_fns.end());
         it->second(t._data, t._numel, seed, min, max);
     }
-
-
-    [[nodiscard]] inline std::string print_tensor(Tensor &t) {
-        std::ostringstream os;
-        size_t idx = 0; //Required isolation for recursive
-        if (t._dtype == Casting::DType::Float32) {
-            detail::print_recursive(os, static_cast<float*>(t._data), t._shape, t._ndim, idx, 0);
-        } else if (t._dtype == Casting::DType::BFloat16) {
-            convert_dtype(t, Casting::DType::Float32);
-            detail::print_recursive(os, static_cast<float*>(t._data), t._shape, t._ndim, idx, 0);
+    inline void set_one(const Tensor& t) {
+        if (t._device == Device::CPU) {
+            set_random(t, 1.0, 1.0);
         } else {
-            //TODO: Fix
+            // TODO: Enable GPU One
             assert(false);
         }
+    }
+
+
+    [[nodiscard]] inline std::string print_tensor(const Tensor &t) {
+        std::ostringstream os;
+
+        using PrintFn = void(*)(std::ostringstream&, const void*, const size_t*, const size_t, size_t&, size_t);
+        using DType = Casting::DType;
+
+        static const std::unordered_map<DType, PrintFn> print_fns = {
+            {DType::Int8,    detail::print_recursive<int8_t>},
+            {DType::Int16,   detail::print_recursive<int16_t>},
+            {DType::Int32,   detail::print_recursive<int32_t>},
+            {DType::Int64,   detail::print_recursive<int64_t>},
+            {DType::UInt8,   detail::print_recursive<uint8_t>},
+            {DType::UInt16,  detail::print_recursive<uint16_t>},
+            {DType::UInt32,  detail::print_recursive<uint32_t>},
+            {DType::UInt64,  detail::print_recursive<uint64_t>},
+            {DType::Float16, detail::print_recursive<Casting::float16_t>},
+            {DType::BFloat16, detail::print_recursive<Casting::bfloat16_t>},
+            {DType::Float32, detail::print_recursive<float>},
+            {DType::Float64, detail::print_recursive<double>}
+        };
+        if (t._device == Device::CPU) {
+            size_t idx = 0; //Required isolation for recursive
+            const auto it = print_fns.find(t._dtype);
+            if (it == print_fns.end()) {
+                throw std::invalid_argument("Tensor dtype not supported for printing");
+            }
+            it->second(os, t._data, t._shape, t._ndim, idx, 0);
+        }
+
         return os.str();
     }
 }
