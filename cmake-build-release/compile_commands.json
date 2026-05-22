@@ -1,0 +1,26 @@
+[
+{
+  "directory": "/mnt/schoolwork/BeanTensorV4/cmake-build-release",
+  "command": "/opt/rocm-7.2.0/lib/llvm/bin/clang++  -DFMA_INSTS_PATH=\\\"/mnt/schoolwork/BeanTensorV4/cmake-build-release/fma_insts.bin\\\" -DFMA_XCLBIN_PATH=\\\"/mnt/schoolwork/BeanTensorV4/cmake-build-release/fma.xclbin\\\" -DUSE_HIP -DUSE_NPU_STRIXHALO -DUSE_PROF_API=1 -D__HIP_PLATFORM_AMD__=1 -D__HIP_ROCclr__=1 -I/mnt/schoolwork/BeanTensorV4 -I/mnt/schoolwork/BeanTensorV4/Compilers/ironenv/lib/python3.10/site-packages/mlir_aie/include -I/mnt/schoolwork/BeanTensorV4/NPU -O3 -DNDEBUG -std=gnu++23 --offload-arch=gfx1151 -fcolor-diagnostics -mavx512f -mavx512bf16 -o CMakeFiles/BeanTensorV4.dir/main.cpp.o -x hip -c /mnt/schoolwork/BeanTensorV4/main.cpp",
+  "file": "/mnt/schoolwork/BeanTensorV4/main.cpp",
+  "output": "/mnt/schoolwork/BeanTensorV4/cmake-build-release/CMakeFiles/BeanTensorV4.dir/main.cpp.o"
+},
+{
+  "directory": "/mnt/schoolwork/BeanTensorV4/cmake-build-release",
+  "command": "/usr/bin/c++ -DFMA_INSTS_PATH=\\\"/mnt/schoolwork/BeanTensorV4/cmake-build-release/fma_insts.bin\\\" -DFMA_XCLBIN_PATH=\\\"/mnt/schoolwork/BeanTensorV4/cmake-build-release/fma.xclbin\\\" -DUSE_HIP -DUSE_NPU_STRIXHALO -DUSE_PROF_API=1 -D__HIP_PLATFORM_AMD__=1 -I/mnt/schoolwork/BeanTensorV4 -I/mnt/schoolwork/BeanTensorV4/Compilers/ironenv/lib/python3.10/site-packages/mlir_aie/include -I/mnt/schoolwork/BeanTensorV4/NPU -isystem /opt/rocm/include -O3 -DNDEBUG -std=gnu++23 -fdiagnostics-color=always -mavx512f -mavx512bf16 -o CMakeFiles/BeanTensorV4.dir/NPU/NPUBackend.cpp.o -c /mnt/schoolwork/BeanTensorV4/NPU/NPUBackend.cpp",
+  "file": "/mnt/schoolwork/BeanTensorV4/NPU/NPUBackend.cpp",
+  "output": "/mnt/schoolwork/BeanTensorV4/cmake-build-release/CMakeFiles/BeanTensorV4.dir/NPU/NPUBackend.cpp.o"
+},
+{
+  "directory": "/mnt/schoolwork/BeanTensorV4/cmake-build-release",
+  "command": "/usr/bin/c++ -DFMA_INSTS_PATH=\\\"/mnt/schoolwork/BeanTensorV4/cmake-build-release/fma_insts.bin\\\" -DFMA_XCLBIN_PATH=\\\"/mnt/schoolwork/BeanTensorV4/cmake-build-release/fma.xclbin\\\" -DUSE_HIP -DUSE_NPU_STRIXHALO -DUSE_PROF_API=1 -D__HIP_PLATFORM_AMD__=1 -I/mnt/schoolwork/BeanTensorV4 -I/mnt/schoolwork/BeanTensorV4/Compilers/ironenv/lib/python3.10/site-packages/mlir_aie/include -I/mnt/schoolwork/BeanTensorV4/NPU -isystem /opt/rocm/include -O3 -DNDEBUG -std=gnu++23 -fdiagnostics-color=always -mavx512f -mavx512bf16 -o CMakeFiles/BeanTensorV4.dir/Ops/Elementwise/Add/cpu_Add.cpp.o -c /mnt/schoolwork/BeanTensorV4/Ops/Elementwise/Add/cpu_Add.cpp",
+  "file": "/mnt/schoolwork/BeanTensorV4/Ops/Elementwise/Add/cpu_Add.cpp",
+  "output": "/mnt/schoolwork/BeanTensorV4/cmake-build-release/CMakeFiles/BeanTensorV4.dir/Ops/Elementwise/Add/cpu_Add.cpp.o"
+},
+{
+  "directory": "/mnt/schoolwork/BeanTensorV4/cmake-build-release",
+  "command": "/usr/bin/c++ -I/mnt/schoolwork/BeanTensorV4 -O3 -DNDEBUG -std=gnu++23 -fdiagnostics-color=always -o CMakeFiles/BeanTensorV4Tests.dir/tests/tensor_tests.cpp.o -c /mnt/schoolwork/BeanTensorV4/tests/tensor_tests.cpp",
+  "file": "/mnt/schoolwork/BeanTensorV4/tests/tensor_tests.cpp",
+  "output": "/mnt/schoolwork/BeanTensorV4/cmake-build-release/CMakeFiles/BeanTensorV4Tests.dir/tests/tensor_tests.cpp.o"
+}
+]

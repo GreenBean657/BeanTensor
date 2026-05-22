@@ -25,7 +25,6 @@
 #endif
 
 namespace BeanTensor::Tensors::detail {
-
     template<typename T>
     void fill_random_impl(void* data, const size_t numel, const size_t seed, const double min, const double max) {
         const auto threads = Hardware::CPU().threads;

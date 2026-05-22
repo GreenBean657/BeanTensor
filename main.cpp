@@ -21,7 +21,7 @@ double run_bench_tops(Fn fn, int iterations, size_t N, size_t ops) {
     const double tops      = total_ops / elapsed / 1e12;
     return tops;
 }
-
+using namespace BeanTensor;
 int main() {
     size_t n[2] = {2, 2};
     size_t ndim     = 2;
@@ -32,7 +32,7 @@ int main() {
     Tensors::Tensor a = Tensors::make_tensor({2048, 2048, 16}, Casting::DType::Float32, Tensors::Device::CPU, false);
     set_random(a, 0.0, 1.0, 42);
     const auto tops = run_bench_tops([&]() {
-        Tensors::convert_dtype(a, Casting::DType::BFloat16);
+        Tensors::convert_dtype(a, BeanTensor::Casting::DType::BFloat16);
         Tensors::convert_dtype(a, Casting::DType::Float32);
     }, 1000, 4, 2);
     std::cout << "Done" << std::endl;

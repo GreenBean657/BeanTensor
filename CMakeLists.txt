@@ -123,6 +123,7 @@ add_executable(BeanTensorV4
         Ops/Elementwise/Add/cpu_Add.cpp
         Tensor/tensor_convert.h
         Tensor/tensor.h
+        Helper/hardware.h
 )
 
 set_source_files_properties(main.cpp PROPERTIES LANGUAGE HIP)
