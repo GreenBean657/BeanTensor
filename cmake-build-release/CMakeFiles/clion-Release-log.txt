@@ -1,9 +1,0 @@
-/home/greenbean/.local/share/JetBrains/Toolbox/apps/clion/bin/cmake/linux/x64/bin/cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_MAKE_PROGRAM=/home/greenbean/.local/share/JetBrains/Toolbox/apps/clion/bin/ninja/linux/x64/ninja -G Ninja -S /mnt/schoolwork/BeanTensorV4 -B /mnt/schoolwork/BeanTensorV4/cmake-build-release
--- XRT include : /usr/include
--- AIE include : /mnt/schoolwork/BeanTensorV4/Compilers/ironenv/lib/python3.10/site-packages/mlir_aie/include
--- MLIR-AIE    : /mnt/schoolwork/BeanTensorV4/Compilers/ironenv/lib/python3.10/site-packages/mlir_aie
--- Peano       : /mnt/schoolwork/BeanTensorV4/Compilers/ironenv/lib/python3.10/site-packages/llvm-aie/bin/clang++
--- Python      : /mnt/schoolwork/BeanTensorV4/Compilers/ironenv/bin/python3
--- Configuring done (0.1s)
--- Generating done (0.0s)
--- Build files have been written to: /mnt/schoolwork/BeanTensorV4/cmake-build-release
