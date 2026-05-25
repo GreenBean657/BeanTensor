@@ -1,6 +1,6 @@
 #pragma once
 #include "Helper/Broadcast/Broadcast.h"
-#include "Tensor/tensor.h"
+#include "Tensor/Tensor.h"
 #include "Tensor/Dtypes.h"
 
 using namespace BeanTensor;

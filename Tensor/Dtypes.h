@@ -1,9 +1,12 @@
 #pragma once
 #include <cassert>
 #include <cstdint>
+#include <cstring>
 #include <string>
 
+#include "../../../../opt/rocm-7.2.0/include/hip/amd_detail/amd_hip_fp16.h"
 
+//&& defined(__clang__)
 #if defined(USE_HIP) && defined(__clang__)
 #include <hip/hip_fp16.h>
 #include <hip/hip_bf16.h>
@@ -17,10 +20,14 @@ namespace BeanTensor::Casting {
     using float16_t  = __half;
     using bfloat16_t = __hip_bfloat16;
 
+    inline float to_float(const bfloat16_t x) { return static_cast<float>(x); }
+    inline float to_float(const float16_t x)  { return __half2float(x); }
+
 #elif defined(USE_CUDA)
     using float16_t  = __half;
     using bfloat16_t = __nv_bfloat16;
-
+    inline float to_float(const bfloat16_t x) { return __bfloat162float(x); }
+    inline float to_float(const float16_t x)  { return __half2float(x); }
 #else
     enum class float16_t  : uint16_t {};
     enum class bfloat16_t : uint16_t {};
@@ -29,6 +36,30 @@ namespace BeanTensor::Casting {
 
     inline float16_t  as_f16 (uint16_t x) { return static_cast<float16_t> (x); }
     inline bfloat16_t as_bf16(uint16_t x) { return static_cast<bfloat16_t>(x); }
+
+    inline float to_float(const bfloat16_t x) {
+        const uint32_t expanded = static_cast<uint32_t>(raw(x)) << 16;
+        float result;
+        std::memcpy(&result, &expanded, sizeof(result));
+        return result;
+    }
+    inline float to_float(const float16_t x) {
+        const uint16_t bits = raw(x);
+        const uint32_t sign     = (bits & 0x8000u) << 16;
+        const uint32_t exponent = (bits & 0x7C00u) >> 10;
+        const uint32_t mantissa = (bits & 0x03FFu);
+        uint32_t expanded;
+        if (exponent == 31u) {
+            expanded = sign | 0x7F800000u | (mantissa << 13);
+        } else if (exponent == 0u) {
+            expanded = sign | (mantissa << 13);
+        } else {
+            expanded = sign | ((exponent + 112u) << 23) | (mantissa << 13);
+        }
+        float result;
+        std::memcpy(&result, &expanded, sizeof(result));
+        return result;
+    }
 #endif
     using float32_t = float;
     using float64_t = double;
@@ -129,13 +160,11 @@ namespace BeanTensor::Casting::detail {
             case DType::UInt64: return 13;
 
 
-            default: return -1;
+            default: {
+                __builtin_unreachable();
+            }
         }
     }
-    inline bool operator>(const DType& a, const DType& b) {
-        return a >= b;
-    }
-
     inline bool operator<(const DType& a, const DType& b) {
         if (a == b) return false;
 

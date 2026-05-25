@@ -3,7 +3,7 @@
 #include <iostream>
 #include <string>
 
-#include "Tensor/tensor.h"
+#include "Tensor/Tensor.h"
 
 using BeanTensor::Casting::DType;
 using BeanTensor::Tensors::Tensor;

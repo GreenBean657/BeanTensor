@@ -1,5 +1,5 @@
 #pragma once
-#include "Tensor/tensor.h"
+#include "Tensor/Tensor.h"
 #include <cstddef>
 
 namespace BeanTensor::Helpers {

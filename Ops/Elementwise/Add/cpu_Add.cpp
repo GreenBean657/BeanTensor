@@ -1,5 +1,5 @@
 #include "cpu_Add.h"
-
+/*
 namespace BeanTensor::Ops::detail::Add {
 
     void add_cpu_int8(const Tensors::Tensor& t1, const Tensors::Tensor& t2, Tensors::Tensor& returnedTensor) {
@@ -38,3 +38,4 @@ namespace BeanTensor::Ops::detail::Add {
     void add_cpu_fp64(const Tensors::Tensor& t1, const Tensors::Tensor& t2, Tensors::Tensor& returnedTensor) {}
 
 }
+*/

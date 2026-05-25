@@ -1,5 +1,5 @@
 #pragma once
-#include "Tensor/tensor.h"
+#include "Tensor/Tensor.h"
 
 /*
 *    enum class DType {
@@ -17,7 +17,7 @@ UInt16,
 UInt8
 };
 */
-
+/*
 namespace BeanTensor::Ops::detail::Add {
     void add_cpu_int8(const Tensors::Tensor& t1, const Tensors::Tensor& t2, Tensors::Tensor& returnedTensor);
     void add_cpu_int16(const Tensors::Tensor& t1, const Tensors::Tensor& t2, Tensors::Tensor& returnedTensor);
@@ -32,3 +32,4 @@ namespace BeanTensor::Ops::detail::Add {
     void add_cpu_fp32(const Tensors::Tensor& t1, const Tensors::Tensor& t2, Tensors::Tensor& returnedTensor);
     void add_cpu_fp64(const Tensors::Tensor& t1, const Tensors::Tensor& t2, Tensors::Tensor& returnedTensor);
 }
+*/

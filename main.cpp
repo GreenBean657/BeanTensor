@@ -4,12 +4,10 @@
 #include <cstring>
 #include <immintrin.h>
 
-#include "Tensor/Dtypes.h"
-#include "Tensor/Dtypes.h"
-#include "Tensor/tensor.h"
-
+#include "Tensor/Tensor.h"
+/*
 template<typename Fn>
-double run_bench_tops(Fn fn, int iterations, size_t N, size_t ops) {
+double run_bench_tops(Fn fn, const int iterations, const size_t N, const size_t ops) {
     for (int i = 0; i < 10; i++) fn();  // warmup
 
     const auto t0 = std::chrono::high_resolution_clock::now();
@@ -22,20 +20,33 @@ double run_bench_tops(Fn fn, int iterations, size_t N, size_t ops) {
     return tops;
 }
 using namespace BeanTensor;
+#include <cstdio>
+
 int main() {
-    size_t n[2] = {2, 2};
-    size_t ndim     = 2;
+    constexpr size_t N = 2048 * 2048 * 16;
+    auto b = BeanTensor::Tensors::Tensor({N}, Casting::DType::Float32,
+                                          Tensors::Device::CPU, false);
+    b.set_one();
+    std::cout << b.contents_to_string() << std::endl;
 
-
-    const Tensors::Tensor b = Tensors::make_tensor(std::vector<size_t>({2, 2}), Casting::DType::UInt32, Tensors::Device::CPU, false);
-    Tensors::set_random(b, 1, 2, 20);
-    Tensors::Tensor a = Tensors::make_tensor({2048, 2048, 16}, Casting::DType::Float32, Tensors::Device::CPU, false);
-    set_random(a, 0.0, 1.0, 42);
     const auto tops = run_bench_tops([&]() {
-        Tensors::convert_dtype(a, BeanTensor::Casting::DType::BFloat16);
-        Tensors::convert_dtype(a, Casting::DType::Float32);
-    }, 1000, 4, 2);
-    std::cout << "Done" << std::endl;
+        b.convert_dtype(Casting::DType::BFloat16);
+        b.convert_dtype(Casting::DType::Float32);
+    }, 100, N, 2);
+    std::cout << "Done, FP16:" << std::endl;
+    std::cout << b.contents_to_string() << std::endl;
     std::cout << tops << " TFLOPS" << std::endl;
 }
- 
+*/
+using namespace BeanTensor;
+int main() {
+    auto b = Tensors::Tensor({2, 3}, Casting::DType::Float32, Tensors::Device::CPU, false);
+    b.random(0, 2, 42);
+    std::cout << "Original on CPU:" << std::endl;
+    std::cout << b.contents_to_string() << std::endl;
+    b.to(Tensors::Device::GPU);
+    b.sync();
+    std::cout << "Back to CPU:" << std::endl;
+    b.to(Tensors::Device::CPU);
+    std::cout << b.contents_to_string() << std::endl;
+}

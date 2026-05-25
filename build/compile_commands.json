@@ -1,0 +1,32 @@
+[
+{
+  "directory": "/mnt/schoolwork/BeanTensorV4/build",
+  "command": "/opt/rocm-7.2.0/lib/llvm/bin/clang++  -DFMA_INSTS_PATH=\\\"/mnt/schoolwork/BeanTensorV4/build/fma_insts.bin\\\" -DFMA_XCLBIN_PATH=\\\"/mnt/schoolwork/BeanTensorV4/build/fma.xclbin\\\" -DUSE_HIP -DUSE_NPU_STRIXHALO -DUSE_PROF_API=1 -D__HIP_PLATFORM_AMD__=1 -D__HIP_ROCclr__=1 -I/mnt/schoolwork/BeanTensorV4 -I/mnt/schoolwork/BeanTensorV4/Compilers/ironenv/lib/python3.10/site-packages/mlir_aie/include -I/mnt/schoolwork/BeanTensorV4/NPU -std=gnu++23 --offload-arch=gfx1151 -mavx512f -mavx512bf16 -mf16c -o CMakeFiles/BeanTensorV4.dir/main.cpp.o -x hip -c /mnt/schoolwork/BeanTensorV4/main.cpp",
+  "file": "/mnt/schoolwork/BeanTensorV4/main.cpp",
+  "output": "CMakeFiles/BeanTensorV4.dir/main.cpp.o"
+},
+{
+  "directory": "/mnt/schoolwork/BeanTensorV4/build",
+  "command": "/usr/bin/c++ -DFMA_INSTS_PATH=\\\"/mnt/schoolwork/BeanTensorV4/build/fma_insts.bin\\\" -DFMA_XCLBIN_PATH=\\\"/mnt/schoolwork/BeanTensorV4/build/fma.xclbin\\\" -DUSE_HIP -DUSE_NPU_STRIXHALO -DUSE_PROF_API=1 -D__HIP_PLATFORM_AMD__=1 -I/mnt/schoolwork/BeanTensorV4 -I/mnt/schoolwork/BeanTensorV4/Compilers/ironenv/lib/python3.10/site-packages/mlir_aie/include -I/mnt/schoolwork/BeanTensorV4/NPU -isystem /opt/rocm/include -std=gnu++23 -mavx512f -mavx512bf16 -mf16c -o CMakeFiles/BeanTensorV4.dir/Ops/Elementwise/Add/cpu_Add.cpp.o -c /mnt/schoolwork/BeanTensorV4/Ops/Elementwise/Add/cpu_Add.cpp",
+  "file": "/mnt/schoolwork/BeanTensorV4/Ops/Elementwise/Add/cpu_Add.cpp",
+  "output": "CMakeFiles/BeanTensorV4.dir/Ops/Elementwise/Add/cpu_Add.cpp.o"
+},
+{
+  "directory": "/mnt/schoolwork/BeanTensorV4/build",
+  "command": "/usr/bin/c++ -DFMA_INSTS_PATH=\\\"/mnt/schoolwork/BeanTensorV4/build/fma_insts.bin\\\" -DFMA_XCLBIN_PATH=\\\"/mnt/schoolwork/BeanTensorV4/build/fma.xclbin\\\" -DUSE_HIP -DUSE_NPU_STRIXHALO -DUSE_PROF_API=1 -D__HIP_PLATFORM_AMD__=1 -I/mnt/schoolwork/BeanTensorV4 -I/mnt/schoolwork/BeanTensorV4/Compilers/ironenv/lib/python3.10/site-packages/mlir_aie/include -I/mnt/schoolwork/BeanTensorV4/NPU -isystem /opt/rocm/include -std=gnu++23 -mavx512f -mavx512bf16 -mf16c -o CMakeFiles/BeanTensorV4.dir/Tensor/Tensor.cpp.o -c /mnt/schoolwork/BeanTensorV4/Tensor/Tensor.cpp",
+  "file": "/mnt/schoolwork/BeanTensorV4/Tensor/Tensor.cpp",
+  "output": "CMakeFiles/BeanTensorV4.dir/Tensor/Tensor.cpp.o"
+},
+{
+  "directory": "/mnt/schoolwork/BeanTensorV4/build",
+  "command": "/usr/bin/c++ -DFMA_INSTS_PATH=\\\"/mnt/schoolwork/BeanTensorV4/build/fma_insts.bin\\\" -DFMA_XCLBIN_PATH=\\\"/mnt/schoolwork/BeanTensorV4/build/fma.xclbin\\\" -DUSE_HIP -DUSE_NPU_STRIXHALO -DUSE_PROF_API=1 -D__HIP_PLATFORM_AMD__=1 -I/mnt/schoolwork/BeanTensorV4 -I/mnt/schoolwork/BeanTensorV4/Compilers/ironenv/lib/python3.10/site-packages/mlir_aie/include -I/mnt/schoolwork/BeanTensorV4/NPU -isystem /opt/rocm/include -x c++ -std=gnu++23 -mavx512f -mavx512bf16 -mf16c -o CMakeFiles/BeanTensorV4.dir/Tensor/TensorOps.hip.o -c /mnt/schoolwork/BeanTensorV4/Tensor/TensorOps.hip",
+  "file": "/mnt/schoolwork/BeanTensorV4/Tensor/TensorOps.hip",
+  "output": "CMakeFiles/BeanTensorV4.dir/Tensor/TensorOps.hip.o"
+},
+{
+  "directory": "/mnt/schoolwork/BeanTensorV4/build",
+  "command": "/usr/bin/c++  -I/mnt/schoolwork/BeanTensorV4 -std=gnu++23 -o CMakeFiles/BeanTensorV4Tests.dir/tests/tensor_tests.cpp.o -c /mnt/schoolwork/BeanTensorV4/tests/tensor_tests.cpp",
+  "file": "/mnt/schoolwork/BeanTensorV4/tests/tensor_tests.cpp",
+  "output": "CMakeFiles/BeanTensorV4Tests.dir/tests/tensor_tests.cpp.o"
+}
+]

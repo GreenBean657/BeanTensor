@@ -1,13 +1,43 @@
 cmake_minimum_required(VERSION 3.25)
-project(BeanTensorV4 LANGUAGES CXX HIP)
+
+# ─── Backend selection ────────────────────────────────────────────────────────
+option(USE_HIP  "Build with AMD HIP/ROCm backend"  ON)
+option(USE_CUDA "Build with NVIDIA CUDA backend"   OFF)
+
+if(USE_HIP AND USE_CUDA)
+    message(FATAL_ERROR "USE_HIP and USE_CUDA are mutually exclusive — enable only one.")
+endif()
+if(NOT USE_HIP AND NOT USE_CUDA)
+    message(FATAL_ERROR "No backend selected — set either USE_HIP=ON or USE_CUDA=ON.")
+endif()
+
+if(USE_CUDA)
+    if(NOT CMAKE_CUDA_COMPILER OR CMAKE_CUDA_COMPILER MATCHES "NOTFOUND")
+        set(CMAKE_CUDA_COMPILER "/usr/local/cuda/bin/nvcc" CACHE FILEPATH "CUDA compiler" FORCE)
+    endif()
+    project(BeanTensorV4 LANGUAGES CXX CUDA)
+    set(CMAKE_CUDA_STANDARD 20)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    set(CMAKE_CUDA_ARCHITECTURES 86)   # RTX A500 / Ampere — change for your GPU
+else()
+    project(BeanTensorV4 LANGUAGES CXX HIP)
+endif()
+
 include(CTest)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ─── ROCm / HIP ──────────────────────────────────────────────────────────────
-list(APPEND CMAKE_PREFIX_PATH /opt/rocm)
-find_package(hip REQUIRED)
+if(USE_HIP)
+    list(APPEND CMAKE_PREFIX_PATH /opt/rocm)
+    find_package(hip REQUIRED)
+endif()
+
+# ─── CUDA ─────────────────────────────────────────────────────────────────────
+if(USE_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+endif()
 
 # ─── XRT (NPU host runtime) ───────────────────────────────────────────────────
 find_path(XRT_INCLUDE_DIR
@@ -31,7 +61,6 @@ set(AIE_PYTHON_PATH    "${MLIR_AIE_INSTALL}/python")
 set(AIECC              "${AIE_PYTHON_PATH}/aie/compiler/aiecc/main.py")
 set(PEANO_CXX          "${LLVM_AIE_DIR}/bin/clang++")
 
-# Matches official PEANOWRAP2P_FLAGS + aie_kernels for AIE_* macros
 set(PEANOWRAP2P_FLAGS
         "-O2"
         "-std=c++20"
@@ -47,6 +76,11 @@ find_path(AIE_INCLUDE_DIR
         REQUIRED
 )
 
+if(USE_HIP)
+    message(STATUS "Backend     : HIP/ROCm")
+else()
+    message(STATUS "Backend     : CUDA")
+endif()
 message(STATUS "XRT include : ${XRT_INCLUDE_DIR}")
 message(STATUS "AIE include : ${AIE_INCLUDE_DIR}")
 message(STATUS "MLIR-AIE    : ${MLIR_AIE_INSTALL}")
@@ -113,48 +147,68 @@ add_custom_target(fma_xclbin ALL DEPENDS "${FMA_XCLBIN}" "${FMA_INSTS}")
 add_executable(BeanTensorV4
         main.cpp
         NPU/NPUBackend.cpp
-        Helper/errorcheck.h
-        Ops/Elementwise/Add/Add.h
-        Ops/Elementwise/Add/cpu_Add.h
-        Ops/Elementwise/Add/gpu_Add.h
-        Ops/Elementwise/Add/npu_Add.h
-        Helper/Broadcast/Broadcast.h
-        Helper/Casting/casting_detail.h
+        Tensor/Tensor.cpp
+        Tensor/TensorOps.cpp
         Ops/Elementwise/Add/cpu_Add.cpp
-        Tensor/tensor_convert.h
-        Tensor/tensor.h
-        Helper/hardware.h
 )
 
-set_source_files_properties(main.cpp PROPERTIES LANGUAGE HIP)
+# Route GPU source files through the correct compiler
+if(USE_HIP)
+    set_source_files_properties(
+            main.cpp
+            Tensor/Tensor.cpp
+            Tensor/TensorOps.cpp
+            PROPERTIES LANGUAGE HIP
+    )
+elseif(USE_CUDA)
+    set_source_files_properties(
+            main.cpp
+            Tensor/Tensor.cpp
+            Tensor/TensorOps.cpp
+            PROPERTIES LANGUAGE CUDA
+    )
+endif()
 
+# Backend compile definitions
 target_compile_definitions(BeanTensorV4 PRIVATE
-        USE_HIP
         USE_NPU_STRIXHALO
         FMA_XCLBIN_PATH="${FMA_XCLBIN}"
         FMA_INSTS_PATH="${FMA_INSTS}"
 )
+if(USE_HIP)
+    target_compile_definitions(BeanTensorV4 PRIVATE USE_HIP)
+elseif(USE_CUDA)
+    target_compile_definitions(BeanTensorV4 PRIVATE USE_CUDA)
+endif()
+
 target_compile_options(BeanTensorV4 PRIVATE
         -mavx512f
         -mavx512bf16
+        -mf16c
 )
 
 include_directories(${CMAKE_SOURCE_DIR})
 
 target_include_directories(BeanTensorV4 PRIVATE
-        ${HIP_INCLUDE_DIRS}
         ${XRT_INCLUDE_DIR}
         ${AIE_INCLUDE_DIR}
         ${CMAKE_SOURCE_DIR}/NPU
 )
+if(USE_HIP)
+    target_include_directories(BeanTensorV4 PRIVATE ${HIP_INCLUDE_DIRS})
+endif()
 
 target_link_libraries(BeanTensorV4 PRIVATE
-        hip::host
         ${XRT_CORE_LIB}
         ${XRT_COREUTIL_LIB}
         uuid
         dl
 )
+if(USE_HIP)
+    target_link_libraries(BeanTensorV4 PRIVATE hip::host)
+elseif(USE_CUDA)
+    target_link_libraries(BeanTensorV4 PRIVATE CUDA::cudart)
+endif()
 
 add_dependencies(BeanTensorV4 fma_xclbin)
 

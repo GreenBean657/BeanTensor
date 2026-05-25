@@ -31,11 +31,11 @@
 #include <type_traits>
 
 #include <aie_api/aie.hpp>
-#include "aie_kernel_utils.h"
+//#include "aie_kernel_utils.h"  // mlir-aie source not present; unused by this kernel
 
 // ── Public C entry point ──────────────────────────────────────────────────────
-extern "C" {
 
+extern "C" {
 void fma_bf16_kernel(bfloat16 *__restrict abc_in,
                      bfloat16 *__restrict out,
                      int32_t N)

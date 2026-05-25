@@ -3,9 +3,26 @@ CompileFlags:
     - -D__HIP_PLATFORM_AMD__=1
     - -I/opt/rocm/include
   Compiler: /opt/rocm/llvm/bin/clang++
-
+---
 If:
   PathMatch: .*\.cpp
-  CompileFlags:
-    Add:
-      - -D__HIP_PLATFORM_AMD__=1
+CompileFlags:
+  Add:
+    - -D__HIP_PLATFORM_AMD__=1
+---
+If:
+  PathMatch: .*\.hip
+CompileFlags:
+  Compiler: /opt/rocm/llvm/bin/clang++
+  Add:
+    - -xc++
+    - -D__HIP_PLATFORM_AMD__=1
+    - -D__device__=
+    - -D__global__=
+    - -D__host__=
+    - -D__shared__=
+  Remove:
+    - -x
+    - hip
+    - --offload-arch=*
+    - --hip-link
