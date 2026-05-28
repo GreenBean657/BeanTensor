@@ -9,15 +9,13 @@
 #include "Errors/logic.h"
 #include "Helper/Threads/cpu_threading.h"
 
+#include "TensorOps.h"
 #ifdef USE_HIP
 #include <hip/hip_runtime.h>
 #include <hip/hip_runtime_api.h>
-#include "TensorOps.h"
 #elif defined(USE_CUDA)
 #include <cuda_runtime.h>
-#include "TensorOps.h"
-#else
-
+#include <cuda_fp4.h>
 #endif
 
 namespace BeanTensor::Tensors {
@@ -35,6 +33,7 @@ namespace BeanTensor::Tensors {
 
         ~Tensor() {
             sync();
+
             kill_cpu_data();
             kill_gpu_data();
         }
@@ -56,20 +55,36 @@ namespace BeanTensor::Tensors {
         void set_one();
         void set_zero();
 
+        /**
+         * Manually force a resync of this Tensor, blocking the calling thread until all pending operations are complete. Used for multithreaded syncs.
+         * @note Safe to call multiple times.
+         */
         void sync() const {
             for (auto& f : pending) f.get();
             pending.clear();
         }
+
+        /**
+         * Give multiple, vectorized futures. Used for multithreaded syncs.
+         * @note Do not use this for single futures, use give_future().
+         * @param futures Vectorized futures.
+         */
         void give_futures(const std::vector<std::shared_future<void>>& futures) const {
             sync();
             pending = futures;
         }
+
+        /**
+         * Give a singular, non-vectorized future. Used for multithreaded syncs.
+         * @note Do not use for multiple futures, use give_futures().
+         * @param future Future to give.
+         */
         void give_future(const std::shared_future<void>& future) const {
             sync();
             pending.push_back(future);
         }
 
-        void convert_dtype(const Casting::DType& new_dtype);
+        void convert_dtype(const Casting::DType& new_dtype, bool use_nan_conversions = false);
 
         /**
          * Get the shape of a tensor.
@@ -82,6 +97,8 @@ namespace BeanTensor::Tensors {
          * @return String showing this tensor's contents.
          */
         [[nodiscard]] std::string contents_to_string() const;
+
+        [[nodiscard]] std::vector<size_t> contents_to_flat_vector() const;
 
         template<typename T>
         [[nodiscard]] T* at(const std::initializer_list<size_t> idx) {
@@ -197,15 +214,38 @@ namespace BeanTensor::Tensors {
                     this->data = nullptr;
                 }
             }
-            std::free(convert_buf);
-            this->convert_buf_size = 0;
+            if (this->device == Device::CPU) {
+                std::free(convert_buf);
+                this->convert_buf = nullptr;
+                this->convert_buf_size = 0;
+            }
         }
+
+        /**
+         * Deconstruct all GPU data.
+         */
         void kill_gpu_data() {
-            if (this->owns_data) {
-                if (this->data != nullptr && this->device == Device::GPU) {
-                    HIP_CHECK_ERROR(hipFree(this->data));
-                    this->data = nullptr;
-                }
+            if (this->device != Device::GPU) return;
+            if (this->owns_data && this->data != nullptr) {
+#if defined(USE_HIP)
+                HIP_CHECK_ERROR(hipFree(this->data));
+#elif defined(USE_CUDA)
+                CUDA_CHECK_ERROR(cudaFree(this->data));
+#else
+                throw ErrorHandling::GPUTaskOnCPUBuild();
+#endif
+                this->data = nullptr;
+            }
+            if (this->convert_buf != nullptr) {
+#if defined(USE_HIP)
+                HIP_CHECK_ERROR(hipFree(this->convert_buf));
+#elif defined(USE_CUDA)
+                CUDA_CHECK_ERROR(cudaFree(this->convert_buf));
+#else
+                throw ErrorHandling::GPUTaskOnCPUBuild();
+#endif
+                this->convert_buf = nullptr;
+                this->convert_buf_size = 0;
             }
         }
 
@@ -217,6 +257,7 @@ namespace BeanTensor::Tensors {
         friend void detail::move_to_gpu(Tensor& t, uint32_t device);
         friend void detail::move_to_cpu(Tensor& t);
         friend void detail::move_gpu_to_gpu(Tensor& t, uint32_t new_device);
+        friend void detail::convert_gpu(Tensor& t, const BeanTensor::Casting::DType& new_dtype, bool use_inf_conversions);
 
     };
     struct Node {
