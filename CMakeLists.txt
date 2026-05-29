@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
 
 # ─── Backend selection ────────────────────────────────────────────────────────
-option(USE_HIP  "Build with AMD HIP/ROCm backend"  ON)
-option(USE_CUDA "Build with NVIDIA CUDA backend"   OFF)
+option(USE_HIP  "Build with AMD HIP/ROCm backend"  OFF)
+option(USE_CUDA "Build with NVIDIA CUDA backend"   ON)
 
 if(USE_HIP AND USE_CUDA)
     message(FATAL_ERROR "USE_HIP and USE_CUDA are mutually exclusive — enable only one.")
@@ -18,7 +18,7 @@ if(USE_CUDA)
     project(BeanTensorV4 LANGUAGES CXX CUDA)
     set(CMAKE_CUDA_STANDARD 20)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-    set(CMAKE_CUDA_ARCHITECTURES 86)   # RTX A500 / Ampere — change for your GPU
+    set(CMAKE_CUDA_ARCHITECTURES 86)
 else()
     project(BeanTensorV4 LANGUAGES CXX HIP)
 endif()
@@ -149,6 +149,7 @@ add_executable(BeanTensorV4
         NPU/NPUBackend.cpp
         Tensor/Tensor.cpp
         Tensor/TensorOps.cpp
+        Tensor/TensorOps.cu
         Ops/Elementwise/Add/cpu_Add.cpp
 )
 
@@ -164,7 +165,7 @@ elseif(USE_CUDA)
     set_source_files_properties(
             main.cpp
             Tensor/Tensor.cpp
-            Tensor/TensorOps.cpp
+            Tensor/TensorOps.cu
             PROPERTIES LANGUAGE CUDA
     )
 endif()
@@ -214,7 +215,16 @@ add_dependencies(BeanTensorV4 fma_xclbin)
 
 # ─── Tests ────────────────────────────────────────────────────────────────────
 if(BUILD_TESTING)
-    add_executable(BeanTensorV4Tests tests/tensor_tests.cpp)
-    include_directories(${CMAKE_SOURCE_DIR})
+    add_executable(BeanTensorV4Tests
+        tests/tensor_tests.cpp
+        Tensor/Tensor.cpp
+        Tensor/TensorOps.cpp
+    )
+    target_compile_options(BeanTensorV4Tests PRIVATE
+            -mavx512f
+            -mavx512bf16
+            -mf16c
+    )
+    target_include_directories(BeanTensorV4Tests PRIVATE ${CMAKE_SOURCE_DIR})
     add_test(NAME BeanTensorV4Tests COMMAND BeanTensorV4Tests)
 endif()

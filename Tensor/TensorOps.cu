@@ -41,6 +41,18 @@ __global__ void implementation_bf16_to_fp32_fp64(Casting::bfloat16_t* __restrict
         fail_check[0] = false;
     }
 }
+
+template<typename Ptr> requires std::is_floating_point_v<Ptr>
+__device__ int helper_fp32_fp64_to_bf16(Ptr* val1) {
+    constexpr Ptr BF16_MAX = static_cast<Ptr>(3.38953138925153547590470800371487866880e+38);
+    if constexpr (std::is_same_v<Ptr, float>) {
+        if (__isnanf(*val1) || __isinff(*val1) || *val1 > BF16_MAX || *val1 < -BF16_MAX) return 1;
+    } else {
+        if (__isnan(*val1) || __isinf(*val1) || *val1 > BF16_MAX || *val1 < -BF16_MAX) return 1;
+    }
+    return 0;
+}
+
 template <typename Ptr> requires std::is_floating_point_v<Ptr>
 __global__ void implementation_fp32_fp64_to_bf16(Ptr* __restrict__ src, Casting::bfloat16_t* dst, const size_t end, const bool allow_unsafe_conversions, int32_t* __restrict__ fail_check) {
     const size_t tid = threadIdx.x + blockIdx.x * blockDim.x;
@@ -48,23 +60,23 @@ __global__ void implementation_fp32_fp64_to_bf16(Ptr* __restrict__ src, Casting:
     const size_t end2 = end / 2;
 
     for (size_t i = tid; i < end2; i += stride) {
-        if (allow_unsafe_conversions) {
-            if (std::is_same_v<Ptr, float>) {
-                if (__bfloat16_isnan(__float2bfloat16(src[i * 2])) || __bfloat16_isnan(__float2bfloat16(src[i * 2 + 1]))) {
-                    atomicAdd(fail_check, 1);
-                    fail_check[0] = true;
-                }
-            } else if (std::is_same_v<Ptr, double>) {
-                if (__bfloat16_isnan(__double2bfloat16(src[i * 2])) || __bfloat16_isnan(__double2bfloat16(src[i * 2 + 1]))) {
-                    atomicAdd(fail_check, 1);
-                }
+        if (!allow_unsafe_conversions) {
+            if (helper_fp32_fp64_to_bf16(&src[i * 2]) || helper_fp32_fp64_to_bf16(&src[i * 2 + 1])) {
+                atomicOr(fail_check, 1);
+                return;
             }
         }
-        const __nv_bfloat162 packed = __floats2bfloat162_rn(src[i * 2], src[i * 2 + 1]);
+        const __nv_bfloat162 packed = __floats2bfloat162_rn(
+            static_cast<float>(src[i * 2]), static_cast<float>(src[i * 2 + 1]));
         reinterpret_cast<__nv_bfloat162*>(dst)[i] = packed;
     }
+
     if (end % 2 != 0 && tid == 0) {
-        dst[end - 1] = __float2bfloat16(src[end - 1]);
+        if (!allow_unsafe_conversions && helper_fp32_fp64_to_bf16(&src[end - 1])) {
+            atomicAdd(fail_check, 1);
+            return;
+        }
+        dst[end - 1] = __float2bfloat16(static_cast<float>(src[end - 1]));
     }
 }
 
@@ -245,6 +257,7 @@ namespace BeanTensor::Tensors::detail {
     __host__ void move_to_cpu(Tensor& t) {
         if (t.device != Device::GPU) return;
         t.sync();
+        t.kill_buffer();
         const auto worker = [&t] {
             cudaDeviceProp prop{};
             CUDA_CHECK_ERROR(cudaGetDeviceProperties(&prop, t.gpu_id));
@@ -264,6 +277,7 @@ namespace BeanTensor::Tensors::detail {
     __host__ void move_gpu_to_gpu(Tensor& t, uint32_t new_device) {
         if (t.device != Device::GPU) return;
         t.sync();
+        t.kill_buffer();
         const auto worker = [&t, new_device] {
             {
                 cudaDeviceProp prop{};
@@ -297,8 +311,9 @@ namespace BeanTensor::Tensors::detail {
         if (t.device != Device::GPU) return;
         if (t.dtype == new_dtype) return;
         t.sync();
+        t.kill_buffer();
         const auto worker = [&] {
-            size_t target_buffer_size = t.numel * Casting::dtype_size(new_dtype);
+            const size_t target_buffer_size = t.numel * Casting::dtype_size(new_dtype);
             if (t.convert_buf == nullptr || t.convert_buf_size < target_buffer_size) {
                 CUDA_CHECK_ERROR(cudaFree(t.convert_buf));
                 CUDA_CHECK_ERROR(cudaMalloc(&t.convert_buf, target_buffer_size));

@@ -5,6 +5,18 @@ CompileFlags:
   Compiler: /opt/rocm/llvm/bin/clang++
 ---
 If:
+  PathMatch: NPU/.*\.cc
+CompileFlags:
+  Compiler: /mnt/schoolwork/BeanTensorV4/Compilers/ironenv/lib/python3.10/site-packages/llvm-aie/bin/clang++
+  Add:
+    - --target=aie2p-none-unknown-elf
+    - -std=c++20
+    - -DNDEBUG
+    - -DNOCPP
+    - -I/mnt/schoolwork/BeanTensorV4/Compilers/ironenv/lib/python3.10/site-packages/mlir_aie/include
+    - -I/mnt/schoolwork/BeanTensorV4/Compilers/mlir-aie/aie_kernels
+---
+If:
   PathMatch: .*\.cpp
 CompileFlags:
   Add:

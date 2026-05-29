@@ -9,7 +9,7 @@ namespace BeanTensor::Tensors::detail {
 
     [[nodiscard]] std::vector<std::shared_future<void>> avx512_fp32_to_bf16(void* src, Casting::bfloat16_t* dst, const size_t n) {
         const size_t t = Hardware::CPU().threads;
-        const auto* src_f = static_cast<const float*>(src);
+        const auto* src_f = static_cast<const Casting::float32_t*>(src);
 
         // FIX: runtime 64-byte alignment check — enables NT stores which bypass cache
         const bool aligned = (reinterpret_cast<uintptr_t>(dst) % 64) == 0;
@@ -101,7 +101,7 @@ namespace BeanTensor::Tensors::detail {
                 uint16_t raw;
                 std::memcpy(&raw, &src_f[pos], sizeof(raw));
                 uint32_t bits = static_cast<uint32_t>(raw) << 16;
-                dst[pos] = std::bit_cast<float>(bits);
+                dst[pos] = std::bit_cast<Casting::float32_t>(bits);
             }
         };
 
@@ -182,7 +182,7 @@ namespace BeanTensor::Tensors::detail {
                 uint16_t raw;
                 std::memcpy(&raw, &src_f[i], sizeof(raw));
                 uint32_t bits = static_cast<uint32_t>(raw) << 16;
-                dst[i] = std::bit_cast<float>(bits);
+                dst[i] = std::bit_cast<Casting::float32_t>(bits);
             }
 
             // FIX: sfence after NT stores
@@ -448,8 +448,7 @@ namespace BeanTensor::Tensors {
         } else if (this->device == Device::GPU) {
             throw ErrorHandling::NotImplemented();
         } else {
-            assert(false);
-            throw ErrorHandling::NotImplemented();
+            __builtin_unreachable();
         }
         return os.str();
     }
@@ -527,11 +526,11 @@ namespace BeanTensor::Tensors {
         }
     }
 
-    void Tensor::convert_dtype(const Casting::DType &new_dtype) {
+    void Tensor::convert_dtype(const Casting::DType& new_dtype, const bool use_nan_conversions) {
         if (this->dtype == new_dtype) return;
         sync();
+        const size_t new_nbytes = this->numel * Casting::dtype_size(new_dtype);
         if (this->device == Device::CPU) {
-            const size_t new_nbytes = this->numel * Casting::dtype_size(new_dtype);
 
             // SCRATCH BUFFER: grow convert_buf if needed, never shrink, never free between calls.
             // Replaces aligned_alloc per call — after warmup this is zero allocations.
@@ -571,7 +570,7 @@ namespace BeanTensor::Tensors {
             this->nbytes = new_nbytes;
             this->owns_data = true;
         } else if (this->device == Device::GPU) {
-            throw ErrorHandling::NotImplemented();
+            detail::convert_gpu(*this, new_dtype, use_nan_conversions);
         } else {
             __builtin_unreachable();
         }
@@ -601,5 +600,18 @@ namespace BeanTensor::Tensors {
             return;
         }
         throw ErrorHandling::NotImplemented();
+    }
+
+    std::vector<size_t> Tensor::contents_to_flat_vector() const {
+        sync();
+        std::vector<size_t> result(this->numel);
+        if (this->device == Device::CPU) {
+            std::memcpy(result.data(), this->data, this->nbytes);
+        } else if (this->device == Device::GPU) {
+            throw ErrorHandling::NotImplemented();
+        } else {
+            __builtin_unreachable();
+        }
+        return result;
     }
 }

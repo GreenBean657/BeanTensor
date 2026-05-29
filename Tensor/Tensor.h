@@ -25,8 +25,6 @@ namespace BeanTensor::Tensors {
     };
     struct Node;
     class Tensor {
-    private:
-
     public:
 
         Tensor() = delete;
@@ -36,6 +34,7 @@ namespace BeanTensor::Tensors {
 
             kill_cpu_data();
             kill_gpu_data();
+            kill_buffer();
         }
         explicit Tensor(const std::vector<size_t>& shape,
                         const Casting::DType dtype = Casting::DType::Float32,
@@ -205,7 +204,8 @@ namespace BeanTensor::Tensors {
         );
 
         /**
-         * Deconstruct all CPU data.
+         * Deconstruct CPU data, besides buffer.
+         * @note DOES NOT DECONSTRUCT BUFFER.
          */
         void kill_cpu_data() {
             if (this->owns_data) {
@@ -214,15 +214,37 @@ namespace BeanTensor::Tensors {
                     this->data = nullptr;
                 }
             }
+        }
+
+        /**
+         * Deconstruct the active Scratch Buffer.
+         * @note DOES NOT DECONSTRUCT CPU/GPU DATA.
+         */
+        void kill_buffer() {
             if (this->device == Device::CPU) {
-                std::free(convert_buf);
+                if (this->convert_buf != nullptr && this->convert_buf_size != 0) {
+                    std::free(convert_buf);
+                    this->convert_buf = nullptr;
+                    this->convert_buf_size = 0;
+                }
+            } else if (this->device == Device::GPU) {
+#if defined(USE_HIP)
+                HIP_CHECK_ERROR(hipFree(this->convert_buf));
                 this->convert_buf = nullptr;
                 this->convert_buf_size = 0;
+#elif defined(USE_CUDA)
+                CUDA_CHECK_ERROR(cudaFree(this->convert_buf));
+                this->convert_buf = nullptr;
+                this->convert_buf_size = 0;
+#else
+      throw ErrorHandling::GPUTaskOnCPUBuild();
+#endif
             }
         }
 
         /**
-         * Deconstruct all GPU data.
+         * Deconstruct GPU data, besides buffer.
+         * @note DOES NOT DECONSTRUCT BUFFER.
          */
         void kill_gpu_data() {
             if (this->device != Device::GPU) return;
@@ -235,17 +257,6 @@ namespace BeanTensor::Tensors {
                 throw ErrorHandling::GPUTaskOnCPUBuild();
 #endif
                 this->data = nullptr;
-            }
-            if (this->convert_buf != nullptr) {
-#if defined(USE_HIP)
-                HIP_CHECK_ERROR(hipFree(this->convert_buf));
-#elif defined(USE_CUDA)
-                CUDA_CHECK_ERROR(cudaFree(this->convert_buf));
-#else
-                throw ErrorHandling::GPUTaskOnCPUBuild();
-#endif
-                this->convert_buf = nullptr;
-                this->convert_buf_size = 0;
             }
         }
 

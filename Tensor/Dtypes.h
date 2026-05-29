@@ -4,8 +4,6 @@
 #include <cstring>
 #include <string>
 
-#include "../../../../opt/rocm-7.2.0/include/hip/amd_detail/amd_hip_fp16.h"
-
 //&& defined(__clang__)
 #if defined(USE_HIP) && defined(__clang__)
 #include <hip/hip_fp16.h>

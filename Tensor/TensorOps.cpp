@@ -186,18 +186,15 @@ namespace BeanTensor::Tensors::detail {
         if (t.device != Device::GPU) return;
         t.sync();
         auto worker = [&t, min, max, seed] {
-            return nullptr;
-            /*
-            Tensor temp({t.numel}, t.dtype, Device::GPU);
+            auto temp = Tensor({t.numel}, t.dtype, Device::CPU, false);
             temp.random(min, max, seed);
-            temp.to(t.device);
-            // Copy temp to t
-            hipError_t err = hipMemcpyAsync(
-                t.data, temp.data, t.nbytes,
-                hipMemcpyDeviceToDevice,
-                t.stream
-            );
-            */
+            temp.sync();
+            move_to_gpu(temp, t.gpu_id);
+            temp.sync();
+            t.kill_cpu_data();
+            t.data = temp.data;
+            temp.data = nullptr;
+            // NEVER EXECUTE .SYNC WITHIN A TENSORS OWN WORKER
         };
         auto& threadMgr = Threading::get_cpu_thread_pool();
         const auto future = threadMgr.submit(
@@ -211,10 +208,15 @@ namespace BeanTensor::Tensors::detail {
         if (t.device != Device::CPU) return;
         t.sync();
         const auto worker = [&t, device] {
-            int count = 0;
-            HIP_CHECK_ERROR(hipGetDeviceCount(&count));
-            if (count < device) {
-                throw std::invalid_argument("Invalid GPU device ID");
+            {
+                int count = 0;
+                HIP_CHECK_ERROR(hipGetDeviceCount(&count));
+                if (count < device) {
+                    throw std::invalid_argument("Invalid GPU device ID");
+                }
+                size_t free, total = 0;
+                HIP_CHECK_ERROR(hipMemGetInfo(&free, &total));
+                if (free <= t.nbytes) throw ErrorHandling::OutOfMemory();
             }
             HIP_CHECK_ERROR(hipSetDevice(static_cast<int32_t>(device)));
             void* buffer = nullptr;
@@ -232,6 +234,7 @@ namespace BeanTensor::Tensors::detail {
 
     __host__ void move_to_cpu(Tensor& t) {
         if (t.device != Device::GPU) return;
+        t.sync();
         const auto worker = [&t] {
             hipDeviceProp_t prop;
             HIP_CHECK_ERROR(hipGetDeviceProperties(&prop, t.gpu_id));
@@ -247,8 +250,36 @@ namespace BeanTensor::Tensors::detail {
         t.give_future(future);
     }
 
-    void move_gpu_to_gpu(Tensor& t, uint32_t new_device) {
-        throw ErrorHandling::NotImplemented();
+    __host__ void move_gpu_to_gpu(Tensor& t, uint32_t new_device) {
+        if (t.device != Device::GPU) return;
+        t.sync();
+        const auto worker = [&t, new_device] {
+            {
+                hipDeviceProp_t prop;
+                hipDeviceProp_t new_prop;
+                HIP_CHECK_ERROR(hipGetDeviceProperties(&prop, t.gpu_id));
+                HIP_CHECK_ERROR(hipGetDeviceProperties(&new_prop, new_device));
+                if (prop.warpSize == 0 || new_prop.warpSize == 0) throw std::invalid_argument("Invalid GPU id");
+                size_t free, total = 0;
+                HIP_CHECK_ERROR(hipMemGetInfo(&free, &total));
+                if (free <= t.nbytes) throw ErrorHandling::OutOfMemory();
+            }
+            void* buffer = nullptr;
+            ///#hipErrorPeerAccessAlreadyEnabled if peer access is already enabled for this device
+            HIP_CHECK_ERROR(hipSetDevice(static_cast<int32_t>(new_device)));
+            HIP_CHECK_ERROR(hipDeviceEnablePeerAccess(static_cast<int32_t>(t.gpu_id), 0));
+            HIP_CHECK_ERROR(hipDeviceEnablePeerAccess(static_cast<int32_t>(new_device), 0));
+            HIP_CHECK_ERROR(hipSetDevice(static_cast<int32_t>(new_device)));
+            HIP_CHECK_ERROR(hipMalloc(&buffer, t.nbytes));
+            HIP_CHECK_ERROR(hipMemcpyPeer(buffer, new_device, t.data, t.gpu_id, t.nbytes));
+            HIP_CHECK_ERROR(hipFree(t.data));
+            t.data = buffer;
+            t.device = Device::GPU;
+            t.gpu_id = new_device;
+        };
+        auto& threadMgr = Threading::get_cpu_thread_pool();
+        const auto future = threadMgr.submit(worker,Threading::ThreadPriority::High).share();
+        t.give_future(future);
     }
 }
 
