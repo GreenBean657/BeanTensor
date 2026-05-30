@@ -15,7 +15,6 @@
 #include <hip/hip_runtime_api.h>
 #elif defined(USE_CUDA)
 #include <cuda_runtime.h>
-#include <cuda_fp4.h>
 #endif
 
 namespace BeanTensor::Tensors {
@@ -228,17 +227,19 @@ namespace BeanTensor::Tensors {
                     this->convert_buf_size = 0;
                 }
             } else if (this->device == Device::GPU) {
+                if (this->convert_buf != nullptr && this->convert_buf_size != 0) {
 #if defined(USE_HIP)
-                HIP_CHECK_ERROR(hipFree(this->convert_buf));
-                this->convert_buf = nullptr;
-                this->convert_buf_size = 0;
+                    HIP_CHECK_ERROR(hipFree(this->convert_buf));
+                    this->convert_buf = nullptr;
+                    this->convert_buf_size = 0;
 #elif defined(USE_CUDA)
-                CUDA_CHECK_ERROR(cudaFree(this->convert_buf));
-                this->convert_buf = nullptr;
-                this->convert_buf_size = 0;
+                    CUDA_CHECK_ERROR(cudaFree(this->convert_buf)); // HERE
+                    this->convert_buf = nullptr;
+                    this->convert_buf_size = 0;
 #else
-      throw ErrorHandling::GPUTaskOnCPUBuild();
+                    throw ErrorHandling::GPUTaskOnCPUBuild();
 #endif
+                }
             }
         }
 

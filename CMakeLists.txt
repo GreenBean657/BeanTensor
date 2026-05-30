@@ -3,12 +3,12 @@ cmake_minimum_required(VERSION 3.25)
 # ─── Backend selection ────────────────────────────────────────────────────────
 option(USE_HIP  "Build with AMD HIP/ROCm backend"  OFF)
 option(USE_CUDA "Build with NVIDIA CUDA backend"   ON)
-
+option(USE_STRIX_HALO "Build with Xilinx StrixHalo NPU backend" OFF)
 if(USE_HIP AND USE_CUDA)
     message(FATAL_ERROR "USE_HIP and USE_CUDA are mutually exclusive — enable only one.")
 endif()
 if(NOT USE_HIP AND NOT USE_CUDA)
-    message(FATAL_ERROR "No backend selected — set either USE_HIP=ON or USE_CUDA=ON.")
+    message(WARNING "No backend selected — set either USE_HIP=ON or USE_CUDA=ON.")
 endif()
 
 if(USE_CUDA)
@@ -40,6 +40,7 @@ if(USE_CUDA)
 endif()
 
 # ─── XRT (NPU host runtime) ───────────────────────────────────────────────────
+if(USE_STRIX_HALO)
 find_path(XRT_INCLUDE_DIR
         NAMES xrt/xrt_device.h
         PATHS /usr/include /opt/xilinx/xrt/include
@@ -50,7 +51,9 @@ find_library(XRT_CORE_LIB     NAMES xrt_core
 find_library(XRT_COREUTIL_LIB NAMES xrt_coreutil
         PATHS /usr/lib/x86_64-linux-gnu /opt/xilinx/xrt/lib REQUIRED)
 
+endif()
 # ─── MLIR-AIE / IRON toolchain ───────────────────────────────────────────────
+if(USE_STRIX_HALO)
 set(IRONENV_DIR      "/mnt/schoolwork/BeanTensorV4/Compilers/ironenv")
 set(IRONENV_SITE     "${IRONENV_DIR}/lib/python3.10/site-packages")
 set(MLIR_AIE_INSTALL "${IRONENV_SITE}/mlir_aie")
@@ -75,19 +78,23 @@ find_path(AIE_INCLUDE_DIR
         PATHS "${MLIR_AIE_INSTALL}/include"
         REQUIRED
 )
-
+endif()
 if(USE_HIP)
     message(STATUS "Backend     : HIP/ROCm")
-else()
+elseif(USE_CUDA)
     message(STATUS "Backend     : CUDA")
+else()
+    message(STATUS "Backend     : None (CPU only)")
 endif()
+if(USE_STRIX_HALO)
 message(STATUS "XRT include : ${XRT_INCLUDE_DIR}")
 message(STATUS "AIE include : ${AIE_INCLUDE_DIR}")
 message(STATUS "MLIR-AIE    : ${MLIR_AIE_INSTALL}")
 message(STATUS "Peano       : ${PEANO_CXX}")
 message(STATUS "Python      : ${Python3_EXECUTABLE}")
-
+endif()
 # ─── Step 1: Python graph → MLIR ─────────────────────────────────────────────
+if(USE_STRIX_HALO)
 set(FMA_MLIR   "${CMAKE_CURRENT_BINARY_DIR}/fma.mlir")
 set(FMA_OBJ    "${CMAKE_CURRENT_BINARY_DIR}/fma.o")
 set(FMA_XCLBIN "${CMAKE_CURRENT_BINARY_DIR}/fma.xclbin")
@@ -107,8 +114,9 @@ add_custom_command(
         COMMENT "Generating MLIR from fma_graph.py"
         VERBATIM
 )
-
+endif()
 # ─── Step 2: Peano compiles fma.cc → fma.o ───────────────────────────────────
+if(USE_STRIX_HALO)
 add_custom_command(
         OUTPUT  "${FMA_OBJ}"
         COMMAND ${PEANO_CXX}
@@ -119,8 +127,9 @@ add_custom_command(
         COMMENT "Compiling fma.cc with Peano → fma.o"
         VERBATIM
 )
-
+endif()
 # ─── Step 3: aiecc links MLIR + object → xclbin ──────────────────────────────
+if(USE_STRIX_HALO)
 add_custom_command(
         OUTPUT  "${FMA_XCLBIN}" "${FMA_INSTS}"
         COMMAND ${CMAKE_COMMAND} -E env
@@ -140,18 +149,26 @@ add_custom_command(
         COMMENT "Linking fma.mlir + fma.o → fma.xclbin + fma_insts.bin"
         VERBATIM
 )
-
 add_custom_target(fma_xclbin ALL DEPENDS "${FMA_XCLBIN}" "${FMA_INSTS}")
-
+endif()
 # ─── Main executable ──────────────────────────────────────────────────────────
 add_executable(BeanTensorV4
         main.cpp
-        NPU/NPUBackend.cpp
         Tensor/Tensor.cpp
         Tensor/TensorOps.cpp
         Tensor/TensorOps.cu
         Ops/Elementwise/Add/cpu_Add.cpp
+        Intrinsics/AVX512/DTypeConversions.cpp
+        Intrinsics/AVX512/DTypeConversions.h
+        Intrinsics/Native/DTypeConversions.cpp
+        Intrinsics/Native/DTypeConversions.h
 )
+
+if(USE_STRIX_HALO)
+add_executable(BeanTensorV4
+        NPU/NPUBackend.cpp
+)
+endif()
 
 # Route GPU source files through the correct compiler
 if(USE_HIP)
@@ -159,6 +176,8 @@ if(USE_HIP)
             main.cpp
             Tensor/Tensor.cpp
             Tensor/TensorOps.cpp
+            Intrinsics/AVX512/DTypeConversions.cpp
+            Intrinsics/Native/DTypeConversions.cpp
             PROPERTIES LANGUAGE HIP
     )
 elseif(USE_CUDA)
@@ -172,7 +191,6 @@ endif()
 
 # Backend compile definitions
 target_compile_definitions(BeanTensorV4 PRIVATE
-        USE_NPU_STRIXHALO
         FMA_XCLBIN_PATH="${FMA_XCLBIN}"
         FMA_INSTS_PATH="${FMA_INSTS}"
 )
@@ -182,37 +200,45 @@ elseif(USE_CUDA)
     target_compile_definitions(BeanTensorV4 PRIVATE USE_CUDA)
 endif()
 
+if(USE_STRIX_HALO)
+    target_compile_definitions(BeanTensorV4 PRIVATE USE_STRIX_HALO)
+endif()
+
 target_compile_options(BeanTensorV4 PRIVATE
-        -mavx512f
+#        -mavx512f
         -mavx512bf16
-        -mf16c
+#        -mf16c
 )
 
 include_directories(${CMAKE_SOURCE_DIR})
-
+if(USE_STRIX_HALO)
 target_include_directories(BeanTensorV4 PRIVATE
         ${XRT_INCLUDE_DIR}
         ${AIE_INCLUDE_DIR}
         ${CMAKE_SOURCE_DIR}/NPU
 )
+endif()
 if(USE_HIP)
     target_include_directories(BeanTensorV4 PRIVATE ${HIP_INCLUDE_DIRS})
 endif()
 
+if(USE_STRIX_HALO)
 target_link_libraries(BeanTensorV4 PRIVATE
         ${XRT_CORE_LIB}
         ${XRT_COREUTIL_LIB}
         uuid
         dl
 )
+endif()
 if(USE_HIP)
     target_link_libraries(BeanTensorV4 PRIVATE hip::host)
 elseif(USE_CUDA)
     target_link_libraries(BeanTensorV4 PRIVATE CUDA::cudart)
 endif()
 
+if(USE_STRIX_HALO)
 add_dependencies(BeanTensorV4 fma_xclbin)
-
+endif()
 # ─── Tests ────────────────────────────────────────────────────────────────────
 if(BUILD_TESTING)
     add_executable(BeanTensorV4Tests

@@ -3,221 +3,11 @@
 #include <vector>
 #include <sstream>
 #include "Helper/Casting/casting_detail.h"
+#include "Intrinsics/AVX512/DTypeConversions.h"
+#include "Intrinsics/Native/DTypeConversions.h"
 using namespace BeanTensor;
 
 namespace BeanTensor::Tensors::detail {
-
-    [[nodiscard]] std::vector<std::shared_future<void>> avx512_fp32_to_bf16(void* src, Casting::bfloat16_t* dst, const size_t n) {
-        const size_t t = Hardware::CPU().threads;
-        const auto* src_f = static_cast<const Casting::float32_t*>(src);
-
-        // FIX: runtime 64-byte alignment check — enables NT stores which bypass cache
-        const bool aligned = (reinterpret_cast<uintptr_t>(dst) % 64) == 0;
-
-        auto compute = [src_f, dst, aligned](const size_t start, const size_t end) {
-            std::size_t i = start;
-
-            if (aligned) {
-                // NT store path — bypasses cache
-                for (; i + 32 <= end; i += 32) {
-                    __m256bh lo = _mm512_cvtneps_pbh(_mm512_loadu_ps(src_f + i));
-                    __m256bh hi = _mm512_cvtneps_pbh(_mm512_loadu_ps(src_f + i + 16));
-                    const auto packed = _mm512_inserti64x4(
-                        _mm512_castsi256_si512(reinterpret_cast<__m256i>(lo)),
-                        reinterpret_cast<__m256i>(hi), 1);
-                    _mm512_stream_si512(reinterpret_cast<__m512i*>(dst + i), packed); // FIX: NT store
-                }
-                for (; i + 16 <= end; i += 16) {
-                    __m256bh result = _mm512_cvtneps_pbh(_mm512_loadu_ps(src_f + i));
-                    _mm256_stream_si256(reinterpret_cast<__m256i*>(dst + i),          // FIX: NT store
-                                        reinterpret_cast<__m256i>(result));
-                }
-            } else {
-                // Unaligned fallback — no NT stores
-                for (; i + 32 <= end; i += 32) {
-                    __m256bh lo = _mm512_cvtneps_pbh(_mm512_loadu_ps(src_f + i));
-                    __m256bh hi = _mm512_cvtneps_pbh(_mm512_loadu_ps(src_f + i + 16));
-                    const auto packed = _mm512_inserti64x4(
-                        _mm512_castsi256_si512(reinterpret_cast<__m256i>(lo)),
-                        reinterpret_cast<__m256i>(hi), 1);
-                    _mm512_storeu_si512(dst + i, packed);
-                }
-                for (; i + 16 <= end; i += 16) {
-                    __m256bh result = _mm512_cvtneps_pbh(_mm512_loadu_ps(src_f + i));
-                    _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i),
-                                        reinterpret_cast<__m256i>(result));
-                }
-            }
-
-            for (; i < end; ++i) {
-                uint32_t bits;
-                std::memcpy(&bits, &src_f[i], sizeof(bits));
-                bits += 0x7FFF + ((bits >> 16) & 1);
-                auto raw = static_cast<uint16_t>(bits >> 16);
-                std::memcpy(&dst[i], &raw, sizeof(raw));
-            }
-
-            // FIX: sfence required after NT stores to ensure visibility to other threads/cores
-            if (aligned) _mm_sfence();
-        };
-
-        std::vector<std::shared_future<void>> futures{};
-        if (n <= t * 1024) {
-            compute(0, n);
-            return futures;
-        }
-
-        static auto& threadMgr = Threading::get_cpu_thread_pool();
-        const size_t chunk_size = ((n / t + 15) / 16) * 16;
-
-        size_t actual_threads = 0;
-        for (size_t tid = 0; tid < t; ++tid) {
-            if (tid * chunk_size >= n) break;
-            ++actual_threads;
-        }
-
-        auto worker = [compute](const size_t start, const size_t end) {
-            compute(start, end);
-        };
-        for (size_t thread_id = 0; thread_id < t; ++thread_id) {
-            const size_t start = thread_id * chunk_size;
-            const size_t end = std::min(start + chunk_size, n);
-            if (start >= n) break;
-            futures.push_back(threadMgr.submit(
-                [=] { worker(start, end); },
-                Threading::ThreadPriority::Normal
-            ).share());
-        }
-        return futures;
-    }
-
-
-    [[nodiscard]] std::vector<std::shared_future<void>> unaccelerated_bf16_to_fp32(void* src, float* dst, const size_t n) {
-        const size_t t = Hardware::CPU().threads;
-        const auto* src_f = static_cast<const Casting::bfloat16_t*>(src);
-
-        auto compute = [src_f, dst](const size_t start, const size_t end) {
-            for (size_t pos = start; pos < end; ++pos) {
-                uint16_t raw;
-                std::memcpy(&raw, &src_f[pos], sizeof(raw));
-                uint32_t bits = static_cast<uint32_t>(raw) << 16;
-                dst[pos] = std::bit_cast<Casting::float32_t>(bits);
-            }
-        };
-
-        std::vector<std::shared_future<void>> futures;
-        if (n <= t * 1024) {
-            compute(0, n);
-            return futures;
-        }
-
-        static auto& threadMgr = Threading::get_cpu_thread_pool();
-        const size_t chunk_size = ((n / t + 15) / 16) * 16;
-
-        size_t actual_threads = 0;
-        for (size_t tid = 0; tid < t; ++tid) {
-            if (tid * chunk_size >= n) break;
-            ++actual_threads;
-        }
-
-        auto worker = [compute](const size_t start, const size_t end) {
-            compute(start, end);
-        };
-        for (size_t thread_id = 0; thread_id < t; ++thread_id) {
-            const size_t start = thread_id * chunk_size;
-            const size_t end = std::min(start + chunk_size, n);
-            if (start >= n) break;
-            futures.push_back(threadMgr.submit(
-                [=] { worker(start, end); },
-                Threading::ThreadPriority::Normal
-            ).share());
-        }
-        return futures;
-    }
-
-
-    [[nodiscard]] std::vector<std::shared_future<void>> avx512_bf16_to_fp32(void* src, float* dst, const size_t n) {
-        const size_t t = Hardware::CPU().threads;
-        const auto* src_f = static_cast<const Casting::bfloat16_t*>(src);
-
-        // FIX: runtime 64-byte alignment check for NT stores
-        const bool aligned = (reinterpret_cast<uintptr_t>(dst) % 64) == 0;
-
-        auto compute = [src_f, dst, aligned](const size_t start, const size_t end) {
-            std::size_t i = start;
-
-            if (aligned) {
-                //added symmetric 32-wide unroll to match avx512_fp32_to_bf16 + NT stores
-                for (; i + 32 <= end; i += 32) {
-                    const __m256i lo_bf16 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src_f + i));
-                    const __m256i hi_bf16 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src_f + i + 16));
-                    const __m512i lo_ext  = _mm512_cvtepu16_epi32(lo_bf16);
-                    const __m512i hi_ext  = _mm512_cvtepu16_epi32(hi_bf16);
-                    _mm512_stream_ps(dst + i,      _mm512_castsi512_ps(_mm512_slli_epi32(lo_ext, 16))); // FIX: NT store
-                    _mm512_stream_ps(dst + i + 16, _mm512_castsi512_ps(_mm512_slli_epi32(hi_ext, 16))); // FIX: NT store
-                }
-                for (; i + 16 <= end; i += 16) {
-                    const __m256i bf16_ints = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src_f + i));
-                    const __m512i extended  = _mm512_cvtepu16_epi32(bf16_ints);
-                    _mm512_stream_ps(dst + i, _mm512_castsi512_ps(_mm512_slli_epi32(extended, 16))); // FIX: NT store
-                }
-            } else {
-                //32-wide unroll, unaligned fallback
-                for (; i + 32 <= end; i += 32) {
-                    const __m256i lo_bf16 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src_f + i));
-                    const __m256i hi_bf16 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src_f + i + 16));
-                    const __m512i lo_ext  = _mm512_cvtepu16_epi32(lo_bf16);
-                    const __m512i hi_ext  = _mm512_cvtepu16_epi32(hi_bf16);
-                    _mm512_storeu_ps(dst + i,      _mm512_castsi512_ps(_mm512_slli_epi32(lo_ext, 16)));
-                    _mm512_storeu_ps(dst + i + 16, _mm512_castsi512_ps(_mm512_slli_epi32(hi_ext, 16)));
-                }
-                for (; i + 16 <= end; i += 16) {
-                    const __m256i bf16_ints = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src_f + i));
-                    const __m512i extended  = _mm512_cvtepu16_epi32(bf16_ints);
-                    _mm512_storeu_ps(dst + i, _mm512_castsi512_ps(_mm512_slli_epi32(extended, 16)));
-                }
-            }
-
-            for (; i < end; ++i) {
-                uint16_t raw;
-                std::memcpy(&raw, &src_f[i], sizeof(raw));
-                uint32_t bits = static_cast<uint32_t>(raw) << 16;
-                dst[i] = std::bit_cast<Casting::float32_t>(bits);
-            }
-
-            // FIX: sfence after NT stores
-            if (aligned) _mm_sfence();
-        };
-
-        std::vector<std::shared_future<void>> futures;
-        if (n <= t * 1024) {
-            compute(0, n);
-            return futures;
-        }
-
-        static auto& threadMgr = Threading::get_cpu_thread_pool();
-        const size_t chunk_size = ((n / t + 15) / 16) * 16;
-
-        size_t actual_threads = 0;
-        for (size_t tid = 0; tid < t; ++tid) {
-            if (tid * chunk_size >= n) break;
-            ++actual_threads;
-        }
-
-        auto worker = [compute](const size_t start, const size_t end) {
-            compute(start, end);
-        };
-        for (size_t thread_id = 0; thread_id < t; ++thread_id) {
-            const size_t start = thread_id * chunk_size;
-            const size_t end = std::min(start + chunk_size, n);
-            if (start >= n) break;
-            futures.push_back(threadMgr.submit(
-                [=] { worker(start, end); },
-                Threading::ThreadPriority::Normal
-            ).share());
-        }
-        return futures;
-    }
 
 
     /*
@@ -253,7 +43,7 @@ namespace BeanTensor::Tensors::detail {
     }
 
     template<typename T>
-    void fill_fixed_impli(void* data, size_t numel, const Tensors::Tensor& exec) {
+    void fill_fixed_impli(void* data, const size_t numel, const Tensors::Tensor& exec) {
         auto& threadMgr = Threading::get_cpu_thread_pool();
         static size_t t_count = Hardware::CPU().threads;
 
@@ -421,32 +211,46 @@ namespace BeanTensor::Tensors {
     std::string Tensor::contents_to_string() const {
         sync();
         std::ostringstream os;
-        if (this->device == Device::CPU) {
-            using PrintFn = void(*)(std::ostringstream&, const void*, const size_t*, const size_t, size_t&, const size_t);
-            using DType = Casting::DType;
 
-            static const std::unordered_map<DType, PrintFn> print_fns = {
-                {DType::Int8,     detail::print_recursive<int8_t>},
-                {DType::Int16,    detail::print_recursive<int16_t>},
-                {DType::Int32,    detail::print_recursive<int32_t>},
-                {DType::Int64,    detail::print_recursive<int64_t>},
-                {DType::UInt8,    detail::print_recursive<uint8_t>},
-                {DType::UInt16,   detail::print_recursive<uint16_t>},
-                {DType::UInt32,   detail::print_recursive<uint32_t>},
-                {DType::UInt64,   detail::print_recursive<uint64_t>},
-                {DType::Float16,  detail::print_recursive<Casting::float16_t>},
-                {DType::BFloat16, detail::print_recursive<Casting::bfloat16_t>},
-                {DType::Float32,  detail::print_recursive<float>},
-                {DType::Float64,  detail::print_recursive<double>}
-            };
-            const auto it = print_fns.find(this->dtype);
-            if (it == print_fns.end()) {
-                throw ErrorHandling::NotImplemented();
-            }
-            size_t idx = 0;
+        using PrintFn = void(*)(std::ostringstream&, const void*, const size_t*, const size_t, size_t&, const size_t);
+        using DType = Casting::DType;
+        static const std::unordered_map<DType, PrintFn> print_fns = {
+            {DType::Int8,     detail::print_recursive<int8_t>},
+            {DType::Int16,    detail::print_recursive<int16_t>},
+            {DType::Int32,    detail::print_recursive<int32_t>},
+            {DType::Int64,    detail::print_recursive<int64_t>},
+            {DType::UInt8,    detail::print_recursive<uint8_t>},
+            {DType::UInt16,   detail::print_recursive<uint16_t>},
+            {DType::UInt32,   detail::print_recursive<uint32_t>},
+            {DType::UInt64,   detail::print_recursive<uint64_t>},
+            {DType::Float16,  detail::print_recursive<Casting::float16_t>},
+            {DType::BFloat16, detail::print_recursive<Casting::bfloat16_t>},
+            {DType::Float32,  detail::print_recursive<Casting::float32_t>},
+            {DType::Float64,  detail::print_recursive<Casting::float64_t>},
+        };
+
+        const auto it = print_fns.find(this->dtype);
+        if (it == print_fns.end()) throw ErrorHandling::NotImplemented();
+        size_t idx = 0;
+
+        if (this->device == Device::CPU) {
             it->second(os, this->data, this->shape, this->ndim, idx, 0);
         } else if (this->device == Device::GPU) {
-            throw ErrorHandling::NotImplemented();
+#if defined(USE_CUDA)
+            cudaStreamSynchronize(stream);
+            void* host_buf = std::malloc(this->nbytes);
+            cudaMemcpy(host_buf, this->data, this->nbytes, cudaMemcpyDeviceToHost);
+            it->second(os, host_buf, this->shape, this->ndim, idx, 0);
+            std::free(host_buf);
+#elif defined(USE_HIP)
+            hipStreamSynchronize(stream);
+            void* host_buf = std::aligned_alloc(64, this->nbytes);
+            hipMemcpy(host_buf, this->data, this->nbytes, hipMemcpyDeviceToHost);
+            it->second(os, host_buf, this->shape, this->ndim, idx, 0);
+            std::free(host_buf);
+#else
+            throw ErrorHandling::GPUTaskOnCPUBuild();
+#endif
         } else {
             __builtin_unreachable();
         }
@@ -546,15 +350,17 @@ namespace BeanTensor::Tensors {
 
             if (Casting::dtype_is_float(this->dtype)) {
                 if (this->dtype == Casting::DType::Float32 && new_dtype == Casting::DType::BFloat16) {
-                    if (Hardware::CPU().f16c) {
-                        this->give_futures(detail::avx512_fp32_to_bf16(this->data, static_cast<Casting::bfloat16_t*>(dst), this->numel));
+                    if (Hardware::CPU().avx512bf16) {
+                        this->give_futures(Intrinsics::detail::avx512_fp32_to_bf16(static_cast<Casting::float32_t*>(this->data), static_cast<Casting::bfloat16_t*>(dst), this->numel));
                         converted = true;
+                    } else {
+                        throw ErrorHandling::NotImplemented();
                     }
                 } else if (this->dtype == Casting::DType::BFloat16 && new_dtype == Casting::DType::Float32) {
-                    if (Hardware::CPU().f16c) {
-                        this->give_futures(detail::avx512_bf16_to_fp32(this->data, static_cast<float*>(dst), this->numel));
+                    if (Hardware::CPU().avx512bf16) {
+                        this->give_futures(Intrinsics::detail::avx512_bf16_to_fp32(static_cast<Casting::bfloat16_t*>(this->data), static_cast<Casting::float32_t*>(dst), this->numel));
                     } else {
-                        this->give_futures(detail::unaccelerated_bf16_to_fp32(this->data, static_cast<float*>(dst), this->numel));
+                        this->give_futures(Intrinsics::detail::unaccelerated_bf16_to_fp32(static_cast<Casting::bfloat16_t*>(this->data), static_cast<Casting::float32_t*>(dst), this->numel));
                     }
                     converted = true;
                 }

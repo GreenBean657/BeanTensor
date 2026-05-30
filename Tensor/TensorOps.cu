@@ -4,6 +4,9 @@
 #if defined(USE_CUDA)
 #include "Tensor/TensorOps.h"
 
+#include <iostream>
+#include <ostream>
+
 #include "Tensor.h"
 
 /**
@@ -67,16 +70,16 @@ __global__ void implementation_fp32_fp64_to_bf16(Ptr* __restrict__ src, Casting:
             }
         }
         const __nv_bfloat162 packed = __floats2bfloat162_rn(
-            static_cast<float>(src[i * 2]), static_cast<float>(src[i * 2 + 1]));
+            static_cast<Casting::float32_t>(src[i * 2]), static_cast<Casting::float32_t>(src[i * 2 + 1]));
         reinterpret_cast<__nv_bfloat162*>(dst)[i] = packed;
     }
 
     if (end % 2 != 0 && tid == 0) {
         if (!allow_unsafe_conversions && helper_fp32_fp64_to_bf16(&src[end - 1])) {
-            atomicAdd(fail_check, 1);
+            atomicOr(fail_check, 1);
             return;
         }
-        dst[end - 1] = __float2bfloat16(static_cast<float>(src[end - 1]));
+        dst[end - 1] = __float2bfloat16(static_cast<Casting::float32_t>(src[end - 1]));
     }
 }
 
@@ -229,6 +232,7 @@ namespace BeanTensor::Tensors::detail {
     __host__ void move_to_gpu(Tensor& t, uint32_t device) {
         if (t.device != Device::CPU) return;
         t.sync();
+        t.kill_buffer();
         const auto worker = [&t, device] {
             {
                 int count = 0;
@@ -261,6 +265,7 @@ namespace BeanTensor::Tensors::detail {
         const auto worker = [&t] {
             cudaDeviceProp prop{};
             CUDA_CHECK_ERROR(cudaGetDeviceProperties(&prop, t.gpu_id));
+            CUDA_CHECK_ERROR(cudaSetDevice(t.gpu_id));
             if (prop.warpSize == 0) throw std::invalid_argument("Invalid GPU id");
             void* buffer = std::aligned_alloc(64, t.nbytes);
             CUDA_CHECK_ERROR(cudaMemcpy(buffer, t.data, t.nbytes, cudaMemcpyDeviceToHost));
@@ -307,12 +312,15 @@ namespace BeanTensor::Tensors::detail {
         t.give_future(future);
     }
 
-    __host__ void convert_gpu(Tensor& t, const BeanTensor::Casting::DType& new_dtype, bool use_inf_conversions) {
+    __host__ void convert_gpu(Tensor& t, const BeanTensor::Casting::DType& new_dtype, const bool use_inf_conversions) {
         if (t.device != Device::GPU) return;
         if (t.dtype == new_dtype) return;
         t.sync();
         t.kill_buffer();
-        const auto worker = [&] {
+        // NOTE: new_dtype/use_inf_conversions must be captured BY VALUE — the worker runs
+        // async on the thread pool after convert_gpu returns, by which point new_dtype (a
+        // reference bound to a temporary in the caller) and the local bool have been destroyed.
+        const auto worker = [&t, new_dtype, use_inf_conversions] {
             const size_t target_buffer_size = t.numel * Casting::dtype_size(new_dtype);
             if (t.convert_buf == nullptr || t.convert_buf_size < target_buffer_size) {
                 CUDA_CHECK_ERROR(cudaFree(t.convert_buf));
@@ -323,8 +331,8 @@ namespace BeanTensor::Tensors::detail {
             size_t blocks = (t.numel + threads - 1) / threads;
             int32_t* check_err = nullptr;
             CUDA_CHECK_ERROR(cudaMalloc(&check_err, sizeof(int32_t)));
-            constexpr bool temp = false;
-            CUDA_CHECK_ERROR(cudaMemcpy(check_err, &temp, sizeof(bool), cudaMemcpyHostToDevice));
+            constexpr int32_t temp = 0;
+            CUDA_CHECK_ERROR(cudaMemcpy(check_err, &temp, sizeof(int32_t), cudaMemcpyHostToDevice));
 
             if (Casting::dtype_is_float(new_dtype)) {
                 if (t.dtype == Casting::DType::Float32 && new_dtype == Casting::DType::BFloat16) {
@@ -338,7 +346,8 @@ namespace BeanTensor::Tensors::detail {
 
             size_t ret = 0;
             CUDA_CHECK_ERROR(cudaMemcpy(&ret, check_err, sizeof(int32_t), cudaMemcpyDeviceToHost));
-            assert(check_err != nullptr && ret == 0);
+            assert(check_err != nullptr);
+            assert(ret == 0);
             CUDA_CHECK_ERROR(cudaFree(check_err));
 
             void* old_data = t.data;

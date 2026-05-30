@@ -16,13 +16,23 @@ namespace BeanTensor::Hardware {
 
     inline CPUFeatureSet detect_cpu() {
         CPUFeatureSet cpuFeatureSet{};
-        cpuFeatureSet.f16c = __builtin_cpu_supports("f16c");
-        cpuFeatureSet.fp16 = __builtin_cpu_supports("avx512fp16");
-        cpuFeatureSet.avx = __builtin_cpu_supports("avx");
-        cpuFeatureSet.avx2 = __builtin_cpu_supports("avx2");
-        cpuFeatureSet.avx512f = __builtin_cpu_supports("avx512f");
-        cpuFeatureSet.avx512bf16 = __builtin_cpu_supports("avx512bf16");
-        cpuFeatureSet.fma = __builtin_cpu_supports("fma");
+        cpuFeatureSet.f16c = false;
+        cpuFeatureSet.fp16 = false;
+        cpuFeatureSet.avx = false;
+        cpuFeatureSet.avx2 = false;
+#ifdef __AVX512F__
+        cpuFeatureSet.avx512f = true;
+#else
+        cpuFeatureSet.avx512f = false;
+#endif
+
+#ifdef __AVX512BF16__
+        cpuFeatureSet.avx512bf16 = true;
+#else
+        cpuFeatureSet.avx512bf16 = false;
+#endif
+
+        cpuFeatureSet.fma = false;
         cpuFeatureSet.threads = std::thread::hardware_concurrency();
 #ifdef USE_NPU_STRIXHALO
         cpuFeatureSet.npu_strix_halo = true;

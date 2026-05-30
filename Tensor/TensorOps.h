@@ -55,6 +55,13 @@ namespace BeanTensor::Tensors {
          * @param use_inf_conversions Whether to use InF and NaN conversions. If false, the program will fire a failure if an unsafe conversion occurs.
          */
         void convert_gpu(Tensor& t, const BeanTensor::Casting::DType& new_dtype, bool use_inf_conversions = false);
+
+        /**
+         * @note Calls on base to-string after soft cloning the tensor.
+         * @param t Tensor to pull from
+         * @return PMR String as requested.
+         */
+        std::string gpu_tensor_to_string(const Tensor& t);
     }
 }
 

@@ -42,33 +42,20 @@ int main() {
 
 using namespace BeanTensor;
 int main() {
-    auto b = Tensors::Tensor({2, 3}, Casting::DType::Float32, Tensors::Device::CPU, false);
-    auto c = Tensors::Tensor({2, 3}, Casting::DType::Float32, Tensors::Device::GPU, false);
-    b.random(0, 2, 42);
-    c.random(0, 2, 42);
-    b.to(Tensors::Device::CPU);
-    std::cout << "B Original on CPU (FP32):" << std::endl;
-    std::cout << b.contents_to_string() << std::endl;
-    b.to(Tensors::Device::GPU);
-    std::cout << "B Converting to FP32>BF16 and back (GPU)" << std::endl;
-    b.convert_dtype(Casting::DType::BFloat16);
-    b.convert_dtype(Casting::DType::Float32);
-    b.convert_dtype(Casting::DType::BFloat16);
-    b.convert_dtype(Casting::DType::Float32);
-    b.convert_dtype(Casting::DType::Float32);
-    std::cout << "B Back to CPU:" << std::endl;
-    b.to(Tensors::Device::CPU);
-    std::cout << b.contents_to_string() << std::endl;
+    auto b = Tensors::Tensor({6}, Casting::DType::Float32, Tensors::Device::CPU, false);
+    auto c = Tensors::Tensor({6}, Casting::DType::Float32, Tensors::Device::CPU, false);
+    b.random(-2, 2, 42);
+    c.random(-2, 2, 42);
 
-    c.to(Tensors::Device::CPU);
-    std::cout << "C Original on CPU (FP32)" << std::endl;
+    std::cout << "C Original on GPU (FP32)" << std::endl;
     std::cout << c.contents_to_string() << std::endl;
-    std::cout << "C Converting to FP32>BF16 and back (CPU)" << std::endl;
+    c.to(Tensors::Device::GPU);
+    std::cout << "C Converting to FP32>BF16 and back (GPU)" << std::endl;
     c.convert_dtype(Casting::DType::BFloat16);
     c.convert_dtype(Casting::DType::Float32);
     c.convert_dtype(Casting::DType::BFloat16);
     c.convert_dtype(Casting::DType::Float32);
-    std::cout << "C Back to CPU:" << std::endl;
+    std::cout << "OUTPUTS (double FP32>BF16>FP32 round trip):" << std::endl;
     c.to(Tensors::Device::CPU);
     std::cout << c.contents_to_string() << std::endl;
 }
