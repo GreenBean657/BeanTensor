@@ -179,5 +179,9 @@ namespace BeanTensor::Intrinsics::detail {
     std::vector<std::shared_future<void>> avx512_fp32_to_bf16(const float* src, const size_t& end) {
         throw ErrorHandling::CPUIllegalInstruction("AVX512BF");
     }
+
+    std::vector<std::shared_future<void> > avx512_bf16_to_fp32(const Casting::bfloat16_t *src, Casting::float32_t *dst, const size_t &end) {
+        throw ErrorHandling::CPUIllegalInstruction("AVX512BF");
+    }
 #endif
 }

@@ -160,13 +160,16 @@ add_executable(BeanTensorV4
         Ops/Elementwise/Add/cpu_Add.cpp
         Intrinsics/AVX512/DTypeConversions.cpp
         Intrinsics/AVX512/DTypeConversions.h
-        Intrinsics/Native/DTypeConversions.cpp
         Intrinsics/Native/DTypeConversions.h
+        Intrinsics/Shared/SharedIntrinsics.h
 )
 
 if(USE_STRIX_HALO)
 add_executable(BeanTensorV4
         NPU/NPUBackend.cpp
+        Intrinsics/AVX2/DTypeConversions.cpp
+        Intrinsics/AVX2/DTypeConversions.h
+        Intrinsics/Shared/SharedIntrinsics.h
 )
 endif()
 
@@ -177,7 +180,6 @@ if(USE_HIP)
             Tensor/Tensor.cpp
             Tensor/TensorOps.cpp
             Intrinsics/AVX512/DTypeConversions.cpp
-            Intrinsics/Native/DTypeConversions.cpp
             PROPERTIES LANGUAGE HIP
     )
 elseif(USE_CUDA)
@@ -206,7 +208,7 @@ endif()
 
 target_compile_options(BeanTensorV4 PRIVATE
 #        -mavx512f
-        -mavx512bf16
+#        -mavx512bf16
 #        -mf16c
 )
 

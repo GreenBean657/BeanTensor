@@ -40,6 +40,7 @@ int main() {
 */
 
 
+/*
 using namespace BeanTensor;
 int main() {
     auto b = Tensors::Tensor({6}, Casting::DType::Float32, Tensors::Device::CPU, false);
@@ -58,4 +59,20 @@ int main() {
     std::cout << "OUTPUTS (double FP32>BF16>FP32 round trip):" << std::endl;
     c.to(Tensors::Device::CPU);
     std::cout << c.contents_to_string() << std::endl;
+}
+*/
+
+#include "Intrinsics/ConversionMethods.h"
+using namespace BeanTensor;
+int main() {
+    {
+        auto* a = new Tensors::Tensor({6}, Casting::DType::Float32, Tensors::Device::CPU, false);
+        a->random(1, 2, 42);
+        auto b = a->clone(false);
+        std::cout << a->contents_to_string() << std::endl;
+        delete a;
+        std::cout << b.contents_to_string() << std::endl;
+        auto clamp = ConversionClampMethod::HARD_ERROR;
+        const auto vec = b.contents_to_flat_vector<uint32_t>();
+    }
 }

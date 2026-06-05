@@ -2,8 +2,10 @@
 #define BT_TENSOR_MAX_DIMS 8 // PUT BEFORE INCLUDES
 #define BT_TENSOR_MAX_PARENTS 3 // THIS HAS TO BE AT THE TOP
 
+#include <cassert>
 #include <future>
 #include <random>
+#include <unordered_map>
 
 #include "Dtypes.h"
 #include "Errors/logic.h"
@@ -16,6 +18,12 @@
 #elif defined(USE_CUDA)
 #include <cuda_runtime.h>
 #endif
+
+namespace BeanTensor::Tensors { class Tensor; }
+namespace BeanTensor::Tensors::detail {
+    template<typename DType, typename TensorType> requires std::is_arithmetic_v<DType> || std::is_same_v<DType, Casting::float16_t> || std::is_same_v<DType, Casting::bfloat16_t>
+    void flat_vector_impli(std::vector<DType>& vec, const Tensors::Tensor& exec);
+}
 
 namespace BeanTensor::Tensors {
     enum class Device {
@@ -30,7 +38,11 @@ namespace BeanTensor::Tensors {
 
         ~Tensor() {
             sync();
-
+            if (!this->children.empty() && this->owns_data) {
+                for (const auto & i : this->children) {
+                    i->notify_child(this->data);
+                }
+            }
             kill_cpu_data();
             kill_gpu_data();
             kill_buffer();
@@ -96,7 +108,50 @@ namespace BeanTensor::Tensors {
          */
         [[nodiscard]] std::string contents_to_string() const;
 
-        [[nodiscard]] std::vector<size_t> contents_to_flat_vector() const;
+        /**
+         * Get a flat, 1D vector made up of this tensor.
+         * @tparam DType DType of the resulting vector.
+         * @return Vector to output.
+         */
+        template<typename DType> requires std::is_arithmetic_v<DType>
+                                          or std::is_same_v<DType, Casting::float16_t>
+                                          or std::is_same_v<DType, Casting::bfloat16_t>
+        [[nodiscard]] std::vector<DType> contents_to_flat_vector() const {
+            std::vector<DType> vec;
+            vec.resize(this->numel);
+            if (this->device == Device::CPU) {
+                using FlatFn = void(*)(std::vector<DType>&, const Tensor&);
+                static const std::unordered_map<Casting::DType, FlatFn> flat_map = {
+                    {Casting::DType::Int8,     detail::flat_vector_impli<DType, int8_t>},
+                    {Casting::DType::Int16,    detail::flat_vector_impli<DType, int16_t>},
+                    {Casting::DType::Int32,    detail::flat_vector_impli<DType, int32_t>},
+                    {Casting::DType::Int64,    detail::flat_vector_impli<DType, int64_t>},
+                    {Casting::DType::UInt8,    detail::flat_vector_impli<DType, uint8_t>},
+                    {Casting::DType::UInt16,   detail::flat_vector_impli<DType, uint16_t>},
+                    {Casting::DType::UInt32,   detail::flat_vector_impli<DType, uint32_t>},
+                    {Casting::DType::UInt64,   detail::flat_vector_impli<DType, uint64_t>},
+                    {Casting::DType::Float16,  detail::flat_vector_impli<DType, Casting::float16_t>},
+                    {Casting::DType::BFloat16, detail::flat_vector_impli<DType, Casting::bfloat16_t>},
+                    {Casting::DType::Float32,  detail::flat_vector_impli<DType, float>},
+                    {Casting::DType::Float64,  detail::flat_vector_impli<DType, double>},
+                };
+                const auto it = flat_map.find(this->dtype);
+                if (it == flat_map.end()) throw ErrorHandling::NotImplemented();
+                it->second(vec, *this);
+            } else if (device == Device::GPU) {
+                throw ErrorHandling::NotImplemented();
+            } else {
+                __builtin_unreachable();
+            }
+            return vec;
+        }
+
+        /**
+         * Make a copy of this tensor.
+         * @param hard_copy Should the clone share the same pointer?
+         * @return New Tensor.
+         */
+        [[nodiscard]] Tensor clone(bool hard_copy = true);
 
         template<typename T>
         [[nodiscard]] T* at(const std::initializer_list<size_t> idx) {
@@ -105,42 +160,6 @@ namespace BeanTensor::Tensors {
 
         [[nodiscard]] bool is_same_shape(const Tensor& t2) {
             return (ndim == t2.ndim) && std::equal(shape, shape + ndim, t2.shape);
-        }
-
-        [[nodiscard]] Tensor make_slice(const size_t dim, const size_t index) {
-            if (this->ndim <= 1) {
-                throw std::invalid_argument("Cannot slice a 1D tensor into a 0D scalar.");
-            }
-            if (dim > this->ndim) {
-                throw std::invalid_argument("Dimension to slice along is out of bounds.");
-            }
-            if (index > this->shape[dim]) {
-                throw std::invalid_argument("Index out of bounds.");
-            }
-            /*
-            assert(parent._ndim > 1); // slicing a 1D tensor would produce a 0-dim scalar;
-            assert(dim < parent._ndim);
-            assert(index < parent._shape[dim]);
-            */
-            std::vector<size_t> new_shape{};
-            for (size_t i = 0; i < this->ndim; i++) {
-                new_shape.push_back(shape[i]);
-            }
-            auto child = Tensor(new_shape, this->dtype, this->device, this->requires_grad);
-            child.owns_data = false;
-
-            child.offset = this->offset + index * this->strides[dim];
-
-            for (size_t i = dim; i < this->ndim - 1; ++i) {
-                this->shape[i]   = this->shape[i + 1];
-                this->strides[i] = this->strides[i + 1];
-            }
-            child.ndim  -= 1;
-            child.numel  = 1;
-            for (size_t i = 0; i < child.ndim; ++i)
-                child.numel *= child.shape[i];
-            child.nbytes = child.numel * Casting::dtype_size(child.dtype);
-            return child;
         }
 
         void to(const Device &new_device, uint64_t id = 0);
@@ -183,6 +202,7 @@ namespace BeanTensor::Tensors {
         uint8_t n_parents = 0; // Number of parent tensors (for 2-4)
         bool is_leaf = true; // Is this tensor a leaf in the autograd graph?
 
+        std::vector<Tensor*>children{}; // Should this tensor notify anyone when it's killed?
         /**
          * Compute the strides of this tensor based on its shape. Should be called after setting shape and ndim.
          */
@@ -261,6 +281,11 @@ namespace BeanTensor::Tensors {
             }
         }
 
+        /**
+         * Notify a child tensor it needs to clone the data to stay alive.
+         */
+        void notify_child(const void* data);
+
         /*
          * GPU Definitions
          */
@@ -271,6 +296,9 @@ namespace BeanTensor::Tensors {
         friend void detail::move_gpu_to_gpu(Tensor& t, uint32_t new_device);
         friend void detail::convert_gpu(Tensor& t, const BeanTensor::Casting::DType& new_dtype, bool use_inf_conversions);
 
+        template<typename DType, typename TensorType> requires std::is_arithmetic_v<DType> || std::is_same_v<DType, Casting::float16_t> || std::is_same_v<DType, Casting::bfloat16_t>
+        friend void detail::flat_vector_impli(std::vector<DType>& vec, const Tensors::Tensor& exec);
+
     };
     struct Node {
         void (*_backward_fn)(Tensor* output_grad, Tensor** inputs, size_t n_inputs);
@@ -280,4 +308,41 @@ namespace BeanTensor::Tensors {
         size_t  _n_saved;
         size_t  _n_outputs_pending;
     };
+}
+
+namespace BeanTensor::Tensors::detail {
+    template<typename DType, typename TensorType> requires std::is_arithmetic_v<DType> || std::is_same_v<DType, Casting::float16_t> || std::is_same_v<DType, Casting::bfloat16_t>
+    void flat_vector_impli(std::vector<DType>& vec, const Tensors::Tensor& exec) {
+        if (exec.numel == 0) return;
+        auto& threadMgr = Threading::get_cpu_thread_pool();
+        assert(exec.device == Device::CPU);
+        assert(vec.size() > 0);
+        auto worker = [&vec, &exec](const size_t t_start, const size_t t_end) {
+            DType* ptr = vec.data();
+            const auto* src = static_cast<const TensorType*>(exec.data);
+            for (size_t i = t_start; i < t_end; ++i) {
+                if constexpr (std::is_same_v<TensorType, Casting::float16_t> || std::is_same_v<TensorType, Casting::bfloat16_t>) {
+                    ptr[i] = static_cast<DType>(Casting::to_float(src[i]));
+                } else {
+                    ptr[i] = static_cast<DType>(src[i]);
+                }
+            }
+        };
+        if (vec.size() <= 1024) {
+            worker(0, vec.size());
+        } else {
+            std::vector<std::shared_future<void>> futures;
+            size_t threads = Hardware::CPU().threads;
+            const size_t chunk_size = (vec.size() + threads - 1) / threads;
+            for (size_t i = 0; i < threads; i++) {
+                const size_t t_start = i * chunk_size;
+                const size_t t_end = std::min(t_start + chunk_size, vec.size());
+                futures.push_back(threadMgr.submit(
+                    [=] { worker(t_start, t_end); },
+                    Threading::ThreadPriority::High
+                ).share());
+            }
+            for (auto& future : futures) future.wait();
+        }
+    }
 }

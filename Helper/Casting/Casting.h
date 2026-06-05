@@ -2,27 +2,13 @@
 #include "casting_detail.h"
 using namespace BeanTensor;
 namespace BeanTensor::Casting {
+    template <class T> __always_inline constexpr bool is_float_kind_v =
+        std::is_floating_point_v<T>
+        || std::is_same_v<T, Casting::bfloat16_t>
+        || std::is_same_v<T, Casting::float16_t>;
 
-    /*
-    enum class DType {
-        BFloat16 = -99,
-        Float16 = -100,
-        Float32 = -101,
-        Float64 = -102,
-        Int64 = 11,
-        Int32 = 10,
-        Int16 = 9,
-        Int8 = 8,
-        UInt64 = 21,
-        UInt32 = 20,
-        UInt16 = 19,
-        UInt8 = 18
-    };
-    */
     inline DType get_highest_precision(const DType& a, const DType& b) {
 
         return DType::BFloat16;
     }
-
-
 }

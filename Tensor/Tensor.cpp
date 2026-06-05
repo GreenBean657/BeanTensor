@@ -408,16 +408,63 @@ namespace BeanTensor::Tensors {
         throw ErrorHandling::NotImplemented();
     }
 
-    std::vector<size_t> Tensor::contents_to_flat_vector() const {
-        sync();
-        std::vector<size_t> result(this->numel);
-        if (this->device == Device::CPU) {
-            std::memcpy(result.data(), this->data, this->nbytes);
-        } else if (this->device == Device::GPU) {
-            throw ErrorHandling::NotImplemented();
+    Tensor Tensor::clone(const bool hard_copy) {
+        std::vector<size_t> shape;
+        for (size_t i = 0; i < this->ndim; i++) {
+            shape.push_back(this->shape[i]);
+        }
+        auto clone = Tensor(shape, this->dtype, this->device, this->requires_grad);
+        clone.sync();
+
+        if (device == Device::CPU) {
+            if (hard_copy) {
+                clone.owns_data = true;
+                memcpy(clone.data, this->data, this->nbytes);
+            } else {
+                clone.owns_data = false;
+                clone.data = this->data;
+                this->children.emplace_back(&clone);
+            }
+        } else if (device == Device::GPU) {
+            clone.gpu_id = this->gpu_id;
+            if (hard_copy) {
+                clone.owns_data = true;
+            } else {
+                clone.owns_data = false;
+                clone.data = this->data;
+                this->children.emplace_back(&clone);
+            }
         } else {
             __builtin_unreachable();
         }
-        return result;
+        return clone;
     }
+
+    void Tensor::notify_child(const void* data) {
+        if (this->device == Device::CPU) {
+            this->kill_cpu_data();
+            this->kill_buffer();
+            this->sync();
+            this->data = std::aligned_alloc(64, this->nbytes);
+            memcpy(this->data, data, this->nbytes);
+        } else if (this->device == Device::GPU) {
+            this->kill_gpu_data();
+            this->kill_buffer();
+            this->sync();
+#if defined(USE_HIP)
+            throw ErrorHandling::NotImplemented();
+#elif defined(USE_CUDA)
+            void* new_data = nullptr;
+            CUDA_CHECK_ERROR(cudaSetDevice(this->gpu_id));
+            CUDA_CHECK_ERROR(cudaMalloc(&new_data, this->nbytes));
+            CUDA_CHECK_ERROR(cudaMemcpy(new_data, data, this->nbytes, cudaMemcpyDeviceToDevice));
+            this->data = new_data;
+#else
+            throw ErrorHandling::GPUTaskOnCPUBuild();
+#endif
+        } else {
+            __builtin_unreachable();
+        }
+    }
+
 }
