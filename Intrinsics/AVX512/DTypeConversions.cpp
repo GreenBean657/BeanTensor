@@ -3,7 +3,7 @@
 //
 
 #include "DTypeConversions.h"
-#include "Errors/logic.h"
+#include "Errors/Logic.h"
 #include <immintrin.h>
 namespace BeanTensor::Intrinsics::detail {
 #ifdef __AVX512BF16__

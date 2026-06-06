@@ -34,31 +34,12 @@ namespace BeanTensor::Casting {
 
     inline float16_t  as_f16 (uint16_t x) { return static_cast<float16_t> (x); }
     inline bfloat16_t as_bf16(uint16_t x) { return static_cast<bfloat16_t>(x); }
-
-    inline float to_float(const bfloat16_t x) {
-        const uint32_t expanded = static_cast<uint32_t>(raw(x)) << 16;
-        float result;
-        std::memcpy(&result, &expanded, sizeof(result));
-        return result;
-    }
-    inline float to_float(const float16_t x) {
-        const uint16_t bits = raw(x);
-        const uint32_t sign     = (bits & 0x8000u) << 16;
-        const uint32_t exponent = (bits & 0x7C00u) >> 10;
-        const uint32_t mantissa = (bits & 0x03FFu);
-        uint32_t expanded;
-        if (exponent == 31u) {
-            expanded = sign | 0x7F800000u | (mantissa << 13);
-        } else if (exponent == 0u) {
-            expanded = sign | (mantissa << 13);
-        } else {
-            expanded = sign | ((exponent + 112u) << 23) | (mantissa << 13);
-        }
-        float result;
-        std::memcpy(&result, &expanded, sizeof(result));
-        return result;
-    }
 #endif
+    template <class T> constexpr bool is_float_kind_v =
+    std::is_floating_point_v<T>
+    || std::is_same_v<T, bfloat16_t>
+    || std::is_same_v<T, float16_t>;
+
     using float32_t = float;
     using float64_t = double;
     enum class DType {
@@ -116,83 +97,26 @@ namespace BeanTensor::Casting {
         return "Unknown";
     }
 
-    inline bool dtype_is_float(const DType dt) {
-        return
-           (dt == DType::Float16)
-        || (dt == DType::BFloat16)
-        || (dt == DType::Float32)
-        || (dt == DType::Float64);
-    }
-
-    inline bool dtype_is_int(const DType dt) {
-        return (dt == DType::Int8)
-            || (dt == DType::Int16)
-            || (dt == DType::Int32)
-            || (dt == DType::Int64);
-    }
-
-    inline bool dtype_is_uint(const DType dt) {
-        return (dt == DType::UInt8)
-        || (dt == DType::UInt16)
-        || (dt == DType::UInt32)
-        || (dt == DType::UInt64);
-    }
-
-}
-namespace BeanTensor::Casting::detail {
-    inline uint8_t dtype_rank(const DType& dt) {
+    inline bool dtype_is_float(const DType& dt) {
         switch (dt) {
-            case DType::Float16:  return 0;
-            case DType::BFloat16:  return 1;
-            case DType::Float32: return 2;
-            case DType::Float64: return 3;
-
-            case DType::Int8:   return 0;
-            case DType::Int16:  return 1;
-            case DType::Int32:  return 2;
-            case DType::Int64:  return 3;
-
-            case DType::UInt8:  return 10;
-            case DType::UInt16: return 11;
-            case DType::UInt32: return 12;
-            case DType::UInt64: return 13;
-
-
-            default: {
-                __builtin_unreachable();
-            }
+            case DType::Float16:  return true;
+            case DType::BFloat16:  return true;
+            case DType::Float32:  return true;
+            case DType::Float64:  return true;
+            default: return false;
         }
     }
-    inline bool operator<(const DType& a, const DType& b) {
-        if (a == b) return false;
+}
 
-        if (dtype_is_int(a) && dtype_is_int(b)) {
-            return dtype_rank(a) < dtype_rank(b);
-        }
-        if (dtype_is_uint(a) && dtype_is_uint(b)) {
-            return dtype_rank(a) < dtype_rank(b);
-        }
-        if (dtype_is_float(a) && dtype_is_float(b)) {
-            return dtype_rank(a) < dtype_rank(b);
-        }
+namespace BeanTensor::Casting::detail {
 
-        if ((dtype_is_int(a) && dtype_is_float(b)) || (dtype_is_float(a) && dtype_is_int(b))) {
-            // Float always wins over int
-            return dtype_is_int(a);
-        }
-        if ((dtype_is_uint(a) && dtype_is_float(b)) || (dtype_is_float(a) && dtype_is_uint(b))) {
-            // Float always wins over uint
-            return dtype_is_uint(a);
-        }
-        if ((dtype_is_int(a) && dtype_is_uint(b)) || (dtype_is_uint(a) && dtype_is_int(b))) {
-            // Int vs uint: signed int wins only if it has strictly more bits (can represent
-            // all uint values); otherwise unsigned wins (larger positive range at equal width).
-            DType int_dt  = dtype_is_int(a)  ? a : b;
-            DType uint_dt = dtype_is_uint(a) ? a : b;
-            bool int_wins = dtype_size(int_dt) > dtype_size(uint_dt);
-            return int_wins ? dtype_is_uint(a) : dtype_is_int(a);
-        }
+    constexpr float32_t F16_MAX      =  65504.0f;
+    constexpr float32_t F16_MIN      = -65504.0f;
+    constexpr float32_t F16_MIN_POS  =  0.000060975552f;
+    constexpr float32_t F16_EPSILON  =  0.000977f;
 
-        return false;
-    }
+    constexpr float32_t BF16_MAX     =  3.38953139e+38f;
+    constexpr float32_t BF16_MIN     = -3.38953139e+38f;
+    constexpr float32_t BF16_MIN_POS =  1.175494351e-38f;
+    constexpr float32_t BF16_EPSILON =  0.0078125f;
 }

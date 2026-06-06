@@ -1,8 +1,9 @@
 #pragma once
+#include <cassert>
 #include <iostream>
-#include <hip/hip_runtime.h>
 namespace BeanTensor::ErrorHandling {
 #ifdef USE_HIP
+#include <hip/hip_runtime.h>
     inline void checkError(const hipError_t err) {
         if (err != hipSuccess) {
             std::cerr << "HIP Error: " << hipGetErrorString(err) << std::endl;
@@ -15,7 +16,7 @@ namespace BeanTensor::ErrorHandling {
         }
     }
 #else
-    inline void checkError(const void err) {
+    inline void checkError(const void* err) {
         assert(false && "No GPU backend defined, but checkError was called");
     }
 #endif

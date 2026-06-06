@@ -2,7 +2,7 @@
 #include <immintrin.h>
 #include <vector>
 #include <sstream>
-#include "Helper/Casting/casting_detail.h"
+
 #include "Intrinsics/AVX512/DTypeConversions.h"
 #include "Intrinsics/Native/DTypeConversions.h"
 using namespace BeanTensor;
@@ -26,8 +26,10 @@ namespace BeanTensor::Tensors::detail {
         os << "[";
         if (ndim == 1) {
             for (size_t i = 0; i < shape[0]; ++i) {
-                if constexpr (std::is_same_v<T, Casting::bfloat16_t> || std::is_same_v<T, Casting::float16_t>) {
-                    os << Casting::to_float(ptr[idx++]);
+                if constexpr (std::is_same_v<T, Casting::bfloat16_t>) {
+                    os << Intrinsics::detail::unaccel_bf16_to_fp32(ptr[idx++]);
+                } else if constexpr (std::is_same_v<T, Casting::float16_t>) {
+                    os << Intrinsics::detail::unaccel_fp16_to_fp32_untracked(ptr[idx++]);
                 } else {
                     os << ptr[idx++];
                 }
@@ -360,7 +362,8 @@ namespace BeanTensor::Tensors {
                     if (Hardware::CPU().avx512bf16) {
                         this->give_futures(Intrinsics::detail::avx512_bf16_to_fp32(static_cast<Casting::bfloat16_t*>(this->data), static_cast<Casting::float32_t*>(dst), this->numel));
                     } else {
-                        this->give_futures(Intrinsics::detail::unaccelerated_bf16_to_fp32(static_cast<Casting::bfloat16_t*>(this->data), static_cast<Casting::float32_t*>(dst), this->numel));
+                        throw ErrorHandling::NotImplemented();
+                        //this->give_futures(Intrinsics::detail::unaccelerated_bf16_to_fp32(static_cast<Casting::bfloat16_t*>(this->data), static_cast<Casting::float32_t*>(dst), this->numel));
                     }
                     converted = true;
                 }

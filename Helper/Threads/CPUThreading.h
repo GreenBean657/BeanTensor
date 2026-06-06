@@ -7,7 +7,7 @@
 #include <condition_variable>
 #include <future>
 
-#include "Helper/hardware.h"
+#include "Helper/Hardware.h"
 
 namespace BeanTensor::Threading {
 

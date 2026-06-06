@@ -1,6 +1,6 @@
 #pragma once
 #include <cstdint>
-#include "Errors/logic.h"
+#include "Errors/Logic.h"
 
 #if !defined(USE_HIP) && !defined(USE_CUDA)
 namespace BeanTensor::Tensors {

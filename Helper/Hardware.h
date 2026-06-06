@@ -33,12 +33,12 @@ namespace BeanTensor::Hardware {
 #endif
 
         cpuFeatureSet.fma = false;
-        cpuFeatureSet.threads = std::thread::hardware_concurrency();
 #ifdef USE_NPU_STRIXHALO
         cpuFeatureSet.npu_strix_halo = true;
 #else
         cpuFeatureSet.npu_strix_halo = false;
 #endif
+        cpuFeatureSet.threads = std::thread::hardware_concurrency();
         if (cpuFeatureSet.threads == 0) {
             cpuFeatureSet.threads = 4;
         }

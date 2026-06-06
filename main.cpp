@@ -72,7 +72,6 @@ int main() {
         std::cout << a->contents_to_string() << std::endl;
         delete a;
         std::cout << b.contents_to_string() << std::endl;
-        auto clamp = ConversionClampMethod::HARD_ERROR;
         const auto vec = b.contents_to_flat_vector<uint32_t>();
     }
 }

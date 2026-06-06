@@ -8,8 +8,8 @@
 #include <unordered_map>
 
 #include "Dtypes.h"
-#include "Errors/logic.h"
-#include "Helper/Threads/cpu_threading.h"
+#include "Errors/Logic.h"
+#include "Helper/Threads/CPUThreading.h"
 
 #include "TensorOps.h"
 #ifdef USE_HIP
