@@ -7,6 +7,8 @@
 
 namespace BeanTensor::Intrinsics::detail {
 
+
+
     [[nodiscard]] inline Casting::float32_t unaccel_bf16_to_fp32(const Casting::bfloat16_t& val) {
         const std::uint32_t prior_bf = static_cast<std::uint32_t>(val) << 16;
         Casting::float32_t f{0};
@@ -155,6 +157,7 @@ namespace BeanTensor::Intrinsics::detail {
         bool ignored_flag = false;
         return unaccel_fp32_to_fp16_tracked(val, ignored_flag, ConversionClampMethod::PERMISSIVE);
     }
+
 
 
 }

@@ -12,6 +12,8 @@
 #include "Helper/Threads/CPUThreading.h"
 
 #include "TensorOps.h"
+#include "Intrinsics/Native/DTypeConversions.h"
+#include "Intrinsics/Shared/SharedIntrinsics.h"
 #ifdef USE_HIP
 #include <hip/hip_runtime.h>
 #include <hip/hip_runtime_api.h>
@@ -94,7 +96,7 @@ namespace BeanTensor::Tensors {
             pending.push_back(future);
         }
 
-        void convert_dtype(const Casting::DType& new_dtype, bool use_nan_conversions = false);
+        void convert_dtype(const Casting::DType& new_dtype, const ConversionClampMethod method);
 
         /**
          * Get the shape of a tensor.
@@ -321,8 +323,10 @@ namespace BeanTensor::Tensors::detail {
             DType* ptr = vec.data();
             const auto* src = static_cast<const TensorType*>(exec.data);
             for (size_t i = t_start; i < t_end; ++i) {
-                if constexpr (std::is_same_v<TensorType, Casting::float16_t> || std::is_same_v<TensorType, Casting::bfloat16_t>) {
-                    ptr[i] = static_cast<DType>(Casting::to_float(src[i]));
+                if constexpr (std::is_same_v<TensorType, Casting::float16_t>) {
+                    ptr[i] = static_cast<DType>(BeanTensor::Intrinsics::detail::unaccel_fp16_to_fp32_untracked(src[i])); //TODO: Replace
+                } else if constexpr (std::is_same_v<TensorType, Casting::bfloat16_t>) {
+                    ptr[i] = static_cast<DType>(BeanTensor::Intrinsics::detail::unaccel_bf16_to_fp32(src[i])); //TODO: Replace
                 } else {
                     ptr[i] = static_cast<DType>(src[i]);
                 }

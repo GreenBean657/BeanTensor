@@ -35,10 +35,22 @@ namespace BeanTensor::Casting {
     inline float16_t  as_f16 (uint16_t x) { return static_cast<float16_t> (x); }
     inline bfloat16_t as_bf16(uint16_t x) { return static_cast<bfloat16_t>(x); }
 #endif
+    /**
+     * Is non-standard float [BF16, FP16]
+     * @tparam T Type to check
+     */
+    template <class T> constexpr bool is_nonstandard_float_kind_v =
+    std::is_same_v<T, bfloat16_t> | std::is_same_v<T, float16_t>;
+
+    /**
+     * Is any float kind [[BF16, FP16], [FP32, FP64]]
+     * @tparam T Type to check
+     */
     template <class T> constexpr bool is_float_kind_v =
     std::is_floating_point_v<T>
-    || std::is_same_v<T, bfloat16_t>
-    || std::is_same_v<T, float16_t>;
+    || Casting::is_nonstandard_float_kind_v<T>;
+
+    //Is
 
     using float32_t = float;
     using float64_t = double;

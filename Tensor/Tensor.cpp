@@ -3,6 +3,7 @@
 #include <vector>
 #include <sstream>
 
+#include "Intrinsics/Dispatcher.h"
 #include "Intrinsics/AVX512/DTypeConversions.h"
 #include "Intrinsics/Native/DTypeConversions.h"
 using namespace BeanTensor;
@@ -53,9 +54,9 @@ namespace BeanTensor::Tensors::detail {
             T* ptr = static_cast<T*>(data);
             for (size_t i = t_start; i < t_end; ++i) {
                 if constexpr (std::is_same_v<T, Casting::float16_t>) {
-                    ptr[i] = Casting::detail::f32_to_f16(1.0f);
+                    ptr[i] = Intrinsics::detail::unaccel_fp32_to_fp16_untracked(1.0f); //TODO: Replace
                 } else if constexpr (std::is_same_v<T, Casting::bfloat16_t>) {
-                    ptr[i] = Casting::detail::f32_to_bf16(1.0f);
+                    ptr[i] = Intrinsics::detail::unaccel_fp32_to_bf16_untracked(1.0f); //TODO: Replace
                 } else {
                     ptr[i] = static_cast<T>(1);
                 }
@@ -332,54 +333,14 @@ namespace BeanTensor::Tensors {
         }
     }
 
-    void Tensor::convert_dtype(const Casting::DType& new_dtype, const bool use_nan_conversions) {
+    void Tensor::convert_dtype(const Casting::DType& new_dtype, const ConversionClampMethod method = ConversionClampMethod::PERMISSIVE) {
         if (this->dtype == new_dtype) return;
         sync();
         const size_t new_nbytes = this->numel * Casting::dtype_size(new_dtype);
         if (this->device == Device::CPU) {
-
-            // SCRATCH BUFFER: grow convert_buf if needed, never shrink, never free between calls.
-            // Replaces aligned_alloc per call — after warmup this is zero allocations.
-            if (new_nbytes > this->convert_buf_size) {
-                std::free(this->convert_buf);
-                this->convert_buf = std::aligned_alloc(64, new_nbytes);
-                if (this->convert_buf == nullptr) throw ErrorHandling::OutOfMemory();
-                this->convert_buf_size = new_nbytes;
-            }
-            void* dst = this->convert_buf;
-
-            bool converted = false;
-
-            if (Casting::dtype_is_float(this->dtype)) {
-                if (this->dtype == Casting::DType::Float32 && new_dtype == Casting::DType::BFloat16) {
-                    if (Hardware::CPU().avx512bf16) {
-                        this->give_futures(Intrinsics::detail::avx512_fp32_to_bf16(static_cast<Casting::float32_t*>(this->data), static_cast<Casting::bfloat16_t*>(dst), this->numel));
-                        converted = true;
-                    } else {
-                        throw ErrorHandling::NotImplemented();
-                    }
-                } else if (this->dtype == Casting::DType::BFloat16 && new_dtype == Casting::DType::Float32) {
-                    if (Hardware::CPU().avx512bf16) {
-                        this->give_futures(Intrinsics::detail::avx512_bf16_to_fp32(static_cast<Casting::bfloat16_t*>(this->data), static_cast<Casting::float32_t*>(dst), this->numel));
-                    } else {
-                        throw ErrorHandling::NotImplemented();
-                        //this->give_futures(Intrinsics::detail::unaccelerated_bf16_to_fp32(static_cast<Casting::bfloat16_t*>(this->data), static_cast<Casting::float32_t*>(dst), this->numel));
-                    }
-                    converted = true;
-                }
-            }
-
-            if (!converted) {
-                throw ErrorHandling::NotImplemented();
-            }
-            this->convert_buf = this->data;
-            this->convert_buf_size = this->nbytes;
-            this->data = dst;
-            this->dtype = new_dtype;
-            this->nbytes = new_nbytes;
-            this->owns_data = true;
+            Intrinsics::detail::launch_conv_cpu(*this, new_dtype, method);
         } else if (this->device == Device::GPU) {
-            detail::convert_gpu(*this, new_dtype, use_nan_conversions);
+            detail::convert_gpu(*this, new_dtype, false); //TODO: FIX
         } else {
             __builtin_unreachable();
         }
@@ -412,11 +373,11 @@ namespace BeanTensor::Tensors {
     }
 
     Tensor Tensor::clone(const bool hard_copy) {
-        std::vector<size_t> shape;
+        std::vector<size_t> new_shape;
         for (size_t i = 0; i < this->ndim; i++) {
-            shape.push_back(this->shape[i]);
+            new_shape.push_back(this->shape[i]);
         }
-        auto clone = Tensor(shape, this->dtype, this->device, this->requires_grad);
+        auto clone = Tensor(new_shape, this->dtype, this->device, this->requires_grad);
         clone.sync();
 
         if (device == Device::CPU) {
@@ -443,13 +404,13 @@ namespace BeanTensor::Tensors {
         return clone;
     }
 
-    void Tensor::notify_child(const void* data) {
+    void Tensor::notify_child(const void* p_data) {
         if (this->device == Device::CPU) {
             this->kill_cpu_data();
             this->kill_buffer();
             this->sync();
             this->data = std::aligned_alloc(64, this->nbytes);
-            memcpy(this->data, data, this->nbytes);
+            memcpy(this->data, p_data, this->nbytes);
         } else if (this->device == Device::GPU) {
             this->kill_gpu_data();
             this->kill_buffer();
