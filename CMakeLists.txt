@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 # ─── Backend selection ────────────────────────────────────────────────────────
 option(USE_HIP        "Build with AMD HIP/ROCm backend"       OFF)
-option(USE_CUDA       "Build with NVIDIA CUDA backend"        OFF)
+option(USE_CUDA       "Build with NVIDIA CUDA backend"        ON)
 option(USE_STRIX_HALO "Build with Xilinx StrixHalo NPU backend" OFF)
 
 if(USE_HIP AND USE_CUDA)

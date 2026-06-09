@@ -26,6 +26,9 @@ namespace BeanTensor::Tensors::detail {
     template<typename DType, typename TensorType> requires std::is_arithmetic_v<DType> || std::is_same_v<DType, Casting::float16_t> || std::is_same_v<DType, Casting::bfloat16_t>
     void flat_vector_impli(std::vector<DType>& vec, const Tensors::Tensor& exec);
 }
+namespace BeanTensor::Intrinsics::detail {
+    void launch_conv_cpu(Tensors::Tensor& tensor, BeanTensor::Casting::DType dtype, ConversionClampMethod method);
+}
 
 namespace BeanTensor::Tensors {
     enum class Device {
@@ -300,6 +303,8 @@ namespace BeanTensor::Tensors {
 
         template<typename DType, typename TensorType> requires std::is_arithmetic_v<DType> || std::is_same_v<DType, Casting::float16_t> || std::is_same_v<DType, Casting::bfloat16_t>
         friend void detail::flat_vector_impli(std::vector<DType>& vec, const Tensors::Tensor& exec);
+
+        friend void Intrinsics::detail::launch_conv_cpu(Tensors::Tensor& tensor, BeanTensor::Casting::DType dtype, ConversionClampMethod method);
 
     };
     struct Node {

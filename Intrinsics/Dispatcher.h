@@ -2,81 +2,96 @@
 #include <future>
 #include <vector>
 #include <Tensor/Tensor.h>
+#include <iostream>
+#include "Helper/Threads/CPUThreading.h"
 namespace BeanTensor::Intrinsics::detail {
 
-    void launch_basic() {
+    inline void launch_conv_cpu(Tensors::Tensor& tensor, BeanTensor::Casting::DType dtype, ConversionClampMethod method) {
 
-    }
+        const size_t new_nbytes = tensor.numel * Casting::dtype_size(dtype);
 
-    [[nodiscard]] inline std::pmr::vector<std::vector<void>> launch_conv_cpu(Tensors::Tensor& tensor, BeanTensor::Casting::DType dtype, ConversionClampMethod method) {
+        // SCRATCH BUFFER: grow convert_buf if needed, never shrink, never free between calls.
+        // Replaces aligned_alloc per call — after warmup this is zero allocations.
+        if (new_nbytes > tensor.convert_buf_size) {
+            std::free(tensor.convert_buf);
+            tensor.convert_buf = std::aligned_alloc(64, new_nbytes);
+            if (tensor.convert_buf == nullptr) throw ErrorHandling::OutOfMemory();
+            tensor.convert_buf_size = new_nbytes;
+        }
+        void* dst = tensor.convert_buf;
         // Ending
 
         //All standardized paths have been discovered.
 
-        using DType = Casting::DType;
+        void* src_data = tensor.data;
+        const size_t numel = tensor.numel;
+        const size_t old_nbytes = tensor.nbytes;
 
-        static const std::unordered_map<DType, std::numeric_limits<void>> test = {
-            {},
-        };
+        BT_DISPATCH_DTYPE_AS(tensor.dtype, src_t, [&] {
+            BT_DISPATCH_DTYPE_AS(dtype, dst_t, [&] {
+                if constexpr (            (
+            (std::is_floating_point_v<src_t> &&
+            std::is_floating_point_v<dst_t>)
+            ) || (
+            (std::is_integral_v<src_t> &&
+            std::is_integral_v<dst_t>)
+            ) || (
+            std::is_integral_v<src_t> &&
+            std::is_floating_point_v<dst_t>
+            ) || (
+                std::is_floating_point_v<src_t> &&
+                std::is_integral_v<dst_t>
+            )) {
+                    auto global_standard_manager = [src_data, numel, method, dst]() {
+                        const size_t threads = Hardware::CPU().threads;
+                        auto& threadMgr = Threading::get_cpu_thread_pool();
+                        auto stan2stand_fun = [src_data, method](const size_t start, const size_t end, void* dst_ptr) {
+                            bool flag = false;
+                            auto* ptr = static_cast<dst_t*>(dst_ptr);
+                            for (size_t i = start; i < end; i++) {
+                                ptr[i] = standard2standard<src_t, dst_t>(static_cast<src_t*>(src_data)[i], flag, method);
+                            }
+                            if (flag == true) throw ErrorHandling::ConversionError();
+                        };
+                        if (numel <= 1024) {
+                            stan2stand_fun(0, numel, dst);
+                            return;
+                        } else {
+                            std::vector<std::shared_future<void>> futures;
+                            size_t chunk = (numel + threads - 1) / threads;
+                            for (size_t i = 0; i < threads; i++) {
+                                const size_t t_start = i * chunk;
+                                const size_t end = std::min(t_start + chunk, numel);
+                                futures.push_back(threadMgr.submit(
+                                    [=] {stan2stand_fun(t_start, end, dst);},
+                                    Threading::ThreadPriority::High
+                                    ).share());
+                            }
+                            for (size_t i = 0; i < futures.size(); i++) {
+                                futures[i].get();
+                            }
+                            return;
+                        }
+                    };
+                    const size_t threads = Hardware::CPU().threads;
+                    auto& threadMgr = Threading::get_cpu_thread_pool();
+                    std::shared_future l_future = threadMgr.submit(
+                        [=] {
+                            global_standard_manager();
+                        }, Threading::ThreadPriority::High
+                    ).share();
 
+                    tensor.give_future(l_future);
 
-
-        /*
-         *    void Tensor::convert_dtype(const Casting::DType& new_dtype, const bool use_nan_conversions) {
-        if (this->dtype == new_dtype) return;
-        sync();
-        const size_t new_nbytes = this->numel * Casting::dtype_size(new_dtype);
-        if (this->device == Device::CPU) {
-
-            // SCRATCH BUFFER: grow convert_buf if needed, never shrink, never free between calls.
-            // Replaces aligned_alloc per call — after warmup this is zero allocations.
-            if (new_nbytes > this->convert_buf_size) {
-                std::free(this->convert_buf);
-                this->convert_buf = std::aligned_alloc(64, new_nbytes);
-                if (this->convert_buf == nullptr) throw ErrorHandling::OutOfMemory();
-                this->convert_buf_size = new_nbytes;
-            }
-            void* dst = this->convert_buf;
-
-            bool converted = false;
-
-            if (Casting::dtype_is_float(this->dtype)) {
-                if (this->dtype == Casting::DType::Float32 && new_dtype == Casting::DType::BFloat16) {
-                    if (Hardware::CPU().avx512bf16) {
-                        this->give_futures(Intrinsics::detail::avx512_fp32_to_bf16(static_cast<Casting::float32_t*>(this->data), static_cast<Casting::bfloat16_t*>(dst), this->numel));
-                        converted = true;
-                    } else {
-                        throw ErrorHandling::NotImplemented();
-                    }
-                } else if (this->dtype == Casting::DType::BFloat16 && new_dtype == Casting::DType::Float32) {
-                    if (Hardware::CPU().avx512bf16) {
-                        this->give_futures(Intrinsics::detail::avx512_bf16_to_fp32(static_cast<Casting::bfloat16_t*>(this->data), static_cast<Casting::float32_t*>(dst), this->numel));
-                    } else {
-                        throw ErrorHandling::NotImplemented();
-                        //this->give_futures(Intrinsics::detail::unaccelerated_bf16_to_fp32(static_cast<Casting::bfloat16_t*>(this->data), static_cast<Casting::float32_t*>(dst), this->numel));
-                    }
-                    converted = true;
+                    tensor.convert_buf = tensor.data;
+                    tensor.convert_buf_size = old_nbytes;
+                    tensor.data = dst;
+                    tensor.dtype = dtype;
+                    tensor.nbytes = new_nbytes;
+                } else {
+                    assert(false);
                 }
-            }
-
-            if (!converted) {
-                throw ErrorHandling::NotImplemented();
-            }
-            this->convert_buf = this->data;
-            this->convert_buf_size = this->nbytes;
-            this->data = dst;
-            this->dtype = new_dtype;
-            this->nbytes = new_nbytes;
-            this->owns_data = true;
-        } else if (this->device == Device::GPU) {
-            detail::convert_gpu(*this, new_dtype, use_nan_conversions);
-        } else {
-            __builtin_unreachable();
-        }
-    }
-
-
-        return std::pmr::vector<std::vector<void>>();
-        */
+            });
+        });
     }
 }

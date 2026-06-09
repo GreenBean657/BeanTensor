@@ -32,7 +32,12 @@ namespace BeanTensor::Tensors::detail {
                 } else if constexpr (std::is_same_v<T, Casting::float16_t>) {
                     os << Intrinsics::detail::unaccel_fp16_to_fp32_untracked(ptr[idx++]);
                 } else {
-                    os << ptr[idx++];
+                    if constexpr(std::is_same_v<T, int8_t> || std::is_same_v<T, uint8_t>) {
+                        os << static_cast<int64_t>(ptr[idx++]);
+                    } else {
+                        os << ptr[idx++];
+                    }
+
                 }
                 if (i < shape[0] - 1) os << ", ";
             }
@@ -393,6 +398,15 @@ namespace BeanTensor::Tensors {
             clone.gpu_id = this->gpu_id;
             if (hard_copy) {
                 clone.owns_data = true;
+#if defined(USE_HIP)
+                throw ErrorHandling::NotImplemented(); //TODO: FIX THIS
+#elif defined(USE_CUDA)
+                CUDA_CHECK_ERROR(cudaSetDevice(this->gpu_id));
+                CUDA_CHECK_ERROR(cudaMalloc(&clone.data, this->nbytes));
+                CUDA_CHECK_ERROR(cudaMemcpy(clone.data, this->data, this->nbytes, cudaMemcpyDeviceToDevice));
+#else
+                throw ErrorHandling::GPUTaskOnCPUBuild();
+#endif
             } else {
                 clone.owns_data = false;
                 clone.data = this->data;
@@ -415,13 +429,14 @@ namespace BeanTensor::Tensors {
             this->kill_gpu_data();
             this->kill_buffer();
             this->sync();
+
 #if defined(USE_HIP)
-            throw ErrorHandling::NotImplemented();
+            throw ErrorHandling::NotImplemented();  //TODO: FIX THIS
 #elif defined(USE_CUDA)
             void* new_data = nullptr;
             CUDA_CHECK_ERROR(cudaSetDevice(this->gpu_id));
             CUDA_CHECK_ERROR(cudaMalloc(&new_data, this->nbytes));
-            CUDA_CHECK_ERROR(cudaMemcpy(new_data, data, this->nbytes, cudaMemcpyDeviceToDevice));
+            CUDA_CHECK_ERROR(cudaMemcpy(new_data, p_data, this->nbytes, cudaMemcpyDeviceToDevice));
             this->data = new_data;
 #else
             throw ErrorHandling::GPUTaskOnCPUBuild();

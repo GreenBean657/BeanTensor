@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
-
+#include "Errors/Logic.h"
 //&& defined(__clang__)
 #if defined(USE_HIP) && defined(__clang__)
 #include <hip/hip_fp16.h>
@@ -121,6 +121,29 @@ namespace BeanTensor::Casting {
 }
 
 namespace BeanTensor::Casting::detail {
+
+#define BT_DTYPE_CASE_AS(ENUM_VAL, TYPE, ALIAS, ...) \
+case ENUM_VAL: { \
+using ALIAS = TYPE; \
+return __VA_ARGS__(); \
+}
+
+#define BT_DISPATCH_DTYPE_AS(DTYPE, ALIAS, ...) \
+[&]() -> decltype(auto) { \
+switch (DTYPE) { \
+BT_DTYPE_CASE_AS(Casting::DType::Float32, Casting::float32_t, ALIAS, __VA_ARGS__) \
+BT_DTYPE_CASE_AS(Casting::DType::Float64, Casting::float64_t, ALIAS, __VA_ARGS__) \
+BT_DTYPE_CASE_AS(Casting::DType::Int8, int8_t, ALIAS, __VA_ARGS__) \
+BT_DTYPE_CASE_AS(Casting::DType::Int16, int16_t, ALIAS, __VA_ARGS__) \
+BT_DTYPE_CASE_AS(Casting::DType::Int32, int32_t, ALIAS, __VA_ARGS__) \
+BT_DTYPE_CASE_AS(Casting::DType::Int64, int64_t, ALIAS, __VA_ARGS__) \
+BT_DTYPE_CASE_AS(Casting::DType::UInt8, uint8_t, ALIAS, __VA_ARGS__) \
+BT_DTYPE_CASE_AS(Casting::DType::UInt16, uint16_t, ALIAS, __VA_ARGS__) \
+BT_DTYPE_CASE_AS(Casting::DType::UInt32, uint32_t, ALIAS, __VA_ARGS__) \
+BT_DTYPE_CASE_AS(Casting::DType::UInt64, uint64_t, ALIAS, __VA_ARGS__) \
+default: throw BeanTensor::ErrorHandling::NotImplemented(); \
+} \
+}()
 
     constexpr float32_t F16_MAX      =  65504.0f;
     constexpr float32_t F16_MIN      = -65504.0f;

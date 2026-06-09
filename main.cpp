@@ -67,11 +67,12 @@ using namespace BeanTensor;
 int main() {
     {
         auto* a = new Tensors::Tensor({6}, Casting::DType::Float32, Tensors::Device::CPU, false);
-        a->random(1, 2, 42);
-        auto b = a->clone(false);
+        a->random(500, 600, 42);
         std::cout << a->contents_to_string() << std::endl;
-        delete a;
-        std::cout << b.contents_to_string() << std::endl;
-        const auto vec = b.contents_to_flat_vector<uint32_t>();
+        a->convert_dtype(Casting::DType::Int8, ConversionClampMethod::STRICT);
+        std::cout << a->contents_to_string() << std::endl;
+        a->sync();
+        //auto val = Intrinsics::detail::standard2standard<float, double>(, flag, ConversionClampMethod::STRICT);
+
     }
 }

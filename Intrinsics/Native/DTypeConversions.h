@@ -22,7 +22,7 @@ namespace BeanTensor::Intrinsics::detail {
         std::memcpy(&to_bits, &val, sizeof(val));
 
         //Check if NaN
-        const uint32_t mantissa_mask = to_bits & 0x7FFFFF;
+        //const uint32_t mantissa_mask = to_bits & 0x7FFFFF;
         const uint32_t exponent_mask = to_bits & 0x7F800000;
         const bool exp_met = exponent_mask == 0x7F800000;
         if (exp_met) {

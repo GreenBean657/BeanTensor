@@ -26,7 +26,7 @@ __global__ void implementation_gpu_set_val(Ptr* __restrict__ pointer , const siz
 }
 
 template<typename Ptr> requires std::is_floating_point_v<Ptr>
-__global__ void implementation_bf16_to_fp32_fp64(Casting::bfloat16_t* __restrict__ src, Ptr* __restrict__ dst, const size_t end, const bool allow_unsafe_conversions, int32_t* __restrict__ fail_check) {
+__global__ void implementation_bf16_to_fp32_fp64(BeanTensor::Casting::bfloat16_t* __restrict__ src, Ptr* __restrict__ dst, const size_t end, const bool allow_unsafe_conversions, int32_t* __restrict__ fail_check) {
     const size_t tid = threadIdx.x + blockIdx.x * blockDim.x;
     const size_t stride = blockDim.x * gridDim.x;
     const size_t end2 = end / 2;

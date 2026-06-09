@@ -30,6 +30,11 @@ namespace BeanTensor::ErrorHandling {
         explicit CPUIllegalInstruction(const std::string& attempt) : std::logic_error("Attempted illegal instruction: " + attempt) { };
 
     };
+
+    class ConversionError : std::invalid_argument {
+        public:
+        ConversionError() : std::invalid_argument("DType conversion error!") { };
+    };
 }
 
 #if defined(USE_HIP)

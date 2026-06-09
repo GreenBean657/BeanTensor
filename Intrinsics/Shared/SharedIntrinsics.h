@@ -15,15 +15,24 @@ namespace BeanTensor::Intrinsics::detail {
      * @return DST Value to convert to
      */
     template<typename src, typename dst> requires
+            (
             (std::is_floating_point_v<src> &&
-            std::is_floating_point_v<dst>) ||
+            std::is_floating_point_v<dst>)
+            )||(
             (std::is_integral_v<src> &&
             std::is_integral_v<dst>)
-    [[nodiscard]] dst standard2standard(const src& src_v, bool& flag_met, ConversionClampMethod method = ConversionClampMethod::PERMISSIVE) {
+            ) || (
+            std::is_integral_v<src> &&
+            std::is_floating_point_v<dst>
+            ) || (
+                std::is_floating_point_v<src> &&
+                std::is_integral_v<dst>
+            )
+    [[nodiscard]] dst standard2standard(const src& src_v, bool& flag_met, const ConversionClampMethod method = ConversionClampMethod::PERMISSIVE) {
         assert(!Casting::is_nonstandard_float_kind_v<src>);
         assert(!Casting::is_nonstandard_float_kind_v<dst>);
         //Conventional Casting
-        auto min = std::numeric_limits<dst>::min();
+        auto min = std::numeric_limits<dst>::lowest();
         auto max = std::numeric_limits<dst>::max();
         if (src_v > max) {
             // Overflow
@@ -44,12 +53,13 @@ namespace BeanTensor::Intrinsics::detail {
             if (method != ConversionClampMethod::PERMISSIVE) {
                 flag_met = true;
             }
+            return static_cast<dst>(0.0f);
         } else if (std::isinf(src_v)) {
             // Infinity
             if (method == ConversionClampMethod::STRICT) {
                 flag_met = true;
             }
         }
-        return static_cast<dst>(min);
+        return static_cast<dst>(src_v);
     }
 }
