@@ -9,6 +9,7 @@
 
 #include "DTypes.h"
 #include "Helpers/Errors.h"
+#include "Intrinsics/ConversionMethods.h"
 #ifdef USE_HIP
 #include <hip/hip_runtime.h>
 #elif defined(USE_CUDA)
@@ -17,6 +18,9 @@
 
 #include "Ops/TensorOps.h"
 namespace BeanTensor::Tensors { class Tensor; }
+namespace BeanTensor::Intrinsics::detail {
+    void launch_conv_cpu(Tensors::Tensor& t, const DataTypes::DType& new_dtype, ConversionClampMethod method);
+}
 namespace BeanTensor::Tensors {
     enum class Device {
         CPU,
@@ -26,6 +30,15 @@ namespace BeanTensor::Tensors {
     class Tensor {
         public:
         ~Tensor() {
+            // Drain pending pool work before freeing buffers — tasks hold raw
+            // pointers into data/convert_buffer. Errors are swallowed here:
+            // a destructor cannot throw, and the buffers must be freed
+            // regardless (the error already surfaced at sync() if anyone
+            // was listening).
+            for (auto& f : this->pending_tasks) {
+                try { f.get(); } catch (...) {}
+            }
+            pending_tasks.clear();
             if (!this->children.empty() && this->owns_data) {
                 for (const auto & i : this->children) {
                     i->notify_child(this->data);
@@ -56,11 +69,14 @@ namespace BeanTensor::Tensors {
         /**
          * @brief Sync Threaded Tensor tasks.
          * Manually force a resync of this Tensor, blocking the calling thread until all pending operations are complete. Used for multithreaded syncs.
-         * @note Safe to call multiple times.
+         * @note Safe to call multiple times. An error from a pending task is
+         * thrown once; the task list is drained regardless, so a later sync()
+         * does not rethrow it.
          */
         void sync() const {
-            for (auto& f : this->pending_tasks) f.get();
+            const auto tasks = std::move(pending_tasks);
             pending_tasks.clear();
+            for (auto& f : tasks) f.get();
         }
 
         /**
@@ -99,6 +115,25 @@ namespace BeanTensor::Tensors {
          * @return New Tensor.
          */
         [[nodiscard]] Tensor clone(bool hard_copy = true);
+
+        /**
+         * Move this tensor between devices (single-GPU; CPU <-> GPU only).
+         * @param new_device Device to move to.
+         */
+        void to(const Device& new_device);
+
+        /**
+         * Convert this tensor's data to a new dtype in place. Asynchronous on
+         * both devices: the call queues the conversion and returns; the dtype
+         * flip and any clamp error materialize at sync(). Back-to-back
+         * conversions of different tensors overlap on the thread pool.
+         * Packed dtypes (Float16x2/BFloat16x2) preserve numel/shape: unpacked->packed
+         * duplicates the value into both lanes, packed->unpacked converts the first lane.
+         * @param new_dtype New DType of this tensor.
+         * @param method Clamp tolerance for unsafe conversions.
+         * @throws std::range_error At sync(): values clamped/invalid under a non-PERMISSIVE method.
+         */
+        void convert_dtype(const DataTypes::DType& new_dtype, ConversionClampMethod method = ConversionClampMethod::PERMISSIVE);
 
         template<typename T>
         [[nodiscard]] T* at(const std::initializer_list<size_t> idx) {
@@ -196,7 +231,8 @@ namespace BeanTensor::Tensors {
         friend void detail::set_random_gpu(Tensor& t, double min, double max, int64_t seed);
         friend void detail::move_to_gpu(Tensor& t, uint32_t device);
         friend void detail::move_to_cpu(Tensor& t);
-        friend void detail::convert_gpu(Tensor& t, const BeanTensor::DataTypes::DType& new_dtype, bool use_inf_conversions);
+        friend void detail::convert_gpu(Tensor& t, const BeanTensor::DataTypes::DType& new_dtype, ConversionClampMethod method);
+        friend void Intrinsics::detail::launch_conv_cpu(Tensor& t, const DataTypes::DType& new_dtype, ConversionClampMethod method);
 
     };
     struct Node {
