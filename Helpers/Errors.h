@@ -28,7 +28,12 @@ namespace BeanTensor::ErrorHandling {
     public:
         CPUIllegalInstruction() = delete;
         explicit CPUIllegalInstruction(const std::string& attempt) : std::logic_error("Attempted illegal instruction: " + attempt) { };
+    };
+    class DirectFunctionCallOnWrongDataSource : public std::logic_error {
+    public:
+        DirectFunctionCallOnWrongDataSource() = delete;
 
+        explicit DirectFunctionCallOnWrongDataSource(const std::string& true_source = "Unknown", const std::string& assumed_source = "Unknown") : std::logic_error("Illegal access of data on device '" + true_source + "' when the data was reported to be on '" + assumed_source + "'") { };
     };
 }
 

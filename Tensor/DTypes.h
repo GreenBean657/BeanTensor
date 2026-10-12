@@ -1,5 +1,13 @@
 #pragma once
 
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <memory_resource>
+#include <string>
+#include <type_traits>
+#include <utility>
+
 #if USE_HIP
 #include <hip/hip_fp16.h>
 #include <hip/hip_bf16.h>
@@ -8,6 +16,7 @@
 #include <cuda_bf16.h>
 
 #endif
+
 namespace BeanTensor {
 #if USE_HIP
     using float16_t = __half;
@@ -130,4 +139,8 @@ namespace BeanTensor::DataTypes::detail {
     constexpr float32_t BF16_MIN     = -3.38953139e+38f;
     constexpr float32_t BF16_MIN_POS =  1.175494351e-38f;
     constexpr float32_t BF16_EPSILON =  0.0078125f;
+
+    // numeric_limits<float32_t>::max()/lowest(); nvcc rejects numeric_limits in device code.
+    constexpr float64_t FP32_MAX_D =  3.4028234663852886e+38;
+    constexpr float64_t FP32_MIN_D = -3.4028234663852886e+38;
 }

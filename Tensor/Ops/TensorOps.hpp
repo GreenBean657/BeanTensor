@@ -19,10 +19,7 @@ namespace BeanTensor::Tensors {
         inline void move_to_cpu(Tensor& t) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
-        inline void move_gpu_to_gpu(Tensor& t, uint32_t new_device) {
-            throw ErrorHandling::GPUTaskOnCPUBuild();
-        }
-        inline void convert_gpu(Tensor& t, const DataTypes::DType& new_dtype, bool use_inf_conversions) {
+        inline void convert_gpu(Tensor& t, const DataTypes::DType& new_dtype, ConversionClampMethod method) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
     }

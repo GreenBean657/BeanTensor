@@ -17,13 +17,28 @@ endif()
 
 
 if (USE_CUDA)
+    # C++23 device code requires nvcc >= 13.3; prefer that toolkit explicitly
+    # when it is installed alongside older ones.
+    if (EXISTS "/usr/local/cuda-13.3" AND NOT DEFINED CUDAToolkit_ROOT)
+        set(CUDAToolkit_ROOT "/usr/local/cuda-13.3")
+    endif()
     IF (NOT CMAKE_CUDA_COMPILER OR CMAKE_CUDA_COMPILER MATCHES "NOTFOUND")
-        set(CMAKE_CUDA_COMPILER "/usr/local/cuda/bin/nvcc" CACHE FILEPATH "CUDA compiler" FORCE)
+        if (EXISTS "/usr/local/cuda-13.3/bin/nvcc")
+            set(CMAKE_CUDA_COMPILER "/usr/local/cuda-13.3/bin/nvcc" CACHE FILEPATH "CUDA compiler" FORCE)
+        else()
+            set(CMAKE_CUDA_COMPILER "/usr/local/cuda/bin/nvcc" CACHE FILEPATH "CUDA compiler" FORCE)
+        endif()
     ENDIF()
     project(BeanTensorV5 LANGUAGES CXX CUDA)
+    # CMake 4.2 does not know the CUDA23 dialect for nvcc, and CUDA_STANDARD
+    # falls back to CXX_STANDARD (23) when unset, which then fails at generate
+    # time. Pin 20 as a placeholder CMake understands; the real standard comes
+    # from the -std=c++23 flag below — nvcc uses the last -std it is given.
     set(CMAKE_CUDA_STANDARD 20)
-    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     set(CMAKE_CUDA_ARCHITECTURES 86)
+    if (CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 13.3)
+        message(FATAL_ERROR "CUDA C++23 requires nvcc >= 13.3 (found ${CMAKE_CUDA_COMPILER_VERSION}). Install the CUDA 13.3 toolkit or build with USE_CUDA=OFF.")
+    endif()
 elseif (USE_HIP)
     project(BeanTensorV5 LANGUAGES CXX HIP)
 else()
@@ -52,12 +67,23 @@ endif()
 set(CORE_SOURCES
         Helpers/CPUThreading.h
         Helpers/Hardware.h
+        Intrinsics/ConversionMethods.h
+        Intrinsics/Native/DTypeConversions.h
+        Intrinsics/Shared/SharedIntrinsics.h
+        Intrinsics/AVX512/DTypeConversions.h
+        Intrinsics/AVX512/DTypeConversions.cpp
+        Intrinsics/Dispatcher.h
+        Intrinsics/Dispatcher.cpp
         Tensor/DTypes.h
         Tensor/Tensor.h
         Tensor/Tensor.cpp
-        scratch/gpu.cpp
         Helpers/Bits.h
 )
+
+# AVX512 conversion kernels are always compiled with AVX512 codegen (per-file,
+# so other TUs are unaffected); execution is gated at runtime via
+# IncludedCPUFeatures() so CPUs lacking AVX512BF16 take the scalar fallback.
+# The HIP variant of these flags is applied in the USE_HIP block below.
 
 if (USE_CUDA)
     list(APPEND CORE_SOURCES
@@ -77,6 +103,9 @@ if(USE_HIP)
 
 elseif(USE_CUDA)
     target_compile_definitions(BeanTensorV5Core PRIVATE USE_CUDA)
+    # CMAKE_CUDA_STANDARD does not reach nvcc reliably here — pass the dialect
+    # flag directly. Requires nvcc >= 13.3 (first release with official C++23).
+    target_compile_options(BeanTensorV5Core PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-std=c++23>)
 endif()
 if(USE_STRIX_HALO)
     target_compile_definitions(BeanTensorV5Core PRIVATE USE_STRIX_HALO)
@@ -84,20 +113,32 @@ endif()
 
 if(USE_HIP)
     set_source_files_properties(
-            scratch/gpu.cpp
             Tensor/Tensor.cpp
             Tensor/Ops/TensorOps.cpp
+            Intrinsics/AVX512/DTypeConversions.cpp
+            Intrinsics/Dispatcher.cpp
             PROPERTIES LANGUAGE HIP
     )
     set_source_files_properties(
-            scratch/gpu.cpp
             Tensor/Tensor.cpp
             Tensor/Ops/TensorOps.cpp
+            Intrinsics/Dispatcher.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native"
     )
-elseif (USE_CUDA)
+    # AVX512 kernels: HIP offload arch + host AVX512 codegen combined (the
+    # single COMPILE_OPTIONS property would otherwise clobber one or the other).
     set_source_files_properties(
-            scratch/gpu.cpp
+            Intrinsics/AVX512/DTypeConversions.cpp
+            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512bf16;-mf16c"
+    )
+else()
+    set_source_files_properties(
+            Intrinsics/AVX512/DTypeConversions.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bf16;-mf16c"
+    )
+endif()
+if (USE_CUDA)
+    set_source_files_properties(
             Tensor/Ops/TensorOps.cu
         PROPERTIES LANGUAGE CUDA
     )
@@ -130,6 +171,7 @@ target_compile_options(BeanTensorV5Accelerated PRIVATE
 )
 
 if(BUILD_TESTING)
+    enable_testing()
     add_executable(BeanTensorV5Tests tests/tensor_tests.cpp)
     if(USE_HIP)
         target_compile_definitions(BeanTensorV5Tests PRIVATE USE_HIP)
