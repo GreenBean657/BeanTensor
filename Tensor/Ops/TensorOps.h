@@ -13,7 +13,21 @@ namespace BeanTensor::Tensors {
          * @param t Tensor to fill.
          * @param amount Value to fill with.
          */
-        void set_amount_gpu(Tensor& t, int32_t amount);
+        void set_amount_gpu(Tensor& t, int64_t amount);
+        /**
+         * Fill a GPU tensor with a fixed value. Packed dtypes fill both lanes.
+         * @brief GPU fixed-value fill.
+         * @param t Tensor to fill.
+         * @param amount Value to fill with.
+         */
+        void set_amount_gpu(Tensor& t, uint64_t amount);
+        /**
+         * Fill a GPU tensor with a fixed value. Packed dtypes fill both lanes.
+         * @brief GPU fixed-value fill.
+         * @param t Tensor to fill.
+         * @param amount Value to fill with.
+         */
+        void set_amount_gpu(Tensor& t, float64_t amount);
         /**
          * Fill a tensor with random values on the GPU.
          * @param t Tensor to fill with random values.
@@ -21,14 +35,13 @@ namespace BeanTensor::Tensors {
          * @param max Highest Value to set.
          * @param seed Randomized Seed to use.
          */
-        void set_random_gpu(Tensor& t, double min, double max, std::int64_t seed);
+        void set_random_gpu(Tensor& t, float64_t min, float64_t max, std::int64_t seed);
 
         /**
          * Move a tensor to the GPU. Single-GPU: only device 0 is supported.
          * @param t Tensor to move.
-         * @param device GPUId to move to (must be 0 — multi-GPU was dropped in V5).
          */
-        void move_to_gpu(Tensor& t, uint32_t device);
+        void move_to_gpu(Tensor& t);
 
         /**
          * Move a tensor to the CPU.

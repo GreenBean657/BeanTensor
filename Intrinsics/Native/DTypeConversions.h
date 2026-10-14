@@ -202,7 +202,7 @@ namespace BeanTensor::Intrinsics::detail {
         // Result is an FP16 subnormal (or zero) when the FP32 exponent field is below 113 (value < 2^-14).
         // Shift mantissa into place && round-to-nearest-even for gradual underflow.
         if (
-            const uint32_t exp_field = (to_bits >> 23) & 0xFF;  // If-init memory optimization for localized scope.
+            const uint32_t exp_field = (to_bits >> 23) & 0xFF;
             exp_field < 113
             ) {
             const uint32_t mant24 = (to_bits & 0x007FFFFF) | 0x00800000;

@@ -44,11 +44,53 @@ elseif (USE_HIP)
 else()
     project(BeanTensorV5 LANGUAGES CXX)
 endif()
-
-
+include(CTest)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# [[nodiscard]] cannot be violated.
+add_compile_options(
+        $<$<OR:$<COMPILE_LANGUAGE:CXX>,$<COMPILE_LANGUAGE:HIP>>:-Werror=unused-result>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Werror=unused-result>
+)
+
+# Errors on all basic "warnings" - my code standard is C++ code standard, not whatever I type and then hoping it works.
+set(BEANTENSOR_WERROR_FLAGS
+        -Werror=uninitialized
+        -Werror=return-type
+        -Werror=strict-aliasing
+        -Werror=delete-non-virtual-dtor
+        -Werror=non-virtual-dtor
+        -Werror=implicit-fallthrough
+        -Werror=sign-conversion
+        -Werror=float-equal
+        -Werror=double-promotion
+        -Werror=old-style-cast
+        -Werror=unused-variable
+        -Werror=unused-but-set-variable
+        -Werror=format=2
+        -Werror=reorder
+)
+# -Werror=maybe-uninitialized is GNU-onlyyyyyyyyyyyyyyyyyyy so lets make it be that.
+set(BEANTENSOR_WERROR_FLAGS_GNU ${BEANTENSOR_WERROR_FLAGS} -Werror=maybe-uninitialized -Werror=sequence-point)
+set(BEANTENSOR_WERROR_FLAGS_CLANG ${BEANTENSOR_WERROR_FLAGS} -Werror=unsequenced)
+if (USE_CUDA)
+    set(BEANTENSOR_WERROR_FLAGS_CUDA "")
+    foreach (flag IN LISTS BEANTENSOR_WERROR_FLAGS_GNU)
+        # nvcc my beloved! - it is rewriting brace-inits into C-style casts during compilation.
+        # This triggers the old-style-cast error. Must disable when CUDA touches a file.
+        if (NOT flag STREQUAL "-Werror=old-style-cast")
+            list(APPEND BEANTENSOR_WERROR_FLAGS_CUDA "-Xcompiler=${flag}")
+        endif ()
+    endforeach ()
+endif ()
+add_compile_options(
+        "$<$<COMPILE_LANG_AND_ID:CXX,GNU>:${BEANTENSOR_WERROR_FLAGS_GNU}>"
+        "$<$<COMPILE_LANG_AND_ID:CXX,Clang>:${BEANTENSOR_WERROR_FLAGS_CLANG}>"
+        "$<$<COMPILE_LANG_AND_ID:HIP,Clang>:${BEANTENSOR_WERROR_FLAGS_CLANG}>"
+        "$<$<COMPILE_LANGUAGE:CUDA>:${BEANTENSOR_WERROR_FLAGS_CUDA}>"
+)
 
 if (USE_HIP)
     message(STATUS "Backend: HIP/ROCm")
@@ -70,6 +112,8 @@ set(CORE_SOURCES
         Intrinsics/ConversionMethods.h
         Intrinsics/Native/DTypeConversions.h
         Intrinsics/Shared/SharedIntrinsics.h
+        Intrinsics/AVX2/DTypeConversions.h
+        Intrinsics/AVX2/DTypeConversions.cpp
         Intrinsics/AVX512/DTypeConversions.h
         Intrinsics/AVX512/DTypeConversions.cpp
         Intrinsics/Dispatcher.h
@@ -80,9 +124,9 @@ set(CORE_SOURCES
         Helpers/Bits.h
 )
 
-# AVX512 conversion kernels are always compiled with AVX512 codegen (per-file,
-# so other TUs are unaffected); execution is gated at runtime via
-# IncludedCPUFeatures() so CPUs lacking AVX512BF16 take the scalar fallback.
+# AVX512/AVX2 conversion kernels are always compiled with AVX512/AVX2 codegen
+# (per-file, so other TUs are unaffected); execution is gated at runtime via
+# IncludedCPUFeatures() so CPUs lacking AVX512BF16/AVX2 take the scalar fallback.
 # The HIP variant of these flags is applied in the USE_HIP block below.
 
 if (USE_CUDA)
@@ -98,13 +142,10 @@ elseif(USE_STRIX_HALO)
 endif()
 
 add_library(BeanTensorV5Core STATIC ${CORE_SOURCES})
-
-if(USE_HIP)
-
-elseif(USE_CUDA)
+if(USE_CUDA)
     target_compile_definitions(BeanTensorV5Core PRIVATE USE_CUDA)
-    # CMAKE_CUDA_STANDARD does not reach nvcc reliably here — pass the dialect
-    # flag directly. Requires nvcc >= 13.3 (first release with official C++23).
+    # CMAKE_CUDA_STANDARD does not reach nvcc because apparently the concept of supporting 23 as a value is too hard for expert driver developers.
+    # Override standard directly to 23. Requires nvcc >= 13.3
     target_compile_options(BeanTensorV5Core PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-std=c++23>)
 endif()
 if(USE_STRIX_HALO)
@@ -115,6 +156,7 @@ if(USE_HIP)
     set_source_files_properties(
             Tensor/Tensor.cpp
             Tensor/Ops/TensorOps.cpp
+            Intrinsics/AVX2/DTypeConversions.cpp
             Intrinsics/AVX512/DTypeConversions.cpp
             Intrinsics/Dispatcher.cpp
             PROPERTIES LANGUAGE HIP
@@ -129,12 +171,20 @@ if(USE_HIP)
     # single COMPILE_OPTIONS property would otherwise clobber one or the other).
     set_source_files_properties(
             Intrinsics/AVX512/DTypeConversions.cpp
-            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512bf16;-mf16c"
+            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512bf16;-mavx512dq;-mf16c"
+    )
+    set_source_files_properties(
+            Intrinsics/AVX2/DTypeConversions.cpp
+            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx2;-mf16c"
     )
 else()
     set_source_files_properties(
             Intrinsics/AVX512/DTypeConversions.cpp
-            PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bf16;-mf16c"
+            PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bf16;-mavx512dq;-mf16c"
+    )
+    set_source_files_properties(
+            Intrinsics/AVX2/DTypeConversions.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx2;-mf16c"
     )
 endif()
 if (USE_CUDA)
@@ -167,6 +217,7 @@ target_compile_options(BeanTensorV5Accelerated PRIVATE
         -O3
         -mavx512f
         -mavx512bf16
+        -mavx512dq
         -mf16c
 )
 
@@ -187,6 +238,7 @@ if(BUILD_TESTING)
             -O2
             -mavx512f
             -mavx512bf16
+            -mavx512dq
             -mf16c
     )
     add_test(NAME BeanTensorV5Tests COMMAND BeanTensorV5Tests)
@@ -197,7 +249,7 @@ if(USE_HIP)
     target_compile_definitions(BeanTensorV5 PRIVATE USE_HIP)
     target_compile_definitions(BeanTensorV5Accelerated PRIVATE USE_HIP)
 elseif(USE_CUDA)
-    target_compile_definitions(BeanTensorV5Core PRIVATE USE_CUDA)
+    # target_compile_definitions(BeanTensorV5Core PRIVATE USE_CUDA)
     target_compile_definitions(BeanTensorV5 PRIVATE USE_CUDA)
     target_compile_definitions(BeanTensorV5Accelerated PRIVATE USE_CUDA)
 endif()
@@ -206,3 +258,15 @@ if(USE_STRIX_HALO)
     target_compile_definitions(BeanTensorV5 PRIVATE USE_STRIX_HALO)
     target_compile_definitions(BeanTensorV5Accelerated PRIVATE USE_STRIX_HALO)
 endif()
+
+add_custom_target(verify ALL
+        COMMAND bash -c "shopt -s nullglob; for f in ${CMAKE_SOURCE_DIR}/Verifications/*.sh; do \
+    echo \"[verify] \$(basename \$f)\"; \
+    bash \$f ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR} || exit 1; \
+done"
+        COMMENT "running verifications"
+        VERBATIM
+)
+add_dependencies(BeanTensorV5 verify)
+add_dependencies(BeanTensorV5Accelerated verify)
+add_dependencies(BeanTensorV5Core verify)

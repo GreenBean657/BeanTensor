@@ -168,9 +168,20 @@ namespace BeanTensor::Threading {
      * @brief Access the global thread pool for CPU tasks.
      */
     inline ThreadPool& GetCPUThreadPool() {
-        // Never compile with -fno-threadsafe-statics
+#if defined(__HIP_DEVICE_COMPILE__) || defined(__CUDA_ARCH__)
+        // HIP/CUDA complications - first path uses -fno-threadsafe-statics.
+        // My IDE believes the first pass instead of watching for the second, and marks this criteria as reached.
+        // This branch is dead, but present to prevent errors from a function appearing to auto-cast throw.
+        // Edit the middle defined statement to modify this function.
+        __builtin_unreachable();
+#elif __cpp_threadsafe_static_init
+        // Never compile host code with -fno-threadsafe-statics
         // NOLINTNEXTLINE(bugprone-dynamic-static-initializers)
         static ThreadPool pool(IncludedCPUFeatures().threads);
         return pool;
+#else
+      throw std::runtime_error("Cannot support -fno-threadsafe-statics - remove it, or you lose threading.");
+#endif
+
     }
 }
