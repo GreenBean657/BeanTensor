@@ -11,9 +11,21 @@
 #include "Intrinsics/Dispatcher.h"
 #include "Intrinsics/Native/DTypeConversions.h"
 
+#define BT_RECURSIVE_MAX_DEPTH 128
 namespace BeanTensor::Tensors::detail {
+    /**
+     * Recursively prints the elements of a tensor.
+     * @tparam T The data type of the tensor.
+     * @param os The output stream to print to.
+     * @param data The data pointer.
+     * @param shape The shape of the tensor.
+     * @param ndim The number of dimensions.
+     * @param idx The current index.
+     * @param depth The current depth.
+     * @throws std::runtime_error stack overflow per BT_RECURSIVE_MAX_DEPTH.
+     */
     template<typename T>
-    void print_recursive(
+    static void print_recursive (
         std::ostringstream& os,
         const void* data,
         const size_t* shape,
@@ -21,6 +33,10 @@ namespace BeanTensor::Tensors::detail {
         size_t& idx,
         const size_t depth)
     {
+        // Check for excessive depth. (Depth increments by 1 for each recursive call - prediction isn't reliable)
+        if (depth > BT_RECURSIVE_MAX_DEPTH) [[unlikely]]
+            throw std::runtime_error("Tensor print depth exceeded maximum limit.");{
+        }
         const T* ptr = static_cast<const T*>(data);
         os << "[";
         if (ndim == 1) {
@@ -30,11 +46,11 @@ namespace BeanTensor::Tensors::detail {
                 } else if constexpr (std::is_same_v<T, float16_t>) {
                     os << Intrinsics::detail::unaccel_fp16_to_fp32_untracked(ptr[idx++]);
                 } else if constexpr (std::is_same_v<T, float16x2_t>) {
-                    const uint32_t bits = Intrinsics::detail::bit_cast_memcpy<uint32_t>(ptr[idx++]);
+                    const auto bits = Intrinsics::detail::bit_cast_memcpy<uint32_t>(ptr[idx++]);
                     os << "(" << Intrinsics::detail::unaccel_fp16_to_fp32_untracked(Intrinsics::detail::bit_cast_memcpy<float16_t>(static_cast<uint16_t>(bits & 0xFFFF)))
                        << ", " << Intrinsics::detail::unaccel_fp16_to_fp32_untracked(Intrinsics::detail::bit_cast_memcpy<float16_t>(static_cast<uint16_t>(bits >> 16))) << ")";
                 } else if constexpr (std::is_same_v<T, bfloat16x2_t>) {
-                    const uint32_t bits = Intrinsics::detail::bit_cast_memcpy<uint32_t>(ptr[idx++]);
+                    const auto bits = Intrinsics::detail::bit_cast_memcpy<uint32_t>(ptr[idx++]);
                     os << "(" << Intrinsics::detail::unaccel_bf16_to_fp32(Intrinsics::detail::bit_cast_memcpy<bfloat16_t>(static_cast<uint16_t>(bits & 0xFFFF)))
                        << ", " << Intrinsics::detail::unaccel_bf16_to_fp32(Intrinsics::detail::bit_cast_memcpy<bfloat16_t>(static_cast<uint16_t>(bits >> 16))) << ")";
                 } else {
@@ -51,8 +67,15 @@ namespace BeanTensor::Tensors::detail {
         os << "]";
     }
 
+    /**
+     * TODO - Write documentation.
+     * @tparam T
+     * @param data
+     * @param numel
+     * @param exec
+     */
     template<typename T>
-    void fill_fixed_impli(void* data, const size_t numel, const Tensors::Tensor& exec) {
+    static void fill_fixed_impli(void* data, const size_t numel, const Tensors::Tensor& exec) {
         auto& threadMgr = Threading::GetCPUThreadPool();
         const size_t t_count = IncludedCPUFeatures().threads;
 
@@ -93,48 +116,61 @@ namespace BeanTensor::Tensors::detail {
         exec.give_futures(futures);
     }
 
+    /**
+     * TODO - Write documentation.
+     * @tparam T
+     * @param data
+     * @param numel
+     * @param seed
+     * @param min
+     * @param max
+     * @param exec
+     */
     template<typename T>
-    void fill_random_impl(void* data, const size_t numel, const size_t seed, const double min, const double max, const Tensors::Tensor& exec) {
+    static void fill_random_impl(void* data, const size_t numel, const size_t seed, const float64_t min, const float64_t max, const Tensors::Tensor& exec) {
         auto& threadMgr = Threading::GetCPUThreadPool();
         const size_t t_count = IncludedCPUFeatures().threads;
         auto* ptr = static_cast<T*>(data);
         const static std::string err = "Random number generation range is out of supported range";
         if constexpr (std::is_same_v<T, bfloat16_t> || std::is_same_v<T, bfloat16x2_t>) {
-            if (min < DataTypes::detail::BF16_MIN || max > DataTypes::detail::BF16_MAX) {
+            if (min < static_cast<float64_t>(DataTypes::detail::BF16_MIN) || max > static_cast<float64_t>(DataTypes::detail::BF16_MAX)) {
                 throw std::invalid_argument(err);
             }
         } else if constexpr (std::is_same_v<T, float16_t> || std::is_same_v<T, float16x2_t>) {
-            if (min < DataTypes::detail::FP16_MIN || max > DataTypes::detail::FP16_MAX) {
+            if (min < static_cast<float64_t>(DataTypes::detail::FP16_MIN) || max > static_cast<float64_t>(DataTypes::detail::FP16_MAX)) {
                 throw std::invalid_argument(err);
             }
         } else {
             auto max_supported = std::numeric_limits<T>::max();
             auto min_supported = std::numeric_limits<T>::lowest();
-            if (min < min_supported || max > max_supported) {
+            // Explicit widening — identical semantics to the implicit promotion.
+            if (min < static_cast<float64_t>(min_supported) || max > static_cast<float64_t>(max_supported)) {
                 throw std::invalid_argument(err);
             }
         }
 
-        auto worker = [ptr](const size_t t_start, const size_t t_end, const size_t l_seed, const double t_min, const double t_max) {
+        auto worker = [ptr](const size_t t_start, const size_t t_end, const size_t l_seed, const float64_t t_min, const float64_t t_max) {
+            // Threadlocal initializer won't reseed rng per call... no lint and redefine after threadlocal.
+            // NOLINTNEXTLINE(cert-msc51-cpp)
             thread_local std::mt19937 rng;
             rng.seed(l_seed);
             if constexpr (std::is_same_v<T, float16_t>) {
-                std::uniform_real_distribution<double> dist(t_min, t_max);
+                std::uniform_real_distribution<float64_t> dist(t_min, t_max);
                 for (size_t i = t_start; i < t_end; ++i)
                     ptr[i] = Intrinsics::detail::unaccel_fp32_to_fp16_untracked(static_cast<float32_t>(dist(rng)));
             } else if constexpr (std::is_same_v<T, bfloat16_t>) {
-                std::uniform_real_distribution<double> dist(t_min, t_max);
+                std::uniform_real_distribution<float64_t> dist(t_min, t_max);
                 for (size_t i = t_start; i < t_end; ++i)
                     ptr[i] = Intrinsics::detail::unaccel_fp32_to_bf16_untracked(static_cast<float32_t>(dist(rng)));
             } else if constexpr (std::is_same_v<T, float16x2_t>) {
-                std::uniform_real_distribution<double> dist(t_min, t_max);
+                std::uniform_real_distribution<float64_t> dist(t_min, t_max);
                 for (size_t i = t_start; i < t_end; ++i) {
                     const auto lo = Intrinsics::detail::bit_cast_memcpy<uint16_t>(Intrinsics::detail::unaccel_fp32_to_fp16_untracked(static_cast<float32_t>(dist(rng))));
                     const auto hi = Intrinsics::detail::bit_cast_memcpy<uint16_t>(Intrinsics::detail::unaccel_fp32_to_fp16_untracked(static_cast<float32_t>(dist(rng))));
                     ptr[i] = Intrinsics::detail::bit_cast_memcpy<float16x2_t>(static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16));
                 }
             } else if constexpr (std::is_same_v<T, bfloat16x2_t>) {
-                std::uniform_real_distribution<double> dist(t_min, t_max);
+                std::uniform_real_distribution<float64_t> dist(t_min, t_max);
                 for (size_t i = t_start; i < t_end; ++i) {
                     const auto lo = Intrinsics::detail::bit_cast_memcpy<uint16_t>(Intrinsics::detail::unaccel_fp32_to_bf16_untracked(static_cast<float32_t>(dist(rng))));
                     const auto hi = Intrinsics::detail::bit_cast_memcpy<uint16_t>(Intrinsics::detail::unaccel_fp32_to_bf16_untracked(static_cast<float32_t>(dist(rng))));
@@ -155,7 +191,7 @@ namespace BeanTensor::Tensors::detail {
                         ptr[i] = static_cast<T>(dist(rng));
                 }
             } else {
-                std::uniform_real_distribution<double> dist(t_min, t_max);
+                std::uniform_real_distribution<float64_t> dist(t_min, t_max);
                 for (size_t i = t_start; i < t_end; ++i)
                     ptr[i] = static_cast<T>(dist(rng));
             }
@@ -180,6 +216,11 @@ namespace BeanTensor::Tensors::detail {
 }
 
 namespace BeanTensor::Tensors {
+    /**
+     * TODO - Write documentation.
+     * @param hard_copy
+     * @return
+     */
     Tensor Tensor::clone(const bool hard_copy) {
 
         std::vector<size_t> new_shape;
@@ -199,26 +240,40 @@ namespace BeanTensor::Tensors {
                 clone.owns_data = false;
                 clone.data = this->data;
                 this->children.emplace_back(&clone);
+                clone.view_parents.emplace_back(this);
             }
         } else if (device == Device::GPU) {
             if (hard_copy) {
                 clone.owns_data = true;
+#if defined(USE_HIP)
+                HIP_CHECK_ERROR(hipMemcpy(clone.data, this->data, this->nbytes, hipMemcpyDeviceToDevice));
+#elif defined(USE_CUDA)
+                CUDA_CHECK_ERROR(cudaMemcpy(clone.data, this->data, this->nbytes, cudaMemcpyDeviceToDevice));
+#else
+                throw ErrorHandling::GPUTaskOnCPUBuild();
+#endif
             } else {
                 clone.owns_data = false;
                 clone.data = this->data;
                 this->children.emplace_back(&clone);
+                clone.view_parents.emplace_back(this);
             }
-        } else {
+        } else [[unlikely]] {
             __builtin_unreachable();
         }
         return clone;
     }
 
+    /**
+     * TODO - Write documentation.
+     * @param new_device
+     * @throws ErrorHandling::NotImplemented
+     */
     void Tensor::to(const Device& new_device) {
         if (this->device == new_device) return;
         sync();
         if (this->device == Device::CPU && new_device == Device::GPU) {
-            detail::move_to_gpu(*this, 0);
+            detail::move_to_gpu(*this);
             return;
         }
         if (this->device == Device::GPU && new_device == Device::CPU) {
@@ -228,6 +283,11 @@ namespace BeanTensor::Tensors {
         throw ErrorHandling::NotImplemented();
     }
 
+    /**
+     * TODO - Write documentation.
+     * @param new_dtype
+     * @param method
+     */
     void Tensor::convert_dtype(const DataTypes::DType& new_dtype, const ConversionClampMethod method) {
         if (this->dtype == new_dtype) return;
         sync();
@@ -237,11 +297,14 @@ namespace BeanTensor::Tensors {
             // GPU kernels mirror the CPU dispatcher's clamp/flag semantics per
             // method; non-PERMISSIVE failures surface as std::range_error at sync().
             detail::convert_gpu(*this, new_dtype, method);
-        } else {
+        } else [[unlikely]] {
             __builtin_unreachable();
         }
     }
 
+    /**
+     * TODO - Write documentation.
+     */
     void Tensor::compute_strides() {
         sync();
         this->dims[this->ndim - 1] = 1;
@@ -249,6 +312,10 @@ namespace BeanTensor::Tensors {
             this->dims[i] = this->dims[i + 1] * this->shape[i + 1];
     }
 
+    /**
+     * TODO - Write documentation.
+     * @return
+     */
     std::string Tensor::contents_to_string() const {
         sync();
         std::ostringstream os;
@@ -294,12 +361,15 @@ namespace BeanTensor::Tensors {
 #else
             throw ErrorHandling::GPUTaskOnCPUBuild();
 #endif
-        } else {
+        } else [[unlikely]] {
             assert(false && "Invalid Device"); std::unreachable();
         }
         return os.str();
     }
 
+    /**
+     * TODO - Write documentation.
+     */
     void Tensor::kill_buffer() {
         if (this->device == Device::CPU) {
             if (this->convert_buffer != nullptr && this->convert_buffer_size != 0) {
@@ -323,6 +393,10 @@ namespace BeanTensor::Tensors {
             }
         }
     }
+
+    /**
+     * TODO - Write documentation.
+     */
     void Tensor::kill_cpu_data() {
         if (this->owns_data) {
             if (this->data != nullptr && this->device == Device::CPU) {
@@ -332,6 +406,9 @@ namespace BeanTensor::Tensors {
         }
     }
 
+    /**
+     * TODO - Write documentation.
+     */
     void Tensor::kill_gpu_data() {
         if (this->device != Device::GPU) return;
         if (this->owns_data && this->data != nullptr) {
@@ -346,34 +423,118 @@ namespace BeanTensor::Tensors {
         }
     }
 
-    void Tensor::notify_child(const void* tensor_data) {
+    /**
+     * TODO - Write documentation.
+     * @param parent
+     */
+    void Tensor::notify_child(Tensor* parent) {
         if (this->device == Device::CPU) {
             this->sync();
             this->kill_cpu_data();
             this->kill_buffer();
-            this->data = std::aligned_alloc(64, this->nbytes);
-            memcpy(this->data, tensor_data, this->nbytes);
+            this->data = std::aligned_alloc(64, (this->nbytes + 63) / 64 * 64);
+            memcpy(this->data, parent->data, this->nbytes);
         } else if (this->device == Device::GPU) {
             this->sync();
             this->kill_gpu_data();
             this->kill_buffer();
 #if defined(USE_HIP)
-            throw ErrorHandling::NotImplemented();
+            void* new_data = nullptr;
+            HIP_CHECK_ERROR(hipMalloc(&new_data, this->nbytes));
+            HIP_CHECK_ERROR(hipMemcpy(new_data, parent->data, this->nbytes, hipMemcpyDeviceToDevice));
+            this->data = new_data;
 #elif defined(USE_CUDA)
             void* new_data = nullptr;
             CUDA_CHECK_ERROR(cudaMalloc(&new_data, this->nbytes));
-            CUDA_CHECK_ERROR(cudaMemcpy(new_data, data, this->nbytes, cudaMemcpyDeviceToDevice));
+            CUDA_CHECK_ERROR(cudaMemcpy(new_data, parent->data, this->nbytes, cudaMemcpyDeviceToDevice));
             this->data = new_data;
 #else
             throw ErrorHandling::GPUTaskOnCPUBuild();
 #endif
         }
+        // The fresh buffer is ours now — without this the destructor never
+        // frees it and every parent death leaks a full clone.
+        this->owns_data = true;
+        std::erase(this->view_parents, parent);
+        // This view's own children aliased the dying parent's buffer too;
+        // re-point them onto the fresh copy so the chain stays valid.
+        for (const auto& i : this->children) {
+            i->data = this->data;
+        }
     }
 
+    /**
+     * TODO - Write documentation.
+     * @param idx
+     * @return
+     */
+    size_t Tensor::checked_element_offset(const std::initializer_list<size_t> idx) const {
+        sync();
+        if (idx.size() != ndim) {
+            throw ErrorHandling::IndexOutOfRange();
+        }
+        auto elem_offset = this->offset;
+        auto dim = size_t{0};
+        for (const size_t i : idx) {
+            if (i >= shape[dim]) {
+                throw ErrorHandling::IndexOutOfRange();
+            }
+            elem_offset += i * dims[dim];
+            ++dim;
+        }
+        return elem_offset;
+    }
+
+    /**
+     * TODO - Write documentation.
+     * @param elem_offset
+     * @param dst
+     * @param bytes
+     */
+    void Tensor::read_element(const size_t elem_offset, void* dst, const size_t bytes) {
+        if (this->device == Device::CPU) {
+            memcpy(dst, static_cast<char*>(this->data) + elem_offset * bytes, bytes);
+            return;
+        }
+#if defined(USE_HIP)
+        HIP_CHECK_ERROR(hipMemcpy(dst, static_cast<char*>(this->data) + elem_offset * bytes, bytes, hipMemcpyDeviceToHost));
+#elif defined(USE_CUDA)
+        CUDA_CHECK_ERROR(cudaMemcpy(dst, static_cast<char*>(this->data) + elem_offset * bytes, bytes, cudaMemcpyDeviceToHost));
+#else
+        throw ErrorHandling::GPUTaskOnCPUBuild();
+#endif
+    }
+
+    /**
+     * TODO - Write documentation.
+     * @param elem_offset
+     * @param src
+     * @param bytes
+     */
+    void Tensor::write_element(const size_t elem_offset, const void* src, const size_t bytes) {
+        if (this->device == Device::CPU) {
+            memcpy(static_cast<char*>(this->data) + elem_offset * bytes, src, bytes);
+            return;
+        }
+#if defined(USE_HIP)
+        HIP_CHECK_ERROR(hipMemcpy(static_cast<char*>(this->data) + elem_offset * bytes, src, bytes, hipMemcpyHostToDevice));
+#elif defined(USE_CUDA)
+        CUDA_CHECK_ERROR(cudaMemcpy(static_cast<char*>(this->data) + elem_offset * bytes, src, bytes, cudaMemcpyHostToDevice));
+#else
+        throw ErrorHandling::GPUTaskOnCPUBuild();
+#endif
+    }
+
+    /**
+     * TODO - Write documentation.
+     * @param min
+     * @param max
+     * @param seed
+     */
     void Tensor::random(const float64_t &min, const float64_t &max, const int64_t seed) {
         sync();
         if (this->device == Device::CPU) {
-            using FillFn = void(*)(void*, const size_t, const size_t, const double, const double, const Tensor&);
+            using FillFn = void(*)(void*, const size_t, const size_t, const float64_t, const float64_t, const Tensor&);
             using DType = DataTypes::DType;
 
             static const std::unordered_map<DType, FillFn> fill_fns = {
@@ -399,11 +560,14 @@ namespace BeanTensor::Tensors {
             it->second(this->data, this->numel, static_cast<size_t>(seed), min, max, *this);
         } else if (this->device == Device::GPU) {
             detail::set_random_gpu(*this, min, max, seed);
-        } else {
+        } else [[unlikely]] {
             __builtin_unreachable();
         }
     }
 
+    /**
+     * TODO - Write documentation.
+     */
     void Tensor::set_one() {
         sync();
         if (this->device == Device::CPU) {
@@ -432,12 +596,19 @@ namespace BeanTensor::Tensors {
             }
             it->second(this->data, this->numel, *this);
         } else if (this->device == Device::GPU) {
-            detail::set_amount_gpu(*this, 1);
-        } else {
+            detail::set_amount_gpu(*this, int64_t{1});
+        } else [[unlikely]]{
             __builtin_unreachable();
         }
     }
 
+    /**
+     * TODO - Write documentation.
+     * @param new_shape
+     * @param new_dtype
+     * @param new_device
+     * @param new_grad_status
+     */
     void Tensor::set_tensor(const std::vector<size_t> &new_shape, const DataTypes::DType new_dtype, const Device new_device, const bool new_grad_status) {
         sync();
         const size_t new_ndim = new_shape.size();
@@ -476,17 +647,24 @@ namespace BeanTensor::Tensors {
         }
     }
 
+    /**
+     * TODO - Write documentation.
+     */
     void Tensor::set_zero() {
         sync();
         if (this->device == Device::CPU) {
             std::memset(this->data, 0, this->nbytes);
         } else if (this->device == Device::GPU) {
-            detail::set_amount_gpu(*this, 0);
-        } else {
+            detail::set_amount_gpu(*this, int64_t{0});
+        } else [[unlikely]] {
             __builtin_unreachable();
         }
     }
 
+    /**
+     * TODO - Write documentation.
+     * @return
+     */
     std::string Tensor::shape_to_string() const {
         std::ostringstream os;
         os << "{";

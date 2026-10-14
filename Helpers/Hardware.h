@@ -16,7 +16,8 @@ enum CPUFeatureSetTypes {
     CPUFeatureSetType_AVX512F = 5,
     CPUFeatureSetType_AVX512BF16 = 6,
     CPUFeatureSetType_FMA = 7,
-    CPUFeatureSetType_NPU_STRIXHALO = 8
+    CPUFeatureSetType_NPU_STRIXHALO = 8,
+    CPUFeatureSetType_AVX512DQ = 9
 };
 
 /**
@@ -61,7 +62,7 @@ struct alignas(8) CPUFeatureSets {
  * @brief Get the CPU feature set.
  * @return The CPU feature set.
  */
-inline static const CPUFeatureSets& IncludedCPUFeatures() {
+__inline__ __attribute__((always_inline)) static const CPUFeatureSets& IncludedCPUFeatures() {
     // NOLINTNEXTLINE(*-dynamic-static-initializers)
     static const CPUFeatureSets cpu_features = []{
         CPUFeatureSets f {
@@ -97,6 +98,11 @@ inline static const CPUFeatureSets& IncludedCPUFeatures() {
 #if defined(__AVX512BF16__)
         if (__builtin_cpu_supports("avx512bf16"))
             f.set_feature(CPUFeatureSetType_AVX512BF16);
+#endif
+
+#if defined(__AVX512DQ__)
+        if (__builtin_cpu_supports("avx512dq"))
+            f.set_feature(CPUFeatureSetType_AVX512DQ);
 #endif
 
 #if defined(__FMA__)

@@ -97,8 +97,8 @@ namespace BeanTensor::DataTypes {
             case DType::BFloat16x2: return sizeof(bfloat16x2_t);
             case DType::Float32: return sizeof(float32_t);
             case DType::Float64: return sizeof(float64_t);
-            case DType::Int32:   return sizeof(int32_t);
             case DType::Int64:   return sizeof(int64_t);
+            case DType::Int32:   return sizeof(int32_t);
             case DType::Int16:   return sizeof(int16_t);
             case DType::Int8:    return sizeof(int8_t);
             case DType::UInt32:  return sizeof(uint32_t);
@@ -117,8 +117,8 @@ namespace BeanTensor::DataTypes {
             case DType::BFloat16x2: return "BFloat16x2";
             case DType::Float32: return "Float32";
             case DType::Float64: return "Float64";
-            case DType::Int32:   return "Int32";
             case DType::Int64:   return "Int64";
+            case DType::Int32:   return "Int32";
             case DType::Int16:   return "Int16";
             case DType::Int8:    return "Int8";
             case DType::UInt32:  return "UInt32";

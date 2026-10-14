@@ -38,6 +38,9 @@ namespace BeanTensor::Intrinsics::detail {
         // has_feature() combines the compile-time macro with __builtin_cpu_supports.
         const bool avx512_bf16 = IncludedCPUFeatures().has_feature(CPUFeatureSetType_AVX512BF16);
         const bool avx512_f = IncludedCPUFeatures().has_feature(CPUFeatureSetType_AVX512F);
+        const auto avx512_dq = IncludedCPUFeatures().has_feature(CPUFeatureSetType_AVX512DQ);
+        const auto avx2 = IncludedCPUFeatures().has_feature(CPUFeatureSetType_AVX2);
+        const auto avx2_f16c = avx2 && IncludedCPUFeatures().has_feature(CPUFeatureSetType_F16C);
         if (avx512_bf16 && t.dtype == DType::Float32 && new_dtype == DType::BFloat16) {
             auto f = avx512_fp32_to_bf16(static_cast<const float32_t*>(t.data),
                                          static_cast<bfloat16_t*>(t.convert_buffer), t.numel, *flag, method);
@@ -53,6 +56,71 @@ namespace BeanTensor::Intrinsics::detail {
         } else if (avx512_f && t.dtype == DType::Float16 && new_dtype == DType::Float32) {
             auto f = avx512_fp16_to_fp32(static_cast<const float16_t*>(t.data),
                                          static_cast<float32_t*>(t.convert_buffer), t.numel, *flag, method);
+            futures.insert(futures.end(), f.begin(), f.end());
+        } else if (avx512_f && t.dtype == DType::Float32 && new_dtype == DType::Float64) {
+            auto f = avx512_fp32_to_fp64(static_cast<const float32_t*>(t.data),
+                                         static_cast<float64_t*>(t.convert_buffer), t.numel, *flag, method);
+            futures.insert(futures.end(), f.begin(), f.end());
+        } else if (avx512_f && t.dtype == DType::Float64 && new_dtype == DType::Float32) {
+            auto f = avx512_fp64_to_fp32(static_cast<const float64_t*>(t.data),
+                                         static_cast<float32_t*>(t.convert_buffer), t.numel, *flag, method);
+            futures.insert(futures.end(), f.begin(), f.end());
+        } else if (avx512_f && t.dtype == DType::Int32 && new_dtype == DType::Float32) {
+            auto f = avx512_int32_to_fp32(static_cast<const int32_t*>(t.data),
+                                          static_cast<float32_t*>(t.convert_buffer), t.numel);
+            futures.insert(futures.end(), f.begin(), f.end());
+        } else if (avx512_f && t.dtype == DType::Float32 && new_dtype == DType::Int32) {
+            auto f = avx512_fp32_to_int32(static_cast<const float32_t*>(t.data),
+                                          static_cast<int32_t*>(t.convert_buffer), t.numel, *flag, method);
+            futures.insert(futures.end(), f.begin(), f.end());
+        } else if (avx512_f && t.dtype == DType::UInt32 && new_dtype == DType::Float32) {
+            auto f = avx512_uint32_to_fp32(static_cast<const uint32_t*>(t.data),
+                                           static_cast<float32_t*>(t.convert_buffer), t.numel);
+            futures.insert(futures.end(), f.begin(), f.end());
+        } else if (avx512_f && t.dtype == DType::Float32 && new_dtype == DType::UInt32) {
+            auto f = avx512_fp32_to_uint32(static_cast<const float32_t*>(t.data),
+                                           static_cast<uint32_t*>(t.convert_buffer), t.numel, *flag, method);
+            futures.insert(futures.end(), f.begin(), f.end());
+        } else if (avx512_dq && t.dtype == DType::Int64 && new_dtype == DType::Float64) {
+            auto f = avx512_int64_to_fp64(static_cast<const int64_t*>(t.data),
+                                          static_cast<float64_t*>(t.convert_buffer), t.numel);
+            futures.insert(futures.end(), f.begin(), f.end());
+        } else if (avx512_dq && t.dtype == DType::Float64 && new_dtype == DType::Int64) {
+            auto f = avx512_fp64_to_int64(static_cast<const float64_t*>(t.data),
+                                          static_cast<int64_t*>(t.convert_buffer), t.numel, *flag, method);
+            futures.insert(futures.end(), f.begin(), f.end());
+        // AVX2/F16C fast paths — same conversions, for CPUs without AVX512.
+        } else if (avx2 && t.dtype == DType::Float32 && new_dtype == DType::BFloat16) {
+            auto f = avx2_fp32_to_bf16(static_cast<const float32_t*>(t.data),
+                                       static_cast<bfloat16_t*>(t.convert_buffer), t.numel, *flag, method);
+            futures.insert(futures.end(), f.begin(), f.end());
+        } else if (avx2 && t.dtype == DType::BFloat16 && new_dtype == DType::Float32) {
+            auto f = avx2_bf16_to_fp32(static_cast<const bfloat16_t*>(t.data),
+                                       static_cast<float32_t*>(t.convert_buffer), t.numel);
+            futures.insert(futures.end(), f.begin(), f.end());
+        } else if (avx2_f16c && t.dtype == DType::Float32 && new_dtype == DType::Float16) {
+            auto f = avx2_fp32_to_fp16(static_cast<const float32_t*>(t.data),
+                                       static_cast<float16_t*>(t.convert_buffer), t.numel, *flag, method);
+            futures.insert(futures.end(), f.begin(), f.end());
+        } else if (avx2_f16c && t.dtype == DType::Float16 && new_dtype == DType::Float32) {
+            auto f = avx2_fp16_to_fp32(static_cast<const float16_t*>(t.data),
+                                       static_cast<float32_t*>(t.convert_buffer), t.numel, *flag, method);
+            futures.insert(futures.end(), f.begin(), f.end());
+        } else if (avx2 && t.dtype == DType::Float32 && new_dtype == DType::Float64) {
+            auto f = avx2_fp32_to_fp64(static_cast<const float32_t*>(t.data),
+                                       static_cast<float64_t*>(t.convert_buffer), t.numel, *flag, method);
+            futures.insert(futures.end(), f.begin(), f.end());
+        } else if (avx2 && t.dtype == DType::Float64 && new_dtype == DType::Float32) {
+            auto f = avx2_fp64_to_fp32(static_cast<const float64_t*>(t.data),
+                                       static_cast<float32_t*>(t.convert_buffer), t.numel, *flag, method);
+            futures.insert(futures.end(), f.begin(), f.end());
+        } else if (avx2 && t.dtype == DType::Int32 && new_dtype == DType::Float32) {
+            auto f = avx2_int32_to_fp32(static_cast<const int32_t*>(t.data),
+                                        static_cast<float32_t*>(t.convert_buffer), t.numel);
+            futures.insert(futures.end(), f.begin(), f.end());
+        } else if (avx2 && t.dtype == DType::Float32 && new_dtype == DType::Int32) {
+            auto f = avx2_fp32_to_int32(static_cast<const float32_t*>(t.data),
+                                        static_cast<int32_t*>(t.convert_buffer), t.numel, *flag, method);
             futures.insert(futures.end(), f.begin(), f.end());
         } else {
             switch (t.dtype) {

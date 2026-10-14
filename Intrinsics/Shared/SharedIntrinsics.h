@@ -1,6 +1,7 @@
 #pragma once
 #include <cmath>
 #include <limits>
+#include <type_traits>
 #include <utility>
 
 #include "Intrinsics/ConversionMethods.h"
@@ -37,12 +38,15 @@ namespace BeanTensor::Intrinsics::detail {
             }
             return static_cast<dst>(src_v);
         } else {
-            if (src_v > std::numeric_limits<dst>::max()) {
+            // Compare in the common (wider) type explicitly — identical semantics to the
+            // implicit promotion, but clean under -Werror=double-promotion.
+            using cmp_t = std::common_type_t<src, dst>;
+            if (static_cast<cmp_t>(src_v) > static_cast<cmp_t>(std::numeric_limits<dst>::max())) {
                 // Overflow
                 if (method != ConversionClampMethod::PERMISSIVE) flag_met = true;
                 return std::numeric_limits<dst>::max();
             }
-            if (src_v < std::numeric_limits<dst>::lowest()) {
+            if (static_cast<cmp_t>(src_v) < static_cast<cmp_t>(std::numeric_limits<dst>::lowest())) {
                 // Underflow
                 if (method != ConversionClampMethod::PERMISSIVE) flag_met = true;
                 return std::numeric_limits<dst>::lowest();

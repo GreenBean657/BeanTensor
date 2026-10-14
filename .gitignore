@@ -1,3 +1,8 @@
 build/
+build-verify/
 cmake-build-debug/
+scratch/
 .idea/
+AGENTS.md
+*.d
+*.ddi

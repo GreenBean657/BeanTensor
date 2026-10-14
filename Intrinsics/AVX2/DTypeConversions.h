@@ -1,0 +1,20 @@
+#pragma once
+
+#include <atomic>
+#include <cstddef>
+#include <future>
+#include <vector>
+
+#include "Intrinsics/ConversionMethods.h"
+#include "Tensor/DTypes.h"
+
+namespace BeanTensor::Intrinsics::detail {
+    [[nodiscard]] std::vector<std::shared_future<void>> avx2_fp32_to_bf16(const float32_t* src, bfloat16_t* dst, const size_t& end, std::atomic<bool>& flag, ConversionClampMethod method);
+    [[nodiscard]] std::vector<std::shared_future<void>> avx2_bf16_to_fp32(const bfloat16_t* src, float32_t* dst, const size_t& end);
+    [[nodiscard]] std::vector<std::shared_future<void>> avx2_fp32_to_fp16(const float32_t* src, float16_t* dst, const size_t& end, std::atomic<bool>& flag, ConversionClampMethod method);
+    [[nodiscard]] std::vector<std::shared_future<void>> avx2_fp16_to_fp32(const float16_t* src, float32_t* dst, const size_t& end, std::atomic<bool>& flag, ConversionClampMethod method);
+    [[nodiscard]] std::vector<std::shared_future<void>> avx2_fp32_to_fp64(const float32_t* src, float64_t* dst, const size_t& end, std::atomic<bool>& flag, ConversionClampMethod method);
+    [[nodiscard]] std::vector<std::shared_future<void>> avx2_fp64_to_fp32(const float64_t* src, float32_t* dst, const size_t& end, std::atomic<bool>& flag, ConversionClampMethod method);
+    [[nodiscard]] std::vector<std::shared_future<void>> avx2_int32_to_fp32(const int32_t* src, float32_t* dst, const size_t& end);
+    [[nodiscard]] std::vector<std::shared_future<void>> avx2_fp32_to_int32(const float32_t* src, int32_t* dst, const size_t& end, std::atomic<bool>& flag, ConversionClampMethod method);
+}

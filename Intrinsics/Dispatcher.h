@@ -12,6 +12,7 @@
 #include "Helpers/CPUThreading.h"
 #include "Helpers/Errors.h"
 #include "Helpers/Hardware.h"
+#include "Intrinsics/AVX2/DTypeConversions.h"
 #include "Intrinsics/AVX512/DTypeConversions.h"
 #include "Intrinsics/ConversionMethods.h"
 #include "Intrinsics/Native/DTypeConversions.h"
@@ -88,9 +89,11 @@ namespace BeanTensor::Intrinsics::detail {
             // Compare in the source type. When Src cannot represent Dst's max
             // exactly (e.g. int64 in float64_t), the bound rounds up to a value
             // already outside Dst's range, so equality there is also overflow.
+            // Written as !(v < max_bound) rather than v == max_bound: identical
+            // semantics (NaN is handled above), but -Werror=float-equal clean.
             const Src max_bound = static_cast<Src>(std::numeric_limits<Dst>::max());
             if (
-                constexpr bool max_exact = std::numeric_limits<Src>::digits >= std::numeric_limits<Dst>::digits; v > max_bound || (!max_exact && v == max_bound)
+                constexpr bool max_exact = std::numeric_limits<Src>::digits >= std::numeric_limits<Dst>::digits; v > max_bound || (!max_exact && !(v < max_bound))
                 ) {
                 if (method != ConversionClampMethod::PERMISSIVE) flag = true;
                 return std::numeric_limits<Dst>::max();
