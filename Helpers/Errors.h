@@ -64,6 +64,14 @@ namespace BeanTensor::ErrorHandling {
          */
         IndexOutOfRange() : std::out_of_range("Tensor index out of range") { };
     };
+
+    class UnReachableCode : public std::logic_error {
+    public:
+        /**
+         * @brief Exception thrown when code that should be unreachable is executed.
+         */
+        UnReachableCode() : std::logic_error("Unreachable code.") { };
+    };
 }
 
 #if defined(USE_HIP)

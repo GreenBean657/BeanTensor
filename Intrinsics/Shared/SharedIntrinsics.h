@@ -18,13 +18,17 @@ namespace BeanTensor::Intrinsics::detail {
      * @return DST Value to convert to
      */
     template<typename src, typename dst> requires
-            (std::is_floating_point_v<src> &&
-            std::is_floating_point_v<dst>) ||
-            (std::is_integral_v<src> &&
-            std::is_integral_v<dst>)
+            (
+                std::is_floating_point_v<src> &&
+                std::is_floating_point_v<dst>
+            ) || (
+                std::is_integral_v<src> &&
+                std::is_integral_v<dst>
+            ) || (
+                !DataTypes::is_nonstandard_float_kind_v<src> &&
+                !DataTypes::is_nonstandard_float_kind_v<dst>
+            )
     [[nodiscard]] dst standard2standard(const src& src_v, bool& flag_met, const ConversionClampMethod method = ConversionClampMethod::PERMISSIVE) {
-        assert(!DataTypes::is_nonstandard_float_kind_v<src>);
-        assert(!DataTypes::is_nonstandard_float_kind_v<dst>);
         if constexpr (std::is_integral_v<src> && std::is_integral_v<dst>) {
             if (std::cmp_greater(src_v, std::numeric_limits<dst>::max())) {
                 // Overflow

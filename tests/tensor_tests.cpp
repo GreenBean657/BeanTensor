@@ -190,7 +190,7 @@ static void test_nan_inf_flags() {
 
     bool flag = false;
     const float16_t n16 = det::unaccel_fp32_to_fp16_tracked(nan32, flag, ConversionClampMethod::PERMISSIVE);
-    const uint16_t nb = det::bit_cast_memcpy<uint16_t>(n16);
+    const auto nb = det::bit_cast_memcpy<uint16_t>(n16);
     CHECK((nb & 0x7C00) == 0x7C00 && (nb & 0x03FF) != 0); // NaN stays NaN (quiet)
     const float16_t i16 = det::unaccel_fp32_to_fp16_tracked(inf32, flag, ConversionClampMethod::PERMISSIVE);
     CHECK(det::bit_cast_memcpy<uint16_t>(i16) == 0x7C00); // Inf stays Inf

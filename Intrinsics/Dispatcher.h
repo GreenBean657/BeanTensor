@@ -239,7 +239,7 @@ namespace BeanTensor::Intrinsics::detail {
             case DType::UInt32:     convert_chunked<Src, uint32_t>(src, dst, numel, flag, method, futures); break;
             case DType::UInt16:     convert_chunked<Src, uint16_t>(src, dst, numel, flag, method, futures); break;
             case DType::UInt8:      convert_chunked<Src, uint8_t>(src, dst, numel, flag, method, futures); break;
-            default: throw ErrorHandling::NotImplemented();
+            [[unlikely]] default: throw ErrorHandling::NotImplemented();
         }
     }
 
