@@ -86,13 +86,3 @@ namespace BeanTensor::ErrorHandling {
     } \
 }
 #endif
-
-enum DataPoolOwner {
-    GPU,
-    CPU,
-};
-
-struct DataPool {
-    DataPoolOwner owner;
-    void* data;
-};
