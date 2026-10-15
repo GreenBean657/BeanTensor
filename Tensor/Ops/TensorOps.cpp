@@ -116,7 +116,7 @@ namespace BeanTensor::Tensors::detail::gpu {
             } else if constexpr (std::is_trivially_copyable_v<T> && sizeof(T) == 4) {
                 return __builtin_bit_cast(T, __ldg(reinterpret_cast<const uint32_t*>(p)));
             } else if constexpr (std::is_trivially_copyable_v<T> && sizeof(T) == 8) {
-                return __builtin_bit_cast(T, __ldg(reinterpret_cast<const unsigned long long*>(p)));
+                return __builtin_bit_cast(T, __ldg(reinterpret_cast<const uint64_t*>(p)));
             } else {
                 return *p;
             }
@@ -132,8 +132,8 @@ namespace BeanTensor::Tensors::detail::gpu {
          * @param m Active ConversionClampMethod.
          * @return FP32 value converted from the FP16 input.
          */
-        __device__ __forceinline__ float dev_fp16_to_fp32(const float16_t v, bool& flag, const ConversionClampMethod m) {
-            const float f = __half2float(v);
+        __device__ __forceinline__ float32_t dev_fp16_to_fp32(const float16_t v, bool& flag, const ConversionClampMethod m) {
+            const float32_t f = __half2float(v);
             if (m == ConversionClampMethod::STRICT && (__isnanf(f) || __isinff(f))) flag = true;
             return f;
         }
@@ -151,7 +151,7 @@ namespace BeanTensor::Tensors::detail::gpu {
          * @param m Active ConversionClampMethod.
          * @return BF16 value converted from the FP32 input.
          */
-        __device__ __forceinline__ bfloat16_t dev_fp32_to_bf16(const float f, bool& flag, const ConversionClampMethod m) {
+        __device__ __forceinline__ bfloat16_t dev_fp32_to_bf16(const float32_t f, bool& flag, const ConversionClampMethod m) {
             const uint32_t bits = __float_as_uint(f);
             if ((bits & 0x7F800000u) == 0x7F800000u) {
                 if (m == ConversionClampMethod::STRICT) flag = true;
@@ -170,7 +170,7 @@ namespace BeanTensor::Tensors::detail::gpu {
          * @param v BF16 value to convert.
          * @return FP32 value converted from the BF16 input.
          */
-        __device__ __forceinline__ float dev_bf16_to_fp32(const bfloat16_t v) {
+        __device__ __forceinline__ float32_t dev_bf16_to_fp32(const bfloat16_t v) {
             return __bfloat162float(v);
         }
 
@@ -186,7 +186,7 @@ namespace BeanTensor::Tensors::detail::gpu {
          * @param m Active ConversionClampMethod.
          * @return FP16 value converted from the FP32 input.
          */
-        __device__ __forceinline__ float16_t dev_fp32_to_fp16(const float f, bool& flag, const ConversionClampMethod m) {
+        __device__ __forceinline__ float16_t dev_fp32_to_fp16(const float32_t f, bool& flag, const ConversionClampMethod m) {
             if (__isnanf(f) || __isinff(f)) {
                 if (m == ConversionClampMethod::STRICT) flag = true;
                 return __float2half_rn(f);
@@ -213,7 +213,7 @@ namespace BeanTensor::Tensors::detail::gpu {
          * @param m Active ConversionClampMethod.
          * @return FP32 value converted from the FP64 input.
          */
-        __device__ __forceinline__ float dev_fp64_to_fp32(const float64_t v, bool& flag, const ConversionClampMethod m) {
+        __device__ __forceinline__ float32_t dev_fp64_to_fp32(const float64_t v, bool& flag, const ConversionClampMethod m) {
             if (v > DataTypes::detail::FP32_MAX_D) {
                 if (m != ConversionClampMethod::PERMISSIVE) flag = true;
                 return static_cast<float32_t>(DataTypes::detail::FP32_MAX_D);
@@ -585,7 +585,7 @@ namespace BeanTensor::Tensors::detail::gpu {
                     impli_gpu_convert<Src, uint8_t><<<blocks, threads>>>(src, static_cast<uint8_t*>(dst), numel, method, fail_check);
                     break;
                 }
-                default: {
+                [[unlikely]] default: {
                     throw ErrorHandling::NotImplemented();
                 }
             }
@@ -665,7 +665,7 @@ namespace BeanTensor::Tensors::detail::gpu {
                     impli_gpu_set_static_val_packed<bfloat16x2_t, bfloat16_t><<<blocks, threads>>>(static_cast<bfloat16x2_t*>(data), numel, h);
                     break;
                 }
-                default: {
+                [[unlikely]] default: {
                     throw ErrorHandling::NotImplemented();
                 }
             }
@@ -906,7 +906,7 @@ namespace BeanTensor::Tensors::detail {
                     gpu::launch_convert_dst<uint8_t>(new_dtype, static_cast<const uint8_t*>(t.data), t.convert_buffer, t.numel, blocks, threads, method, check_err);
                     break;
                 }
-                default: {
+                [[unlikely]] default: {
                     throw ErrorHandling::NotImplemented();
                 }
             }

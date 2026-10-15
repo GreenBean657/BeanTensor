@@ -138,7 +138,7 @@ namespace BeanTensor::Intrinsics::detail {
                 case DType::UInt32:     convert_to_dst<uint32_t>(new_dtype, t.data, t.convert_buffer, t.numel, *flag, method, futures); break;
                 case DType::UInt16:     convert_to_dst<uint16_t>(new_dtype, t.data, t.convert_buffer, t.numel, *flag, method, futures); break;
                 case DType::UInt8:      convert_to_dst<uint8_t>(new_dtype, t.data, t.convert_buffer, t.numel, *flag, method, futures); break;
-                default: throw ErrorHandling::NotImplemented();
+                [[unlikely]] default: throw ErrorHandling::NotImplemented();
             }
         }
 

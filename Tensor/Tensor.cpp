@@ -7,6 +7,7 @@
 #include <unordered_map>
 
 #include "Helpers/CPUThreading.h"
+#include "Helpers/Errors.h"
 #include "Helpers/Hardware.h"
 #include "Intrinsics/Dispatcher.h"
 #include "Intrinsics/Native/DTypeConversions.h"
@@ -259,7 +260,7 @@ namespace BeanTensor::Tensors {
                 clone.view_parents.emplace_back(this);
             }
         } else [[unlikely]] {
-            __builtin_unreachable();
+            throw ErrorHandling::UnReachableCode();
         }
         return clone;
     }
@@ -298,7 +299,7 @@ namespace BeanTensor::Tensors {
             // method; non-PERMISSIVE failures surface as std::range_error at sync().
             detail::convert_gpu(*this, new_dtype, method);
         } else [[unlikely]] {
-            __builtin_unreachable();
+            throw ErrorHandling::UnReachableCode();
         }
     }
 
@@ -308,8 +309,9 @@ namespace BeanTensor::Tensors {
     void Tensor::compute_strides() {
         sync();
         this->dims[this->ndim - 1] = 1;
-        for (int32_t i = static_cast<int32_t>(this->ndim) - 2; i >= 0; --i)
+        for (int32_t i = static_cast<int32_t>(this->ndim) - 2; i >= 0; --i) {
             this->dims[i] = this->dims[i + 1] * this->shape[i + 1];
+        }
     }
 
     /**
@@ -340,7 +342,9 @@ namespace BeanTensor::Tensors {
         };
 
         const auto it = print_fns.find(this->dtype);
-        if (it == print_fns.end()) throw ErrorHandling::NotImplemented();
+        if (it == print_fns.end()) [[unlikely]] {
+            throw ErrorHandling::NotImplemented();
+        }
         size_t idx = 0;
 
         if (this->device == Device::CPU) {
@@ -362,7 +366,7 @@ namespace BeanTensor::Tensors {
             throw ErrorHandling::GPUTaskOnCPUBuild();
 #endif
         } else [[unlikely]] {
-            assert(false && "Invalid Device"); std::unreachable();
+            throw ErrorHandling::UnReachableCode();
         }
         return os.str();
     }
@@ -391,6 +395,8 @@ namespace BeanTensor::Tensors {
                 throw ErrorHandling::GPUTaskOnCPUBuild();
 #endif
             }
+        } else [[unlikely]] {
+            throw ErrorHandling::UnReachableCode();
         }
     }
 
@@ -398,8 +404,9 @@ namespace BeanTensor::Tensors {
      * TODO - Write documentation.
      */
     void Tensor::kill_cpu_data() {
+        if (this->device != Device::CPU) return;
         if (this->owns_data) {
-            if (this->data != nullptr && this->device == Device::CPU) {
+            if (this->data != nullptr) {
                 std::free(this->data);
                 this->data = nullptr;
             }
@@ -493,16 +500,19 @@ namespace BeanTensor::Tensors {
      */
     void Tensor::read_element(const size_t elem_offset, void* dst, const size_t bytes) {
         if (this->device == Device::CPU) {
-            memcpy(dst, static_cast<char*>(this->data) + elem_offset * bytes, bytes);
+            memcpy(dst, static_cast<uint8_t*>(this->data) + elem_offset * bytes, bytes);
             return;
-        }
+        } else if (this->device == Device::GPU) {
 #if defined(USE_HIP)
-        HIP_CHECK_ERROR(hipMemcpy(dst, static_cast<char*>(this->data) + elem_offset * bytes, bytes, hipMemcpyDeviceToHost));
+            HIP_CHECK_ERROR(hipMemcpy(dst, static_cast<uint8_t*>(this->data) + elem_offset * bytes, bytes, hipMemcpyDeviceToHost));
 #elif defined(USE_CUDA)
-        CUDA_CHECK_ERROR(cudaMemcpy(dst, static_cast<char*>(this->data) + elem_offset * bytes, bytes, cudaMemcpyDeviceToHost));
+            CUDA_CHECK_ERROR(cudaMemcpy(dst, static_cast<uint8_t*>(this->data) + elem_offset * bytes, bytes, cudaMemcpyDeviceToHost));
 #else
-        throw ErrorHandling::GPUTaskOnCPUBuild();
+            throw ErrorHandling::GPUTaskOnCPUBuild();
 #endif
+        } else [[unlikely]] {
+          throw ErrorHandling::UnReachableCode();
+        }
     }
 
     /**
@@ -513,16 +523,19 @@ namespace BeanTensor::Tensors {
      */
     void Tensor::write_element(const size_t elem_offset, const void* src, const size_t bytes) {
         if (this->device == Device::CPU) {
-            memcpy(static_cast<char*>(this->data) + elem_offset * bytes, src, bytes);
+            memcpy(static_cast<uint8_t*>(this->data) + elem_offset * bytes, src, bytes);
             return;
-        }
+        } else if (this->device == Device::GPU) {
 #if defined(USE_HIP)
-        HIP_CHECK_ERROR(hipMemcpy(static_cast<char*>(this->data) + elem_offset * bytes, src, bytes, hipMemcpyHostToDevice));
+            HIP_CHECK_ERROR(hipMemcpy(static_cast<uint8_t*>(this->data) + elem_offset * bytes, src, bytes, hipMemcpyHostToDevice));
 #elif defined(USE_CUDA)
-        CUDA_CHECK_ERROR(cudaMemcpy(static_cast<char*>(this->data) + elem_offset * bytes, src, bytes, cudaMemcpyHostToDevice));
+            CUDA_CHECK_ERROR(cudaMemcpy(static_cast<uint8_t*>(this->data) + elem_offset * bytes, src, bytes, cudaMemcpyHostToDevice));
 #else
-        throw ErrorHandling::GPUTaskOnCPUBuild();
+            throw ErrorHandling::GPUTaskOnCPUBuild();
 #endif
+        } else [[unlikely]] {
+            throw ErrorHandling::UnReachableCode();
+        }
     }
 
     /**
@@ -554,14 +567,14 @@ namespace BeanTensor::Tensors {
                 {DType::Float64,  detail::fill_random_impl<float64_t>}
             };
             const auto it = fill_fns.find(this->dtype);
-            if (it == fill_fns.end()) {
+            if (it == fill_fns.end()) [[unlikely]] {
                 throw ErrorHandling::NotImplemented();
             }
             it->second(this->data, this->numel, static_cast<size_t>(seed), min, max, *this);
         } else if (this->device == Device::GPU) {
             detail::set_random_gpu(*this, min, max, seed);
         } else [[unlikely]] {
-            __builtin_unreachable();
+            throw ErrorHandling::NotImplemented();
         }
     }
 
@@ -591,14 +604,14 @@ namespace BeanTensor::Tensors {
                 {DType::Float64,  detail::fill_fixed_impli<float64_t>}
             };
             const auto it = fill_fns.find(this->dtype);
-            if (it == fill_fns.end()) {
+            if (it == fill_fns.end()) [[unlikely]] {
                 throw ErrorHandling::NotImplemented();
             }
             it->second(this->data, this->numel, *this);
         } else if (this->device == Device::GPU) {
             detail::set_amount_gpu(*this, int64_t{1});
-        } else [[unlikely]]{
-            __builtin_unreachable();
+        } else [[unlikely]] {
+            throw ErrorHandling::NotImplemented();
         }
     }
 
@@ -630,20 +643,22 @@ namespace BeanTensor::Tensors {
         compute_strides();
 
         if (device == BeanTensor::Tensors::Device::CPU) {
-            // DEPLOYED PATCH: aligned_alloc(64) instead of malloc — guarantees 64-byte alignment
+            // aligned_alloc(64) instead of malloc — guarantees 64-byte alignment
             // enabling NT stores in conversion functions without runtime branching
             this->data = std::aligned_alloc(64, this->nbytes);
-            assert(this->data != nullptr);
+            if (this->data == nullptr) {
+                throw ErrorHandling::OutOfMemory();
+            }
         } else if (device == BeanTensor::Tensors::Device::GPU) {
 #if defined(USE_CUDA)
-            cudaMalloc(&this->data, this->nbytes);
+            CUDA_CHECK_ERROR(cudaMalloc(&this->data, this->nbytes));
 #elif defined(USE_HIP)
             HIP_CHECK_ERROR(hipMalloc(&this->data, this->nbytes));
 #else
             throw ErrorHandling::GPUTaskOnCPUBuild();
 #endif
-        } else {
-            throw ErrorHandling::NotImplemented();
+        } else [[unlikely]] {
+            throw ErrorHandling::UnReachableCode();
         }
     }
 
@@ -657,7 +672,7 @@ namespace BeanTensor::Tensors {
         } else if (this->device == Device::GPU) {
             detail::set_amount_gpu(*this, int64_t{0});
         } else [[unlikely]] {
-            __builtin_unreachable();
+            throw ErrorHandling::UnReachableCode();
         }
     }
 
