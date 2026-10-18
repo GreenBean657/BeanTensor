@@ -17,27 +17,40 @@ endif()
 
 
 if (USE_CUDA)
-    # C++23 device code requires nvcc >= 13.3; prefer that toolkit explicitly
-    # when it is installed alongside older ones.
-    if (EXISTS "/usr/local/cuda-13.3" AND NOT DEFINED CUDAToolkit_ROOT)
-        set(CUDAToolkit_ROOT "/usr/local/cuda-13.3")
+    # CUDA device code is pinned to nvcc 12.9: CUDA 13 dropped sm_70 (Volta),
+    # which we still target, and 12.x is the last nvcc line that supports it.
+    # The tradeoff: nvcc 12.x maxes out at -std=c++20 (C++23 arrived in 13.0),
+    # so CUDA TUs compile as C++20 while host CXX stays C++23. Prefer the 12.9
+    # toolkit explicitly when it is installed alongside newer ones.
+    if (EXISTS "/usr/local/cuda-12.9" AND NOT DEFINED CUDAToolkit_ROOT)
+        set(CUDAToolkit_ROOT "/usr/local/cuda-12.9")
     endif()
     IF (NOT CMAKE_CUDA_COMPILER OR CMAKE_CUDA_COMPILER MATCHES "NOTFOUND")
-        if (EXISTS "/usr/local/cuda-13.3/bin/nvcc")
-            set(CMAKE_CUDA_COMPILER "/usr/local/cuda-13.3/bin/nvcc" CACHE FILEPATH "CUDA compiler" FORCE)
+        if (EXISTS "/usr/local/cuda-12.9/bin/nvcc")
+            set(CMAKE_CUDA_COMPILER "/usr/local/cuda-12.9/bin/nvcc" CACHE FILEPATH "CUDA compiler" FORCE)
         else()
             set(CMAKE_CUDA_COMPILER "/usr/local/cuda/bin/nvcc" CACHE FILEPATH "CUDA compiler" FORCE)
         endif()
     ENDIF()
+    # nvcc 12.9 only supports host GCC <= 14, but this system defaults to GCC
+    # 15, whose libstdc++ headers nvcc's frontend cannot parse. Pin g++-13 as
+    # the CUDA host compiler when it is installed.
+    if (EXISTS "/usr/bin/g++-13" AND NOT DEFINED CMAKE_CUDA_HOST_COMPILER)
+        set(CMAKE_CUDA_HOST_COMPILER "/usr/bin/g++-13")
+    endif()
+    # glibc >= 2.41 declares C23 math functions (cospi/sinpi/rsqrt + f variants)
+    # with noexcept, colliding with CUDA 12.9's crt/math_functions.h. The fix is
+    # a one-line-per-function patch adding noexcept(true) to those 6 declarations
+    # in the toolkit header (documented in AGENTS.md); -U_GNU_SOURCE is NOT a
+    # viable workaround — it breaks libstdc++'s own headers.
     project(BeanTensorV5 LANGUAGES CXX CUDA)
-    # CMake 4.2 does not know the CUDA23 dialect for nvcc, and CUDA_STANDARD
-    # falls back to CXX_STANDARD (23) when unset, which then fails at generate
-    # time. Pin 20 as a placeholder CMake understands; the real standard comes
-    # from the -std=c++23 flag below — nvcc uses the last -std it is given.
     set(CMAKE_CUDA_STANDARD 20)
-    set(CMAKE_CUDA_ARCHITECTURES 86)
-    if (CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 13.3)
-        message(FATAL_ERROR "CUDA C++23 requires nvcc >= 13.3 (found ${CMAKE_CUDA_COMPILER_VERSION}). Install the CUDA 13.3 toolkit or build with USE_CUDA=OFF.")
+    set(CMAKE_CUDA_ARCHITECTURES 70 86)
+    if (CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.9)
+        message(FATAL_ERROR "CUDA backend requires nvcc >= 12.9 (found ${CMAKE_CUDA_COMPILER_VERSION}). Install the CUDA 12.9 toolkit or build with USE_CUDA=OFF.")
+    endif()
+    if (CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+        message(FATAL_ERROR "CUDA 13 dropped sm_70 support; pin the CUDA 12.9 toolkit (found ${CMAKE_CUDA_COMPILER_VERSION}).")
     endif()
 elseif (USE_HIP)
     project(BeanTensorV5 LANGUAGES CXX HIP)
@@ -68,6 +81,7 @@ set(BEANTENSOR_WERROR_FLAGS
         -Werror=double-promotion
         -Werror=old-style-cast
         -Werror=unused-variable
+        -Werror=unused-parameter
         -Werror=unused-but-set-variable
         -Werror=format=2
         -Werror=reorder
@@ -96,6 +110,7 @@ if (USE_HIP)
     message(STATUS "Backend: HIP/ROCm")
     list(APPEND CMAKE_PREFIX_PATH /opt/rocm)
     find_package(hip REQUIRED)
+    find_package(rocblas REQUIRED)
 elseif(USE_CUDA)
     message(STATUS "Backend: CUDA")
     find_package(CUDAToolkit REQUIRED)
@@ -144,9 +159,14 @@ endif()
 add_library(BeanTensorV5Core STATIC ${CORE_SOURCES})
 if(USE_CUDA)
     target_compile_definitions(BeanTensorV5Core PRIVATE USE_CUDA)
-    # CMAKE_CUDA_STANDARD does not reach nvcc because apparently the concept of supporting 23 as a value is too hard for expert driver developers.
-    # Override standard directly to 23. Requires nvcc >= 13.3
-    target_compile_options(BeanTensorV5Core PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-std=c++23>)
+    # nvcc 12.x supports at most -std=c++20; pin it explicitly.
+    # -Wno-error=float-equal must come after the -Werror flags: nvcc passes
+    # toolkit headers as plain -I (not -isystem), so cuda_bf16.hpp's float
+    # comparisons would otherwise trip the project's -Werror=float-equal.
+    # float-equal stays an error everywhere except CUDA host passes.
+    target_compile_options(BeanTensorV5Core PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:-std=c++20;-Xcompiler=-Wno-error=float-equal>
+    )
 endif()
 if(USE_STRIX_HALO)
     target_compile_definitions(BeanTensorV5Core PRIVATE USE_STRIX_HALO)
@@ -202,8 +222,10 @@ target_include_directories(BeanTensorV5Core PUBLIC ${CMAKE_SOURCE_DIR})
 if(USE_HIP)
     target_link_libraries(BeanTensorV5Core PRIVATE hip::device)
     target_link_libraries(BeanTensorV5Core PUBLIC hip::host)
+    target_link_libraries(BeanTensorV5Core PUBLIC roc::rocblas)
 elseif(USE_CUDA)
     target_link_libraries(BeanTensorV5Core PUBLIC CUDA::cudart)
+    target_link_libraries(BeanTensorV5Core PUBLIC CUDA::cublas)
 endif()
 
 
@@ -242,6 +264,7 @@ if(BUILD_TESTING)
             -mf16c
     )
     add_test(NAME BeanTensorV5Tests COMMAND BeanTensorV5Tests)
+
 endif()
 
 if(USE_HIP)
