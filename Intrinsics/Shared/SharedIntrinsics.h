@@ -1,3 +1,10 @@
+/**
+ * @file SharedIntrinsics.h
+ * @author GreenBean
+ * @brief Conversion helpers shared between the scalar, AVX2 and AVX512 dtype paths.
+ * @version 0.1
+ * @date 2026-10-15
+ */
 #pragma once
 #include <cmath>
 #include <limits>

@@ -1,9 +1,11 @@
-/*
- * HIP/CUDA GPU kernels + host wrappers for basic tensor operations.
- * Mirror pair: Tensor/Ops/TensorOps.cu (CUDA) and Tensor/Ops/TensorOps.cpp
- * (HIP) — both backends must stay behaviorally identical (same rounding via
- * explicit _rn intrinsics, same fail_check semantics, same async handoff to
- * Threading::GetCPUThreadPool()).
+/**
+ * @file TensorOps.cpp
+ * @author GreenBean
+ * @brief HIP GPU kernels + host wrappers for basic tensor operations.
+ * Mirror pair of Tensor/Ops/TensorOps.cu (CUDA); both backends must stay behaviorally identical (same rounding via
+ * explicit _rn intrinsics, same fail_check semantics, same async handoff to Threading::GetCPUThreadPool()).
+ * @version 0.1
+ * @date 2026-10-18
  */
 #include <cstdint>
 #include <limits>
@@ -327,6 +329,70 @@ namespace BeanTensor::Tensors::detail::gpu {
         }
 
         /**
+         * Extract the low signed 4-bit lane of a packed int4x2_t byte
+         * (lo = bits[3:0]), sign-extended to int8_t.
+         * @brief int4x2_t low-lane extraction.
+         * @param v Packed byte to unpack.
+         * @return Low lane sign-extended into [-8,7].
+         */
+        __device__ __forceinline__ int8_t int4_lane_lo(const int4x2_t v) {
+            const auto nibble = static_cast<int32_t>(static_cast<uint8_t>(v) & 0x0Fu);
+            return static_cast<int8_t>(nibble > 7 ? nibble - 16 : nibble);
+        }
+
+        /**
+         * Extract the high signed 4-bit lane of a packed int4x2_t byte
+         * (hi = bits[7:4]), sign-extended to int8_t.
+         * @brief int4x2_t high-lane extraction.
+         * @param v Packed byte to unpack.
+         * @return High lane sign-extended into [-8,7].
+         */
+        __device__ __forceinline__ int8_t int4_lane_hi(const int4x2_t v) {
+            const auto nibble = static_cast<int32_t>(static_cast<uint8_t>(v) >> 4);
+            return static_cast<int8_t>(nibble > 7 ? nibble - 16 : nibble);
+        }
+
+        /**
+         * Pack two int8_t lanes into one int4x2_t byte, truncating each lane to
+         * its low 4 bits (& 0xF). Callers clamp into [-8,7] first.
+         * @brief int4x2_t lane packing.
+         * @param lo Low lane (bits[3:0]).
+         * @param hi High lane (bits[7:4]).
+         * @return Packed byte.
+         */
+        __host__ __device__ __forceinline__ int4x2_t pack_int4x2(const int8_t lo, const int8_t hi) {
+            const auto lo_nib = static_cast<uint8_t>(static_cast<uint8_t>(lo) & 0x0Fu);
+            const auto hi_nib = static_cast<uint8_t>(static_cast<uint8_t>(hi) & 0x0Fu);
+            return static_cast<int4x2_t>(static_cast<uint8_t>(lo_nib | static_cast<uint8_t>(hi_nib << 4)));
+        }
+
+        /**
+         * Clamp an int8_t lane into the signed int4 range [-8,7], mirroring
+         * dev_int_to_int's clamp/flag idiom: out-of-range values clamp to the
+         * bound and flag under any non-PERMISSIVE method.
+         * @brief int8_t -> int4 range clamp with CPU-matching flags.
+         * @param v Lane value to clamp.
+         * @param flag Reference set to true on a conversion event the active method cares about.
+         * @param m Active ConversionClampMethod.
+         * @return v clamped into [-8,7].
+         */
+        __device__ __forceinline__ int8_t dev_clamp_int4(const int8_t v, bool& flag, const ConversionClampMethod m) {
+            if (v > 7) {
+                if (m != ConversionClampMethod::PERMISSIVE) {
+                    flag = true;
+                }
+                return static_cast<int8_t>(7);
+            }
+            if (v < -8) {
+                if (m != ConversionClampMethod::PERMISSIVE) {
+                    flag = true;
+                }
+                return static_cast<int8_t>(-8);
+            }
+            return v;
+        }
+
+        /**
          * Convert a floating-point lane to an integer dtype, mirroring the
          * float -> int branch of the CPU dispatcher's scalar_convert
          * (Intrinsics/Dispatcher.h): NaN flags under any non-PERMISSIVE method
@@ -490,7 +556,30 @@ namespace BeanTensor::Tensors::detail::gpu {
             bool local_flag = false;
 
             for (size_t i = tid; i < end; i += stride) {
-                if constexpr (!DataTypes::requires_unpack_v<Src> && !DataTypes::requires_unpack_v<Dst>) {
+                if constexpr (std::is_same_v<Src, int4x2_t> && std::is_same_v<Dst, int4x2_t>) {
+                    dst[i] = ldg_load(src + i);
+                } else if constexpr (std::is_same_v<Src, int4x2_t> && !DataTypes::requires_unpack_v<Dst>) {
+                    // int4x2 -> unpacked: convert the low lane only.
+                    dst[i] = dev_scalar_convert<int8_t, Dst>(int4_lane_lo(ldg_load(src + i)), local_flag, method);
+                } else if constexpr (std::is_same_v<Src, int4x2_t>) {
+                    // int4x2 -> packed 16-bit: convert each lane.
+                    using HD = lane_of_t<Dst>;
+                    const auto v = ldg_load(src + i);
+                    const auto lo = dev_scalar_convert<int8_t, HD>(int4_lane_lo(v), local_flag, method);
+                    const auto hi = dev_scalar_convert<int8_t, HD>(int4_lane_hi(v), local_flag, method);
+                    dst[i] = pack_lanes<Dst>(lo, hi);
+                } else if constexpr (std::is_same_v<Dst, int4x2_t> && !DataTypes::requires_unpack_v<Src>) {
+                    // unpacked -> int4x2: convert to int8, clamp into [-8,7], duplicate lanes.
+                    const auto lane = dev_clamp_int4(dev_scalar_convert<Src, int8_t>(ldg_load(src + i), local_flag, method), local_flag, method);
+                    dst[i] = pack_int4x2(lane, lane);
+                } else if constexpr (std::is_same_v<Dst, int4x2_t>) {
+                    // packed 16-bit -> int4x2: convert each lane to int8, clamp into [-8,7], pack.
+                    using HS = lane_of_t<Src>;
+                    const auto v = ldg_load(src + i);
+                    const auto lo = dev_clamp_int4(dev_scalar_convert<HS, int8_t>(v.x, local_flag, method), local_flag, method);
+                    const auto hi = dev_clamp_int4(dev_scalar_convert<HS, int8_t>(v.y, local_flag, method), local_flag, method);
+                    dst[i] = pack_int4x2(lo, hi);
+                } else if constexpr (!DataTypes::requires_unpack_v<Src> && !DataTypes::requires_unpack_v<Dst>) {
                     dst[i] = dev_scalar_convert<Src, Dst>(ldg_load(src + i), local_flag, method);
                 } else if constexpr (DataTypes::requires_unpack_v<Dst> && !DataTypes::requires_unpack_v<Src>) {
                     using H = lane_of_t<Dst>;
@@ -585,6 +674,10 @@ namespace BeanTensor::Tensors::detail::gpu {
                     impli_gpu_convert<Src, uint8_t><<<blocks, threads>>>(src, static_cast<uint8_t*>(dst), numel, method, fail_check);
                     break;
                 }
+                case DType::Int4x2: {
+                    impli_gpu_convert<Src, int4x2_t><<<blocks, threads>>>(src, static_cast<int4x2_t*>(dst), numel, method, fail_check);
+                    break;
+                }
                 [[unlikely]] default: {
                     throw ErrorHandling::NotImplemented();
                 }
@@ -663,6 +756,27 @@ namespace BeanTensor::Tensors::detail::gpu {
                 case DType::BFloat16x2: {
                     const auto h = __float2bfloat16(static_cast<float32_t>(amount)); // RNE (CUDA parity: __float2bfloat16_rn)
                     impli_gpu_set_static_val_packed<bfloat16x2_t, bfloat16_t><<<blocks, threads>>>(static_cast<bfloat16x2_t*>(data), numel, h);
+                    break;
+                }
+                case DType::Int4x2: {
+                    // Clamp the fill value into the signed int4 range [-8,7]; both lanes get it.
+                    auto lane = static_cast<int8_t>(0);
+                    if constexpr (std::is_unsigned_v<Val>) {
+                        if (amount > static_cast<Val>(7)) {
+                            lane = static_cast<int8_t>(7);
+                        } else {
+                            lane = static_cast<int8_t>(amount);
+                        }
+                    } else {
+                        if (amount > static_cast<Val>(7)) {
+                            lane = static_cast<int8_t>(7);
+                        } else if (amount < static_cast<Val>(-8)) {
+                            lane = static_cast<int8_t>(-8);
+                        } else {
+                            lane = static_cast<int8_t>(amount);
+                        }
+                    }
+                    impli_gpu_set_static_val_unpacked<int4x2_t><<<blocks, threads>>>(static_cast<int4x2_t*>(data), numel, pack_int4x2(lane, lane));
                     break;
                 }
                 [[unlikely]] default: {
@@ -904,6 +1018,10 @@ namespace BeanTensor::Tensors::detail {
                 }
                 case DType::UInt8: {
                     gpu::launch_convert_dst<uint8_t>(new_dtype, static_cast<const uint8_t*>(t.data), t.convert_buffer, t.numel, blocks, threads, method, check_err);
+                    break;
+                }
+                case DType::Int4x2: {
+                    gpu::launch_convert_dst<int4x2_t>(new_dtype, static_cast<const int4x2_t*>(t.data), t.convert_buffer, t.numel, blocks, threads, method, check_err);
                     break;
                 }
                 [[unlikely]] default: {

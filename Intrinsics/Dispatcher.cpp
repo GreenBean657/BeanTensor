@@ -1,5 +1,10 @@
-
-
+/**
+ * @file Dispatcher.cpp
+ * @author GreenBean
+ * @brief CPU dtype conversion dispatcher definitions.
+ * @version 0.1
+ * @date 2026-10-18
+ */
 #include "Dispatcher.h"
 
 #include <memory>
@@ -138,6 +143,7 @@ namespace BeanTensor::Intrinsics::detail {
                 case DType::UInt32:     convert_to_dst<uint32_t>(new_dtype, t.data, t.convert_buffer, t.numel, *flag, method, futures); break;
                 case DType::UInt16:     convert_to_dst<uint16_t>(new_dtype, t.data, t.convert_buffer, t.numel, *flag, method, futures); break;
                 case DType::UInt8:      convert_to_dst<uint8_t>(new_dtype, t.data, t.convert_buffer, t.numel, *flag, method, futures); break;
+                case DType::Int4x2:     convert_to_dst<int4x2_t>(new_dtype, t.data, t.convert_buffer, t.numel, *flag, method, futures); break;
                 [[unlikely]] default: throw ErrorHandling::NotImplemented();
             }
         }

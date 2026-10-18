@@ -1,3 +1,10 @@
+/**
+ * @file Tensor.cpp
+ * @author GreenBean
+ * @brief Tensor definitions: allocation, fills, conversion, transfer, printing and cloning.
+ * @version 0.1
+ * @date 2026-10-18
+ */
 #include "Tensor.h"
 
 #include <bit>
@@ -54,6 +61,13 @@ namespace BeanTensor::Tensors::detail {
                     const auto bits = Intrinsics::detail::bit_cast_memcpy<uint32_t>(ptr[idx++]);
                     os << "(" << Intrinsics::detail::unaccel_bf16_to_fp32(Intrinsics::detail::bit_cast_memcpy<bfloat16_t>(static_cast<uint16_t>(bits & 0xFFFF)))
                        << ", " << Intrinsics::detail::unaccel_bf16_to_fp32(Intrinsics::detail::bit_cast_memcpy<bfloat16_t>(static_cast<uint16_t>(bits >> 16))) << ")";
+                } else if constexpr (std::is_same_v<T, int4x2_t>) {
+                    const auto bits = Intrinsics::detail::bit_cast_memcpy<uint8_t>(ptr[idx++]);
+                    const auto lo_nib = static_cast<int8_t>(bits & 0x0Fu);
+                    const auto hi_nib = static_cast<int8_t>(bits >> 4);
+                    const auto lo = lo_nib > 7 ? static_cast<int16_t>(lo_nib - 16) : static_cast<int16_t>(lo_nib);
+                    const auto hi = hi_nib > 7 ? static_cast<int16_t>(hi_nib - 16) : static_cast<int16_t>(hi_nib);
+                    os << "(" << lo << ", " << hi << ")";
                 } else {
                     os << ptr[idx++];
                 }
@@ -93,6 +107,9 @@ namespace BeanTensor::Tensors::detail {
                 } else if constexpr (std::is_same_v<T, bfloat16x2_t>) {
                     const auto one = Intrinsics::detail::bit_cast_memcpy<uint16_t>(Intrinsics::detail::unaccel_fp32_to_bf16_untracked(1.0f));
                     ptr[i] = Intrinsics::detail::bit_cast_memcpy<bfloat16x2_t>(static_cast<uint32_t>(one) | (static_cast<uint32_t>(one) << 16));
+                } else if constexpr (std::is_same_v<T, int4x2_t>) {
+                    // Both signed nibbles = 1 (matches the GPU set_amount int4x2 fill).
+                    ptr[i] = Intrinsics::detail::bit_cast_memcpy<int4x2_t>(uint8_t{0x11});
                 } else {
                     ptr[i] = static_cast<T>(1);
                 }
@@ -133,7 +150,12 @@ namespace BeanTensor::Tensors::detail {
         const size_t t_count = IncludedCPUFeatures().threads;
         auto* ptr = static_cast<T*>(data);
         const static std::string err = "Random number generation range is out of supported range";
-        if constexpr (std::is_same_v<T, bfloat16_t> || std::is_same_v<T, bfloat16x2_t>) {
+        if constexpr (std::is_same_v<T, int4x2_t>) {
+            // Signed 4-bit lanes: [-8, 7].
+            if (min < -8.0 || max > 7.0) {
+                throw std::invalid_argument(err);
+            }
+        } else if constexpr (std::is_same_v<T, bfloat16_t> || std::is_same_v<T, bfloat16x2_t>) {
             if (min < static_cast<float64_t>(DataTypes::detail::BF16_MIN) || max > static_cast<float64_t>(DataTypes::detail::BF16_MAX)) {
                 throw std::invalid_argument(err);
             }
@@ -177,6 +199,13 @@ namespace BeanTensor::Tensors::detail {
                     const auto hi = Intrinsics::detail::bit_cast_memcpy<uint16_t>(Intrinsics::detail::unaccel_fp32_to_bf16_untracked(static_cast<float32_t>(dist(rng))));
                     ptr[i] = Intrinsics::detail::bit_cast_memcpy<bfloat16x2_t>(static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16));
                 }
+            } else if constexpr (std::is_same_v<T, int4x2_t>) {
+                std::uniform_int_distribution<int64_t> dist(static_cast<int64_t>(t_min), static_cast<int64_t>(t_max));
+                for (size_t i = t_start; i < t_end; ++i) {
+                    const auto lo = static_cast<uint8_t>(static_cast<uint8_t>(static_cast<int8_t>(dist(rng))) & 0x0Fu);
+                    const auto hi = static_cast<uint8_t>(static_cast<uint8_t>(static_cast<int8_t>(dist(rng))) & 0x0Fu);
+                    ptr[i] = Intrinsics::detail::bit_cast_memcpy<int4x2_t>(static_cast<uint8_t>(lo | (hi << 4)));
+                }
             } else if constexpr (std::is_integral_v<T>) {
                 if constexpr(std::is_unsigned_v<T>) {
                     std::uniform_int_distribution<uint64_t> dist(
@@ -218,7 +247,8 @@ namespace BeanTensor::Tensors::detail {
 
 namespace BeanTensor::Tensors {
     /**
-     * TODO - Write documentation.
+     * Clone this tensor. Autograd state is NOT copied: the clone keeps
+     * requires_grad but gets no grad, node, or parents (it is a fresh leaf).
      * @param hard_copy
      * @return
      */
@@ -266,22 +296,30 @@ namespace BeanTensor::Tensors {
     }
 
     /**
-     * TODO - Write documentation.
-     * @param new_device
-     * @throws ErrorHandling::NotImplemented
+     * Move this tensor (and its accumulated gradient, if any) to new_device.
+     * Blocking: returns only once the copy has landed and the device flag
+     * has flipped. The move workers rewrite data/device and capture this
+     * tensor by reference, so an op validating devices (or a move of this
+     * tensor) right after an async to() would race them.
+     * @param new_device Destination device.
+     * @throws ErrorHandling::NotImplemented Unsupported device pair.
      */
     void Tensor::to(const Device& new_device) {
         if (this->device == new_device) return;
         sync();
         if (this->device == Device::CPU && new_device == Device::GPU) {
             detail::move_to_gpu(*this);
-            return;
-        }
-        if (this->device == Device::GPU && new_device == Device::CPU) {
+        } else if (this->device == Device::GPU && new_device == Device::CPU) {
             detail::move_to_cpu(*this);
-            return;
+        } else [[unlikely]] {
+            throw ErrorHandling::NotImplemented();
         }
-        throw ErrorHandling::NotImplemented();
+        sync(); // surfaces move errors here, not at an unrelated later sync()
+        // The accumulated gradient rides along — a grad stranded on the old
+        // device would break the next backward()'s device checks.
+        if (this->grad != nullptr) {
+            this->grad->to(new_device);
+        }
     }
 
     /**
@@ -339,6 +377,7 @@ namespace BeanTensor::Tensors {
             {DType::BFloat16x2, detail::print_recursive<bfloat16x2_t>},
             {DType::Float32,  detail::print_recursive<float32_t>},
             {DType::Float64,  detail::print_recursive<float64_t>},
+            {DType::Int4x2,   detail::print_recursive<int4x2_t>},
         };
 
         const auto it = print_fns.find(this->dtype);
@@ -564,7 +603,8 @@ namespace BeanTensor::Tensors {
                 {DType::BFloat16,   detail::fill_random_impl<bfloat16_t>},
                 {DType::BFloat16x2, detail::fill_random_impl<bfloat16x2_t>},
                 {DType::Float32,  detail::fill_random_impl<float32_t>},
-                {DType::Float64,  detail::fill_random_impl<float64_t>}
+                {DType::Float64,  detail::fill_random_impl<float64_t>},
+                {DType::Int4x2,   detail::fill_random_impl<int4x2_t>}
             };
             const auto it = fill_fns.find(this->dtype);
             if (it == fill_fns.end()) [[unlikely]] {
@@ -601,7 +641,8 @@ namespace BeanTensor::Tensors {
                 {DType::BFloat16,   detail::fill_fixed_impli<bfloat16_t>},
                 {DType::BFloat16x2, detail::fill_fixed_impli<bfloat16x2_t>},
                 {DType::Float32,  detail::fill_fixed_impli<float32_t>},
-                {DType::Float64,  detail::fill_fixed_impli<float64_t>}
+                {DType::Float64,  detail::fill_fixed_impli<float64_t>},
+                {DType::Int4x2,   detail::fill_fixed_impli<int4x2_t>}
             };
             const auto it = fill_fns.find(this->dtype);
             if (it == fill_fns.end()) [[unlikely]] {

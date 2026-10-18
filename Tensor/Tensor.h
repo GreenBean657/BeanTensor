@@ -1,5 +1,12 @@
+/**
+ * @file Tensor.h
+ * @author GreenBean
+ * @brief Tensor class declaration: dtype, shape, device and buffer ownership.
+ * @version 0.1
+ * @date 2026-10-18
+ */
 #pragma once
-#define BT_TENSOR_MAX_DIMS 2
+#define BT_TENSOR_MAX_DIMS 3
 #define BT_TENSOR_MAX_PARENTS 3
 
 #include <algorithm>
@@ -18,6 +25,10 @@
 #endif
 
 #include "Ops/TensorOps.h"
+#include "Math/LinearAlgebra/MatMul/Matmul.h"
+#include "Math/BasicOps/BasicOps.h"
+#include "Math/ComplexOps/ComplexOps.h"
+#include "Math/Autograd/Autograd.h"
 namespace BeanTensor::Tensors {
     class Tensor;
 }
@@ -45,7 +56,16 @@ namespace BeanTensor::Tensors {
         }
     };
 
-    struct Node;
+    // Defined ahead of Tensor: Tensor's inline destructor and move assignment
+    // delete their owned Node, which requires the complete type.
+    struct alignas(8) Node {
+        void (*_backward_fn)(Tensor*, Tensor**, size_t);
+        Tensor* _inputs[BT_TENSOR_MAX_PARENTS];
+        Tensor* _saved[BT_TENSOR_MAX_PARENTS];
+        uint8_t _n_inputs;
+        uint8_t _n_saved;
+        uint8_t _n_outputs_pending;
+    };
     class alignas(8) Tensor {
         public:
         ~Tensor() {
@@ -63,6 +83,9 @@ namespace BeanTensor::Tensors {
             kill_cpu_data();
             kill_gpu_data();
             kill_buffer();
+            // Autograd state is owned: grad is a heap tensor, node a heap Node.
+            delete this->node;
+            delete this->grad;
         }
         explicit Tensor(const std::vector<size_t>& shape,
                 const DataTypes::DType dtype = DataTypes::DType::Float32,
@@ -82,9 +105,11 @@ namespace BeanTensor::Tensors {
          * links are stolen and re-pointed to this object.
          * @param o Source tensor, left empty and unlinked.
          */
+        // TODO: UNSTABLE COMMIT - Move constructor does not have any noexcept specification
         Tensor(Tensor&& o) {
             steal_from(o);
         }
+
 
         /**
          * Move assignment. Releases this tensor's current view links and
@@ -92,7 +117,8 @@ namespace BeanTensor::Tensors {
          * destructor), then steals from the source.
          * @param o Source tensor, left empty and unlinked.
          */
-        Tensor& operator=(Tensor&& o) {
+        // TODO: UNSTABLE COMMIT - Move assignment operator does not have any noexcept specification
+        Tensor& operator=(Tensor&& o)  {
             if (this == &o) {
                 return *this;
             }
@@ -102,6 +128,10 @@ namespace BeanTensor::Tensors {
             kill_cpu_data();
             kill_gpu_data();
             kill_buffer();
+            delete this->node;
+            delete this->grad;
+            this->node = nullptr;
+            this->grad = nullptr;
             steal_from(o);
             return *this;
         }
@@ -187,6 +217,223 @@ namespace BeanTensor::Tensors {
         void convert_dtype(const DataTypes::DType& new_dtype, ConversionClampMethod method = ConversionClampMethod::PERMISSIVE);
 
         /**
+         * Matrix multiply. Rank-2: this(m×k) · other(k×n) → out(m×n). Rank-3 is
+         * batched matmul: this(B×m×k) · other(B×k×n) → out(B×m×n), an
+         * independent GEMM per batch index (GPU: strided-batched BLAS). Both
+         * operands must share rank, dtype, and device, and be contiguous.
+         * Packed dtypes (Float16x2/BFloat16x2) multiply per lane: the result's
+         * lo/hi lanes are the products of the operands' lo/hi lanes. Half
+         * dtypes accumulate in FP32 on every backend (CPU via the unaccel
+         * conversion pathway, GPU via gemm_ex/GemmStridedBatchedEx FP32
+         * compute). Integer dtypes multiply modularly (wrap accumulation in
+         * the unsigned twin, truncate on store — the same contract as the integer
+         * sum/bias_add kernels). When either operand has requires_grad=true the
+         * output joins the computation graph (GEMM_G backward: dA = dOut·Bᵀ,
+         * dB = Aᵀ·dOut, accumulated into the operands' Tensor::grad by
+         * backward()).
+         * The compute is queued asynchronously — failures materialize at
+         * out.sync() — but the returned tensor is moved out, and the move
+         * drains pending work, so matmul effectively blocks before returning
+         * (same as clone()).
+         * @brief Matrix multiplication (rank-2) / batched matrix multiplication (rank-3).
+         * @param other Right operand (k×n, or B×k×n with matching batch extent).
+         * @return New tensor (m×n, or B×m×n) holding the product.
+         * @throws ErrorHandling::MismatchedShapes Rank or inner/batch dimension mismatch.
+         * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
+         * @throws ErrorHandling::MismatchedDevices Operand devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous input.
+         */
+        [[nodiscard]] Tensor matmul(const Tensor& other) const;
+
+        /**
+         * Reshape this tensor into a zero-copy view with a new shape. The view
+         * shares this tensor's buffer (view semantics: writes through either are
+         * visible in both; if this tensor dies first, the view takes its own
+         * copy via notify_child). Works identically on CPU and GPU — no data
+         * moves. The compute is metadata-only, so the call is synchronous.
+         * @brief Reshape into a view with the same element count.
+         * @param new_shape New shape; numel must be unchanged, rank within
+         * 1..BT_TENSOR_MAX_DIMS.
+         * @return New tensor viewing this tensor's data with new_shape.
+         * @throws ErrorHandling::MismatchedShapes numel changes or bad rank.
+         * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
+         */
+        [[nodiscard]] Tensor reshape(const std::vector<size_t>& new_shape);
+
+        /**
+         * Plain SGD update, in place: w = w - lr * grad, elementwise. grad must
+         * share this tensor's shape, dtype, and device, and both must be
+         * contiguous. Async on both devices: the update queues onto the thread
+         * pool and errors materialize at sync().
+         * Compute contract: fp32/fp64 use a single fma rounding (AVX2/AVX512
+         * kernels when the CPU supports them); fp16/bf16 widen to fp32, fmaf,
+         * narrow RNE; packed x2 dtypes compute per lane; integer dtypes compute
+         * in fp64, clamp to the dtype range, and narrow round-toward-zero — at
+         * sub-1 magnitudes negative updates truncate up toward 0 while positive
+         * ones truncate down (asymmetric by up to 1), and a NaN update leaves
+         * the integer element unchanged.
+         * @brief In-place SGD: w -= lr * grad.
+         * @param grad Gradient tensor (same shape/dtype/device as this).
+         * @param lr Learning rate.
+         * @throws ErrorHandling::MismatchedShapes Shapes differ.
+         * @throws ErrorHandling::MismatchedDTypes Dtypes differ.
+         * @throws ErrorHandling::MismatchedDevices Devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand.
+         */
+        void sgd_update(const Tensor& grad, float64_t lr);
+
+        /**
+         * SGD step using this tensor's accumulated gradient: sgd_update(*grad, lr).
+         * @brief In-place SGD step from Tensor::grad.
+         * @param lr Learning rate.
+         * @throws ErrorHandling::NoGradient requires_grad is false or grad is null.
+         */
+        void sgd_step(float64_t lr);
+
+        /**
+         * Backpropagate from this tensor through the recorded computation
+         * graph. matmul/bias_add/relu/softmax_ce attach a Node to their output
+         * whenever an input has requires_grad=true; backward() seeds this
+         * tensor's gradient with ones and fires every reachable node in
+         * reverse-topological order (Kahn's algorithm over
+         * Node::_n_outputs_pending), each node's _backward_fn accumulating the
+         * local gradients into its inputs' Tensor::grad. Leaf gradients
+         * (requires_grad tensors with no node) accumulate across calls;
+         * intermediate (node-owning) tensors' grads are zeroed at the start of
+         * every call, so they always hold the current call's delta. Parents
+         * are raw pointers: every tensor in the graph must outlive backward().
+         * Blocks before returning (syncs every visited tensor and gradient).
+         * @brief Run backpropagation from this tensor.
+         * @throws ErrorHandling::NoGradient requires_grad is false and this
+         * tensor has no graph node.
+         */
+        void backward();
+
+        /**
+         * Drop this tensor's accumulated gradient (frees Tensor::grad).
+         * @brief Clear the accumulated gradient.
+         */
+        void zero_grad();
+
+        /**
+         * @brief Does this tensor hold an accumulated gradient?
+         * @return True when Tensor::grad is allocated.
+         */
+        [[nodiscard]] bool has_grad() const {
+            return this->grad != nullptr;
+        }
+
+        /**
+         * @brief Access the accumulated gradient tensor.
+         * @return Reference to Tensor::grad.
+         * @throws ErrorHandling::NoGradient No gradient accumulated yet.
+         */
+        [[nodiscard]] Tensor& gradient() {
+            if (this->grad == nullptr) {
+                throw ErrorHandling::NoGradient();
+            }
+            return *this->grad;
+        }
+
+        /**
+         * Sum of every element, reduced to a shape-{1} tensor of the same dtype
+         * and device. Accumulation: fp32 in fp32, fp64 in fp64, fp16/bf16 in
+         * widened fp32 (RNE narrow on store), packed x2 per-lane fp32, integers
+         * in a uint64 modular accumulator (wrap; bit-identical across backends
+         * and chunkings). Float reduction order is backend-defined, so float
+         * sums are not guaranteed bit-identical between CPU/SIMD/GPU tiers.
+         * Blocks before returning (the merge happens on the caller thread).
+         * @brief Full-tensor sum reduction.
+         * @return Shape-{1} tensor holding the sum.
+         */
+        [[nodiscard]] Tensor sum() const;
+
+        /**
+         * Flat index of the maximum element. PyTorch-compatible NaN rule: NaN
+         * beats every non-NaN value, so the FIRST NaN's index is returned when
+         * one is present; otherwise the first strict maximum wins ties.
+         * Packed dtypes compare per element on the widened (lo, hi) lane pair,
+         * lexicographic, NaN-wins per lane. Blocks before returning.
+         * @brief Full-tensor argmax.
+         * @return Flat index of the maximum element.
+         * @throws ErrorHandling::IndexOutOfRange Tensor is empty.
+         * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
+         */
+        [[nodiscard]] uint64_t argmax() const;
+
+        /**
+         * Add a rank-1 bias vector to every row of this tensor, out of place:
+         * out[..., c] = this[..., c] + bias[c]. bias must have shape
+         * {shape[ndim-1]}, share this tensor's dtype and device, and both must
+         * be contiguous. Async on both devices: the add queues onto the thread
+         * pool and errors materialize at out.sync() — but the returned tensor
+         * is moved out, and the move drains pending work, so bias_add
+         * effectively blocks before returning (same as matmul()).
+         * Compute contract: fp32/fp64 add in their storage width (AVX2/AVX512
+         * kernels when the CPU supports them, bit-identical to scalar);
+         * fp16/bf16 widen to fp32, add, narrow RNE; packed x2 dtypes compute
+         * per lane; integer dtypes add modularly (wrap, same contract as the
+         * integer sum kernels); int4x2 wraps per nibble. When either operand
+         * has requires_grad=true the output joins the computation graph
+         * (bias_add_G backward: dx = dy, dbias = column-sums of dy).
+         * @brief Out-of-place per-row bias add along the last dimension.
+         * @param bias Rank-1 bias tensor (length = this tensor's last dimension).
+         * @return New tensor, same shape/dtype/device as this.
+         * @throws ErrorHandling::MismatchedShapes Bias is not rank-1 or its length differs from the last dimension.
+         * @throws ErrorHandling::MismatchedDTypes Dtypes differ.
+         * @throws ErrorHandling::MismatchedDevices Devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand.
+         */
+        [[nodiscard]] Tensor bias_add(const Tensor&) const;
+
+        /**
+         * Rectified linear unit, out of place: out[i] = this[i] < 0 ? 0 :
+         * this[i]. NaN propagates (the comparison is false for NaN) and -0.0
+         * survives, on every backend and dispatch tier (the AVX kernels use
+         * max(zero, x), whose unordered result is exactly x). Unsigned integer
+         * dtypes copy through; int4x2 clamps per nibble. Async on both devices;
+         * effectively blocks before returning (same move-drain as bias_add).
+         * When this tensor has requires_grad=true the output joins the
+         * computation graph (relu_G backward: dx = x > 0 ? dy : 0 — a select,
+         * so a NaN input zeroes its gradient lane).
+         * @brief Out-of-place ReLU.
+         * @return New tensor, same shape/dtype/device as this.
+         * @throws ErrorHandling::NotImplemented Non-contiguous tensor.
+         */
+        [[nodiscard]] Tensor relu() const;
+
+        /**
+         * Numerically-stable softmax cross-entropy over the class dimension:
+         * this must be rank-2 (rows x classes) logits; targets must be rank-1
+         * with one integer class index per row (any integer dtype; int4x2 uses
+         * the low nibble). Returns the mean loss in a shape-{1} tensor of this
+         * tensor's dtype and device: per row, loss = m + log(sum(exp(x - m))) -
+         * x_target with m = row max; a NaN logit makes that row's loss NaN.
+         * Packed logits dtypes (Float16x2/BFloat16x2) and Int4x2 unpack each
+         * element's two lanes as consecutive classes (effective class count is
+         * 2 x shape[1]). Accumulation: fp32 for fp32/fp16/bf16/packed logits,
+         * fp64 for fp64 and integer logits; rows merge in fp64. The stored mean
+         * narrows to the logits dtype (RNE for floats, both lanes for packed,
+         * clamp+truncate for integers — a NaN mean stores 0, as there is no
+         * integer NaN). A target index outside [0, classes) throws
+         * IndexOutOfRange. Float reduction order is backend-defined, so the
+         * mean is not guaranteed bit-identical between CPU/SIMD/GPU tiers.
+         * Blocks before returning (the merge happens on the caller thread).
+         * When the logits have requires_grad=true the output joins the
+         * computation graph (softmax_ce_G backward: dlogits = (softmax -
+         * onehot(target)) * dloss / rows; targets never require gradients).
+         * @brief Mean softmax cross-entropy loss over rank-2 logits.
+         * @param targets Rank-1 integer tensor of class indices, one per row.
+         * @return Shape-{1} tensor holding the mean loss.
+         * @throws ErrorHandling::MismatchedShapes Logits not rank-2, empty, or targets rank/length mismatch.
+         * @throws ErrorHandling::MismatchedDTypes Targets dtype is not an integer kind.
+         * @throws ErrorHandling::MismatchedDevices Devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand.
+         * @throws ErrorHandling::IndexOutOfRange A target index is out of bounds (at sync()).
+         */
+        [[nodiscard]] Tensor softmax_ce(const Tensor&) const;
+
+        /**
          * Bounds-checked strided element access.
          * @brief Read an element by multidimensional index.
          * @tparam T Element type, matching the tensor's dtype.
@@ -215,7 +462,7 @@ namespace BeanTensor::Tensors {
             write_element(checked_element_offset(idx), &value, sizeof(T));
         }
 
-        [[nodiscard]] bool is_same_shape(const Tensor& t2) {
+        [[nodiscard]] bool is_same_shape(const Tensor& t2) const {
             return (ndim == t2.ndim) && std::equal(shape, shape + ndim, t2.shape);
         }
 
@@ -380,14 +627,16 @@ namespace BeanTensor::Tensors {
             o.convert_buffer = nullptr;
             o.convert_buffer_size = 0;
             o.data = nullptr;
+            o.node = nullptr; // stolen above — the source must not delete it
+            o.grad = nullptr; // stolen above — the source must not delete it
             o.children.clear();
             o.view_parents.clear();
 
             for (const auto p : this->view_parents) {
-                std::replace(p->children.begin(), p->children.end(), &o, this);
+                std::ranges::replace(p->children, &o, this);
             }
             for (const auto c : this->children) {
-                std::replace(c->view_parents.begin(), c->view_parents.end(), &o, this);
+                std::ranges::replace(c->view_parents, &o, this);
             }
         }
 
@@ -413,6 +662,34 @@ namespace BeanTensor::Tensors {
          */
         void write_element(size_t elem_offset, const void* src, size_t bytes);
 
+        /**
+         * Lazily allocate this tensor's gradient buffer (same shape/dtype/
+         * device, zero-filled). No-op when grad already exists.
+         */
+        void ensure_grad();
+
+        /**
+         * Accumulate a fresh gradient contribution into Tensor::grad: the
+         * first contribution's buffer is adopted (moved); later ones are
+         * added elementwise per dtype contract (floats single-rounding add,
+         * halfs widen-add-narrow RNE, packed per lane, integers wrap).
+         * @param delta Fresh gradient contribution, same shape/dtype/device.
+         */
+        void accumulate_grad(Tensor&& delta);
+
+        /**
+         * Attach a computation-graph node to this tensor (an op output).
+         * No-op when no input requires gradients. Sets requires_grad,
+         * is_leaf=false, parents/n_parents, and allocates the Node; _inputs
+         * receive ALL op inputs (backward needs non-grad operands too, e.g.
+         * GEMM's dA needs B), gated on requires_grad inside the node fn.
+         * Parents are borrowed raw pointers — they must outlive backward().
+         * @param backward_fn Node::_backward_fn implementation for the op.
+         * @param a First op input.
+         * @param b Second op input, when the op is binary.
+         */
+        void wire_node(void (*backward_fn)(Tensor*, Tensor**, size_t), const Tensor& a, const Tensor* b = nullptr);
+
         friend void detail::set_amount_gpu(Tensor& t, int64_t amount);
         friend void detail::set_amount_gpu(Tensor& t, uint64_t amount);
         friend void detail::set_amount_gpu(Tensor& t, float64_t amount);
@@ -420,15 +697,35 @@ namespace BeanTensor::Tensors {
         friend void detail::move_to_gpu(Tensor& t);
         friend void detail::move_to_cpu(Tensor& t);
         friend void detail::convert_gpu(Tensor& t, const BeanTensor::DataTypes::DType& new_dtype, ConversionClampMethod method);
+        friend void detail::matmul_cpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::matmul_gpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::sgd_update_cpu(Tensor&, const Tensor&, float64_t);
+        friend void detail::sgd_update_gpu(Tensor&, const Tensor&, float64_t);
+        friend void detail::sum_cpu(const Tensor&, Tensor&);
+        friend void detail::sum_gpu(const Tensor&, Tensor&);
+        friend void detail::argmax_cpu(const Tensor&, uint64_t&);
+        friend void detail::argmax_gpu(const Tensor&, uint64_t&);
+        friend void detail::bias_add_cpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::bias_add_gpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::relu_cpu(const Tensor&, Tensor&);
+        friend void detail::relu_gpu(const Tensor&, Tensor&);
+        friend void detail::softmax_ce_cpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::softmax_ce_gpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::gemm_g_node(Tensor*, Tensor**, size_t);
+        friend void detail::bias_add_g_node(Tensor*, Tensor**, size_t);
+        friend void detail::relu_g_node(Tensor*, Tensor**, size_t);
+        friend void detail::softmax_ce_g_node(Tensor*, Tensor**, size_t);
+        friend void detail::grad_acc_cpu(Tensor&, const Tensor&);
+        friend void detail::grad_acc_gpu(Tensor&, const Tensor&);
+        friend void detail::transpose_last2_cpu(const Tensor&, Tensor&);
+        friend void detail::transpose_last2_gpu(const Tensor&, Tensor&);
+        friend void detail::relu_g_cpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::relu_g_gpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::bias_add_g_cpu(const Tensor&, Tensor&);
+        friend void detail::bias_add_g_gpu(const Tensor&, Tensor&);
+        friend void detail::softmax_ce_g_cpu(const Tensor&, const Tensor&, const Tensor&, Tensor&);
+        friend void detail::softmax_ce_g_gpu(const Tensor&, const Tensor&, const Tensor&, Tensor&);
         friend void Intrinsics::detail::launch_conv_cpu(Tensor& t, const DataTypes::DType& new_dtype, ConversionClampMethod method);
 
-    };
-    struct alignas(8) Node {
-        void (*_backward_fn)(Tensor* output_grad, Tensor** inputs, size_t n_inputs);
-        Tensor* _inputs[BT_TENSOR_MAX_PARENTS];
-        Tensor* _saved[BT_TENSOR_MAX_PARENTS];
-        uint8_t _n_inputs;
-        uint8_t _n_saved;
-        uint8_t _n_outputs_pending;
     };
 }

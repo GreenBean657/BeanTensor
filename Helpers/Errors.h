@@ -1,3 +1,10 @@
+/**
+ * @file Errors.h
+ * @author GreenBean
+ * @brief ErrorHandling exception types and GPU API error-check macros.
+ * @version 0.1
+ * @date 2026-10-18
+ */
 #pragma once
 
 #include <stdexcept>
@@ -72,6 +79,61 @@ namespace BeanTensor::ErrorHandling {
          */
         UnReachableCode() : std::logic_error("Unreachable code.") { };
     };
+
+    class GPULibraryError : public std::runtime_error {
+    public:
+        GPULibraryError() = delete;
+        /**
+         * @brief Exception thrown when a vendor GPU library call (cuBLAS/rocBLAS) fails.
+         * @param message Library name and status text.
+         */
+        explicit GPULibraryError(const std::string& message) : std::runtime_error(message) { };
+    };
+
+    class MismatchedShapes : public std::invalid_argument {
+    public:
+        MismatchedShapes() = delete;
+        /**
+         * @brief Exception thrown when two tensors' shapes are incompatible for an operation.
+         * @param detail What mismatched (rank, inner dimension, batch extent, ...).
+         */
+        explicit MismatchedShapes(const std::string& detail) : std::invalid_argument("Mismatched tensor shapes: " + detail) { };
+    };
+
+    class MismatchedDTypes : public std::invalid_argument {
+    public:
+        /**
+         * @brief Exception thrown when two tensors' dtypes differ where an operation requires equality.
+         */
+        MismatchedDTypes() : std::invalid_argument("Mismatched tensor dtypes") { };
+    };
+
+    class MismatchedDevices : public std::invalid_argument {
+    public:
+        /**
+         * @brief Exception thrown when two tensors live on different devices where an operation requires equality.
+         */
+        MismatchedDevices() : std::invalid_argument("Mismatched tensor devices") { };
+    };
+
+    class DimensionTooLarge : public std::out_of_range {
+    public:
+        DimensionTooLarge() = delete;
+        /**
+         * @brief Exception thrown when a tensor dimension exceeds a backend's indexing limit.
+         * @param detail Which limit was exceeded.
+         */
+        explicit DimensionTooLarge(const std::string& detail) : std::out_of_range("Tensor dimension too large: " + detail) { };
+    };
+
+    class NoGradient : public std::logic_error {
+    public:
+        /**
+         * @brief Exception thrown when an operation needs an accumulated gradient
+         * (Tensor::grad) but the tensor does not require grad or has none.
+         */
+        NoGradient() : std::logic_error("Tensor has no accumulated gradient (requires_grad is false or grad is null)") { };
+    };
 }
 
 #if defined(USE_HIP)
@@ -91,6 +153,24 @@ namespace BeanTensor::ErrorHandling {
     throw BeanTensor::ErrorHandling::OutOfMemory(); \
     } \
     throw std::runtime_error(std::string("CUDA Error: ") + cudaGetErrorString(err)); \
+    } \
+}
+#endif
+
+// BLAS status checks. The status types/stringify functions resolve at the use
+// site — the including TU must have pulled in <cublas_v2.h> / <rocblas/rocblas.h>.
+#if defined(USE_HIP)
+#define ROCBLAS_CHECK_ERROR(status) { \
+    if ((status) != rocblas_status_success) { \
+    throw BeanTensor::ErrorHandling::GPULibraryError(std::string("rocBLAS Error: ") + rocblas_status_to_string(status)); \
+    } \
+}
+#endif
+
+#if defined(USE_CUDA)
+#define CUBLAS_CHECK_ERROR(status) { \
+    if ((status) != CUBLAS_STATUS_SUCCESS) { \
+    throw BeanTensor::ErrorHandling::GPULibraryError(std::string("cuBLAS Error: ") + cublasGetStatusString(status)); \
     } \
 }
 #endif

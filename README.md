@@ -8,6 +8,15 @@ BeanTensor is built on the principle of GROUND UP support for all hardware - obs
 The library is under construction. At this current time, documentation is not constructed. 
 Usage is at your own risk, and the API is unlikely to function fully or at all.
 
+# Building
+Backends: `-DUSE_HIP=ON` (default), `-DUSE_CUDA=ON`, or CPU-only (both off). Mutually exclusive.
+
+**CUDA backend requirement:** the build is pinned to CUDA 12.9 (the last toolkit with
+sm_70/Volta support), and on distros with glibc ≥ 2.41 (Ubuntu 25.10+, Fedora 42+, current
+Arch) you must apply a one-time 6-line patch to a CUDA toolkit header or nothing compiles.
+The build verifies this and prints the exact command if it's missing. Full explanation of
+what the patch does and why it's safe: [CUDA_GLIBC_PATCH.md](CUDA_GLIBC_PATCH.md).
+
 # Abilities
 
 **BeanTensor is intended for:**

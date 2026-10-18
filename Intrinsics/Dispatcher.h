@@ -1,3 +1,10 @@
+/**
+ * @file Dispatcher.h
+ * @author GreenBean
+ * @brief CPU dtype conversion dispatcher; selects the scalar, AVX2 or AVX512 conversion path.
+ * @version 0.1
+ * @date 2026-10-18
+ */
 #pragma once
 
 
@@ -33,6 +40,69 @@ namespace BeanTensor::Intrinsics::detail {
     template<> struct lane_of<float16x2_t> { using type = float16_t; };
     template<> struct lane_of<bfloat16x2_t> { using type = bfloat16_t; };
     template<typename T> using lane_of_t = typename lane_of<T>::type;
+
+    /**
+     * Extract the low signed 4-bit lane (bits [3:0]) of an Int4x2 byte,
+     * sign-extended to int8.
+     * @brief Low Int4x2 lane.
+     * @param v Packed byte.
+     * @return Lane value in [-8, 7].
+     */
+    [[nodiscard]] inline int8_t int4_lane_lo(const int4x2_t v) noexcept {
+        const auto nib = static_cast<uint8_t>(bit_cast_memcpy<uint8_t>(v) & 0x0F);
+        return static_cast<int8_t>(nib < 8 ? nib : static_cast<uint8_t>(nib | 0xF0));
+    }
+
+    /**
+     * Extract the high signed 4-bit lane (bits [7:4]) of an Int4x2 byte,
+     * sign-extended to int8.
+     * @brief High Int4x2 lane.
+     * @param v Packed byte.
+     * @return Lane value in [-8, 7].
+     */
+    [[nodiscard]] inline int8_t int4_lane_hi(const int4x2_t v) noexcept {
+        const auto nib = static_cast<uint8_t>(bit_cast_memcpy<uint8_t>(v) >> 4);
+        return static_cast<int8_t>(nib < 8 ? nib : static_cast<uint8_t>(nib | 0xF0));
+    }
+
+    /**
+     * Pack two signed values into an Int4x2 byte, truncating each to its low
+     * nibble (lo = bits [3:0], hi = bits [7:4]).
+     * @brief Pack an Int4x2 byte.
+     * @param lo Value for the low lane.
+     * @param hi Value for the high lane.
+     * @return Packed byte.
+     */
+    [[nodiscard]] inline int4x2_t pack_int4x2(const int8_t lo, const int8_t hi) noexcept {
+        const auto lo_nib = static_cast<uint8_t>(static_cast<uint8_t>(lo) & 0x0F);
+        const auto hi_nib = static_cast<uint8_t>((static_cast<uint8_t>(hi) & 0x0F) << 4);
+        return bit_cast_memcpy<int4x2_t>(static_cast<uint8_t>(lo_nib | hi_nib));
+    }
+
+    /**
+     * Clamp a signed 8-bit value into the Int4 lane range [-8, 7]. Out-of-range
+     * input sets flag under any non-PERMISSIVE method.
+     * @brief Clamp into the Int4 lane range.
+     * @param v Value to clamp.
+     * @param flag Reference set to true on clamp under a non-PERMISSIVE method.
+     * @param method Active ConversionClampMethod.
+     * @return Clamped value in [-8, 7].
+     */
+    [[nodiscard]] inline int8_t clamp_int4_lane(const int8_t v, bool& flag, const ConversionClampMethod method) noexcept {
+        if (v > 7) {
+            if (method != ConversionClampMethod::PERMISSIVE) {
+                flag = true;
+            }
+            return int8_t{7};
+        }
+        if (v < -8) {
+            if (method != ConversionClampMethod::PERMISSIVE) {
+                flag = true;
+            }
+            return int8_t{-8};
+        }
+        return v;
+    }
 
     /**
      * Convert a single scalar (non-packed) value between two dtypes.
@@ -122,7 +192,35 @@ namespace BeanTensor::Intrinsics::detail {
      */
     template<typename Src, typename Dst>
     [[nodiscard]] inline Dst element_convert(const Src& v, bool& flag, const ConversionClampMethod method) {
-        if constexpr (!DataTypes::requires_unpack_v<Src> && !DataTypes::requires_unpack_v<Dst>) {
+        if constexpr (std::is_same_v<Src, Dst>) {
+            return v;
+        } else if constexpr (std::is_same_v<Src, int4x2_t>) {
+            if constexpr (std::is_same_v<Dst, float16x2_t> || std::is_same_v<Dst, bfloat16x2_t>) {
+                // Int4x2 -> packed 16-bit: convert both lanes independently.
+                using H = lane_of_t<Dst>;
+                const auto lo_c = static_cast<std::uint16_t>(bit_cast_memcpy<std::uint16_t>(scalar_convert<int8_t, H>(int4_lane_lo(v), flag, method)));
+                const auto hi_c = static_cast<std::uint16_t>(bit_cast_memcpy<std::uint16_t>(scalar_convert<int8_t, H>(int4_lane_hi(v), flag, method)));
+                return bit_cast_memcpy<Dst>(static_cast<std::uint32_t>(lo_c) | (static_cast<std::uint32_t>(hi_c) << 16));
+            } else {
+                // Int4x2 -> unpacked: first (lo) lane only.
+                return scalar_convert<int8_t, Dst>(int4_lane_lo(v), flag, method);
+            }
+        } else if constexpr (std::is_same_v<Dst, int4x2_t>) {
+            if constexpr (std::is_same_v<Src, float16x2_t> || std::is_same_v<Src, bfloat16x2_t>) {
+                // Packed 16-bit -> Int4x2: convert both lanes independently.
+                using H = lane_of_t<Src>;
+                const std::uint32_t bits = bit_cast_memcpy<std::uint32_t>(v);
+                const H lo = bit_cast_memcpy<H>(static_cast<std::uint16_t>(bits & 0xFFFF));
+                const H hi = bit_cast_memcpy<H>(static_cast<std::uint16_t>(bits >> 16));
+                return pack_int4x2(
+                    clamp_int4_lane(scalar_convert<H, int8_t>(lo, flag, method), flag, method),
+                    clamp_int4_lane(scalar_convert<H, int8_t>(hi, flag, method), flag, method));
+            } else {
+                // Unpacked -> Int4x2: duplicate the clamped value into both lanes.
+                const auto c = clamp_int4_lane(scalar_convert<Src, int8_t>(v, flag, method), flag, method);
+                return pack_int4x2(c, c);
+            }
+        } else if constexpr (!DataTypes::requires_unpack_v<Src> && !DataTypes::requires_unpack_v<Dst>) {
             return scalar_convert<Src, Dst>(v, flag, method);
         } else if constexpr (DataTypes::requires_unpack_v<Dst> && !DataTypes::requires_unpack_v<Src>) {
             using H = lane_of_t<Dst>;
@@ -239,6 +337,7 @@ namespace BeanTensor::Intrinsics::detail {
             case DType::UInt32:     convert_chunked<Src, uint32_t>(src, dst, numel, flag, method, futures); break;
             case DType::UInt16:     convert_chunked<Src, uint16_t>(src, dst, numel, flag, method, futures); break;
             case DType::UInt8:      convert_chunked<Src, uint8_t>(src, dst, numel, flag, method, futures); break;
+            case DType::Int4x2:      convert_chunked<Src, int4x2_t>(src, dst, numel, flag, method, futures); break;
             [[unlikely]] default: throw ErrorHandling::NotImplemented();
         }
     }

@@ -11,8 +11,12 @@ if (NOT USE_HIP AND NOT USE_CUDA AND NOT USE_STRIX_HALO)
     message(WARNING "No backend selected — assuming CPU Compilation")
 endif()
 
-if ((USE_HIP OR USE_CUDA) AND USE_STRIX_HALO)
-    message(FATAL_ERROR "HIP/CUDA and StrixHalo are mutually exclusive — enable only one.")
+if ((USE_HIP OR USE_CUDA) OR USE_STRIX_HALO)
+    message(WARNING "HIP/CUDA and StrixHalo are mutually enabled. This isn't implicitly a problem, but some CPU pathways may rely on NPU; CPU > GPU calls could be delayed from NPU memory allocation transfers.")
+endif()
+
+if (USE_STRIX_HALO)
+    message(FATAL_ERROR "StrixHalo backend requested, but not implemented yet. Please disable USE_STRIX_HALO and try again.")
 endif()
 
 
@@ -114,6 +118,19 @@ if (USE_HIP)
 elseif(USE_CUDA)
     message(STATUS "Backend: CUDA")
     find_package(CUDAToolkit REQUIRED)
+    # nvcc 12.9 is pinned to g++-13 as host compiler, so CMake records gcc-13's
+    # libstdc++ dir in the CUDA implicit link directories. That libstdc++
+    # predates __cxa_call_terminate (emitted by the system g++ 15 compiling our
+    # C++23 TUs), and the implicit -L makes the linker pick it over the system
+    # one. Search the CXX compiler's own libstdc++ dir first.
+    execute_process(
+            COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libstdc++.so
+            OUTPUT_VARIABLE BEANTENSOR_CXX_LIBSTDCXX_PATH
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            COMMAND_ERROR_IS_FATAL ANY
+    )
+    get_filename_component(BEANTENSOR_CXX_LIBSTDCXX_DIR "${BEANTENSOR_CXX_LIBSTDCXX_PATH}" DIRECTORY)
+    add_link_options("-L${BEANTENSOR_CXX_LIBSTDCXX_DIR}")
 endif()
 
 if (USE_STRIX_HALO)
@@ -136,6 +153,30 @@ set(CORE_SOURCES
         Tensor/DTypes.h
         Tensor/Tensor.h
         Tensor/Tensor.cpp
+        Math/LinearAlgebra/MatMul/Matmul.h
+        Math/LinearAlgebra/MatMul/Matmul.hpp
+        Math/LinearAlgebra/MatMul/MatmulCPU.cpp
+        Math/LinearAlgebra/MatMul/GemmKernels.h
+        Math/LinearAlgebra/MatMul/GemmAVX2.cpp
+        Math/LinearAlgebra/MatMul/GemmAVX512.cpp
+        Math/BasicOps/BasicOps.h
+        Math/BasicOps/BasicOps.hpp
+        Math/BasicOps/BasicOpsKernels.h
+        Math/BasicOps/BasicOpsCPU.cpp
+        Math/BasicOps/BasicOpsAVX2.cpp
+        Math/BasicOps/BasicOpsAVX512.cpp
+        Math/ComplexOps/ComplexOps.h
+        Math/ComplexOps/ComplexOps.hpp
+        Math/ComplexOps/ComplexOpsKernels.h
+        Math/ComplexOps/ComplexOpsCPU.cpp
+        Math/ComplexOps/ComplexOpsAVX2.cpp
+        Math/ComplexOps/ComplexOpsAVX512.cpp
+        Math/Autograd/Autograd.h
+        Math/Autograd/Autograd.hpp
+        Math/Autograd/AutogradKernels.h
+        Math/Autograd/AutogradCPU.cpp
+        Math/Autograd/AutogradAVX2.cpp
+        Math/Autograd/AutogradAVX512.cpp
         Helpers/Bits.h
 )
 
@@ -147,10 +188,18 @@ set(CORE_SOURCES
 if (USE_CUDA)
     list(APPEND CORE_SOURCES
             Tensor/Ops/TensorOps.cu
+            Math/LinearAlgebra/MatMul/MatmulCUDA.cu
+            Math/BasicOps/BasicOpsCUDA.cu
+            Math/ComplexOps/ComplexOpsCUDA.cu
+            Math/Autograd/AutogradCUDA.cu
     )
 elseif (USE_HIP)
     list(APPEND CORE_SOURCES
             Tensor/Ops/TensorOps.cpp
+            Math/LinearAlgebra/MatMul/MatmulHIP.cpp
+            Math/BasicOps/BasicOpsHIP.cpp
+            Math/ComplexOps/ComplexOpsHIP.cpp
+            Math/Autograd/AutogradHIP.cpp
     )
 elseif(USE_STRIX_HALO)
     message(FATAL_ERROR "NotImplementedError - Core Sources")
@@ -176,6 +225,22 @@ if(USE_HIP)
     set_source_files_properties(
             Tensor/Tensor.cpp
             Tensor/Ops/TensorOps.cpp
+            Math/LinearAlgebra/MatMul/MatmulCPU.cpp
+            Math/LinearAlgebra/MatMul/MatmulHIP.cpp
+            Math/LinearAlgebra/MatMul/GemmAVX2.cpp
+            Math/LinearAlgebra/MatMul/GemmAVX512.cpp
+            Math/BasicOps/BasicOpsCPU.cpp
+            Math/BasicOps/BasicOpsHIP.cpp
+            Math/BasicOps/BasicOpsAVX2.cpp
+            Math/BasicOps/BasicOpsAVX512.cpp
+            Math/ComplexOps/ComplexOpsCPU.cpp
+            Math/ComplexOps/ComplexOpsHIP.cpp
+            Math/ComplexOps/ComplexOpsAVX2.cpp
+            Math/ComplexOps/ComplexOpsAVX512.cpp
+            Math/Autograd/AutogradCPU.cpp
+            Math/Autograd/AutogradHIP.cpp
+            Math/Autograd/AutogradAVX2.cpp
+            Math/Autograd/AutogradAVX512.cpp
             Intrinsics/AVX2/DTypeConversions.cpp
             Intrinsics/AVX512/DTypeConversions.cpp
             Intrinsics/Dispatcher.cpp
@@ -184,6 +249,14 @@ if(USE_HIP)
     set_source_files_properties(
             Tensor/Tensor.cpp
             Tensor/Ops/TensorOps.cpp
+            Math/LinearAlgebra/MatMul/MatmulCPU.cpp
+            Math/LinearAlgebra/MatMul/MatmulHIP.cpp
+            Math/BasicOps/BasicOpsCPU.cpp
+            Math/BasicOps/BasicOpsHIP.cpp
+            Math/ComplexOps/ComplexOpsCPU.cpp
+            Math/ComplexOps/ComplexOpsHIP.cpp
+            Math/Autograd/AutogradCPU.cpp
+            Math/Autograd/AutogradHIP.cpp
             Intrinsics/Dispatcher.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native"
     )
@@ -193,23 +266,111 @@ if(USE_HIP)
             Intrinsics/AVX512/DTypeConversions.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512bf16;-mavx512dq;-mf16c"
     )
+    # GEMM's AVX512 kernels additionally need -mavx512bw (16-bit permutes for
+    # the dpbf16 pair layouts and packed-lane extract/zip) and -mavx512vnni
+    # (vpdpbusd/vpdpwssd integer dot products); the Intrinsics AVX512
+    # conversion file needs neither.
+    set_source_files_properties(
+            Math/LinearAlgebra/MatMul/GemmAVX512.cpp
+            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512bw;-mavx512bf16;-mavx512dq;-mavx512vnni;-mf16c"
+    )
+    # GEMM's AVX2 kernels also need -mfma (register-blocked fmadd path); the
+    # Intrinsics AVX2 conversion file does not.
     set_source_files_properties(
             Intrinsics/AVX2/DTypeConversions.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx2;-mf16c"
+    )
+    set_source_files_properties(
+            Math/LinearAlgebra/MatMul/GemmAVX2.cpp
+            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx2;-mfma;-mf16c"
+    )
+    # BasicOps AVX512 kernels need only AVX512F codegen (fp32/fp64 fma/add);
+    # -mavx512dq/-mf16c ride along to match the Intrinsics AVX512 file.
+    set_source_files_properties(
+            Math/BasicOps/BasicOpsAVX512.cpp
+            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512dq;-mf16c"
+    )
+    # BasicOps AVX2 kernels need -mfma (the sgd fmadd path), like GEMM's.
+    set_source_files_properties(
+            Math/BasicOps/BasicOpsAVX2.cpp
+            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx2;-mfma;-mf16c"
+    )
+    # ComplexOps AVX512 kernels need only AVX512F codegen (fp32/fp64 add/max) —
+    # same flag set as BasicOps AVX512.
+    set_source_files_properties(
+            Math/ComplexOps/ComplexOpsAVX512.cpp
+            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512dq;-mf16c"
+    )
+    # ComplexOps AVX2 kernels get the same -mfma flag set as BasicOps AVX2.
+    set_source_files_properties(
+            Math/ComplexOps/ComplexOpsAVX2.cpp
+            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx2;-mfma;-mf16c"
+    )
+    # Autograd kernels share the ComplexOps flag split (fp32/fp64 add/cmp only).
+    set_source_files_properties(
+            Math/Autograd/AutogradAVX512.cpp
+            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512dq;-mf16c"
+    )
+    set_source_files_properties(
+            Math/Autograd/AutogradAVX2.cpp
+            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx2;-mfma;-mf16c"
     )
 else()
     set_source_files_properties(
             Intrinsics/AVX512/DTypeConversions.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bf16;-mavx512dq;-mf16c"
     )
+    # Same split as the HIP branch: GEMM AVX512 kernels get -mavx512bw and
+    # -mavx512vnni.
+    set_source_files_properties(
+            Math/LinearAlgebra/MatMul/GemmAVX512.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512bf16;-mavx512dq;-mavx512vnni;-mf16c"
+    )
     set_source_files_properties(
             Intrinsics/AVX2/DTypeConversions.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx2;-mf16c"
+    )
+    set_source_files_properties(
+            Math/LinearAlgebra/MatMul/GemmAVX2.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c"
+    )
+    # Same split as the HIP branch: BasicOps AVX512 gets AVX512F codegen only,
+    # AVX2 gets -mfma for the sgd fmadd path.
+    set_source_files_properties(
+            Math/BasicOps/BasicOpsAVX512.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mf16c"
+    )
+    set_source_files_properties(
+            Math/BasicOps/BasicOpsAVX2.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c"
+    )
+    # Same split as the HIP branch: ComplexOps AVX512 gets AVX512F codegen only,
+    # AVX2 gets -mfma to match the BasicOps AVX2 file.
+    set_source_files_properties(
+            Math/ComplexOps/ComplexOpsAVX512.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mf16c"
+    )
+    set_source_files_properties(
+            Math/ComplexOps/ComplexOpsAVX2.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c"
+    )
+    # Same split as the HIP branch for the Autograd kernels.
+    set_source_files_properties(
+            Math/Autograd/AutogradAVX512.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mf16c"
+    )
+    set_source_files_properties(
+            Math/Autograd/AutogradAVX2.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c"
     )
 endif()
 if (USE_CUDA)
     set_source_files_properties(
             Tensor/Ops/TensorOps.cu
+            Math/LinearAlgebra/MatMul/MatmulCUDA.cu
+            Math/BasicOps/BasicOpsCUDA.cu
+            Math/ComplexOps/ComplexOpsCUDA.cu
+            Math/Autograd/AutogradCUDA.cu
         PROPERTIES LANGUAGE CUDA
     )
 endif()
@@ -265,6 +426,85 @@ if(BUILD_TESTING)
     )
     add_test(NAME BeanTensorV5Tests COMMAND BeanTensorV5Tests)
 
+    add_executable(BeanTensorV5MathTests tests/matmul_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5MathTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5MathTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5MathTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5MathTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5MathTests PRIVATE
+            -O2
+            -mavx512f
+            -mavx512bf16
+            -mavx512dq
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5MathTests COMMAND BeanTensorV5MathTests)
+
+    add_executable(BeanTensorV5BasicOpsTests tests/basic_ops_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5BasicOpsTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5BasicOpsTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5BasicOpsTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5BasicOpsTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5BasicOpsTests PRIVATE
+            -O2
+            -mavx512f
+            -mavx512bf16
+            -mavx512dq
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5BasicOpsTests COMMAND BeanTensorV5BasicOpsTests)
+
+    add_executable(BeanTensorV5ComplexOpsTests tests/complex_ops_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5ComplexOpsTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5ComplexOpsTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5ComplexOpsTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5ComplexOpsTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5ComplexOpsTests PRIVATE
+            -O2
+            -mavx512f
+            -mavx512bf16
+            -mavx512dq
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5ComplexOpsTests COMMAND BeanTensorV5ComplexOpsTests)
+
+    add_executable(BeanTensorV5AutogradTests tests/autograd_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5AutogradTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5AutogradTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5AutogradTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5AutogradTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5AutogradTests PRIVATE
+            -O2
+            -mavx512f
+            -mavx512bf16
+            -mavx512dq
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5AutogradTests COMMAND BeanTensorV5AutogradTests)
 endif()
 
 if(USE_HIP)

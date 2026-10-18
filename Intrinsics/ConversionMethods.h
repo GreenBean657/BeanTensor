@@ -1,3 +1,10 @@
+/**
+ * @file ConversionMethods.h
+ * @author GreenBean
+ * @brief Conversion clamp tolerance modes shared by every dtype conversion path.
+ * @version 0.1
+ * @date 2026-10-09
+ */
 #pragma once
 /**
  * Assign a ConversionClamp tolerance for conversions.

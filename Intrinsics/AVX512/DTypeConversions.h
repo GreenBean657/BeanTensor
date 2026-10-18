@@ -1,3 +1,10 @@
+/**
+ * @file DTypeConversions.h
+ * @author GreenBean
+ * @brief AVX512 dtype conversion kernel declarations.
+ * @version 0.1
+ * @date 2026-10-14
+ */
 #pragma once
 
 #include <atomic>
