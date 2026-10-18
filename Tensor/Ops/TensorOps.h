@@ -1,3 +1,10 @@
+/**
+ * @file TensorOps.h
+ * @author GreenBean
+ * @brief GPU fill/random tensor op declarations (HIP/CUDA backends).
+ * @version 0.1
+ * @date 2026-10-14
+ */
 #pragma once
 #include <cstdint>
 

@@ -1,3 +1,10 @@
+/**
+ * @file DTypeConversions.h
+ * @author GreenBean
+ * @brief Scalar (native) dtype conversion helpers and bit-exact reference semantics.
+ * @version 0.1
+ * @date 2026-10-14
+ */
 #pragma once
 
 #include <cstdint>

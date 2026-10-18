@@ -1,8 +1,12 @@
-// BeanTensorV5 tests — framework-free assertion suite.
-// Covers: CPU fills (incl. packed dtypes), scalar + runtime-gated AVX512/AVX2
-// conversions, standard2standard clamp semantics, NaN/Inf clamp-flag
-// consistency, printing, clone, and (when a backend + device exist) the GPU
-// paths incl. GPU<->CPU conversion parity.
+/**
+ * @file tensor_tests.cpp
+ * @author GreenBean
+ * @brief Tensor tests - framework-free assertion suite.
+ * Covers CPU fills, scalar and runtime-gated AVX512/AVX2 conversions, clamp semantics, NaN/Inf flag consistency,
+ * printing, clone, and the GPU paths incl. GPU<->CPU conversion parity when a backend and device exist.
+ * @version 0.1
+ * @date 2026-10-18
+ */
 #include <atomic>
 #include <bit>
 #include <cstring>
@@ -31,6 +35,7 @@ using BeanTensor::Tensors::Tensor;
 using BeanTensor::Tensors::Device;
 using BeanTensor::float32_t;
 using BeanTensor::float64_t;
+using BeanTensor::int4x2_t;
 using DType = BeanTensor::DataTypes::DType;
 
 static int failures = 0;
@@ -1036,11 +1041,66 @@ static void test_gpu() {
 #endif
 }
 
+// Int4x2: packed signed 4-bit lanes (lo = bits[3:0], hi = bits[7:4]).
+// Unpacked -> packed duplicates lanes; packed -> unpacked takes the lo lane;
+// out-of-range values clamp to [-8, 7] under PERMISSIVE and flag otherwise.
+static void test_convert_dtype_int4x2() {
+    Tensor t({4}, DType::Int8);
+    t.set<int8_t>({0}, 1);
+    t.set<int8_t>({1}, -1);
+    t.set<int8_t>({2}, 7);
+    t.set<int8_t>({3}, -8);
+    t.sync();
+    t.convert_dtype(DType::Int4x2);
+    t.sync();
+    CHECK(t.contents_to_string() == "[(1, 1), (-1, -1), (7, 7), (-8, -8)]");
+    t.convert_dtype(DType::Int32); // Int8 prints as chars; Int32 prints numerically.
+    CHECK(t.contents_to_string() == "[1, -1, 7, -8]");
+
+    // dtype metadata.
+    CHECK(BeanTensor::DataTypes::dtype_bytes(DType::Int4x2) == 1);
+    CHECK(BeanTensor::DataTypes::dtype_to_string(DType::Int4x2) == "Int4x2");
+
+    // Out-of-range: PERMISSIVE clamps to 7 silently.
+    Tensor over({1}, DType::Int8);
+    over.set<int8_t>({0}, 100);
+    over.sync();
+    over.convert_dtype(DType::Int4x2, ConversionClampMethod::PERMISSIVE);
+    over.sync();
+    CHECK(over.contents_to_string() == "[(7, 7)]");
+
+    // STRICT flags the clamp as a range error at sync().
+    Tensor strict({1}, DType::Int8);
+    strict.set<int8_t>({0}, 100);
+    strict.sync();
+    strict.convert_dtype(DType::Int4x2, ConversionClampMethod::STRICT);
+    auto threw = false;
+    try {
+        strict.sync();
+    } catch (const std::range_error&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    // random() covers Int4x2, and out-of-range bounds reject.
+    Tensor r({64}, DType::Int4x2);
+    r.random(-8.0, 7.0, 5);
+    r.sync();
+    threw = false;
+    try {
+        Tensor bad({1}, DType::Int4x2);
+        bad.random(-100.0, 100.0, 5);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 static void verify_alignment() {
     static_assert(alignof(BeanTensor::Tensors::Node) == 8, "Node must stay 8-aligned, or be reviewed.");
     static_assert(alignof(BeanTensor::Tensors::Tensor) == 8, "Tensor must stay 8-aligned, or be reviewed.");
-    // 200 + std::vector view_parents (24 bytes). Re-verify with offsetof on change.
-    static_assert(sizeof(BeanTensor::Tensors::Tensor) == 224, "Tensor size changed; re-verify layout and update AGENTS.md.");
+    // BT_TENSOR_MAX_DIMS 3: 216 + std::vector view_parents (24 bytes). Re-verify with offsetof on change.
+    static_assert(sizeof(BeanTensor::Tensors::Tensor) == 240, "Tensor size changed; re-verify layout and update AGENTS.md.");
 }
 
 int main() {
@@ -1056,6 +1116,7 @@ int main() {
     test_scalar_avx2_parity();
     test_extended_conversion_parity();
     test_convert_dtype_cpu();
+    test_convert_dtype_int4x2();
     test_convert_dtype_async_cpu();
     test_clone();
     test_at_cpu();

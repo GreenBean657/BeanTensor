@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="${1:-.}"
 cd "$ROOT"
 
-DIRS=(Tensor Helpers Intrinsics tests)
+DIRS=(Tensor Helpers Intrinsics Math tests)
 FILES=(main.cpp)
 
 for d in "${DIRS[@]}"; do

@@ -1,4 +1,11 @@
-
+/**
+ * @file DTypeConversions.cpp
+ * @author GreenBean
+ * @brief AVX2 dtype conversion kernels (fp32/fp16/bf16 and integer narrowing/widening).
+ * Compiled with per-file AVX2 flags; execution is gated at runtime via IncludedCPUFeatures().
+ * @version 0.1
+ * @date 2026-10-14
+ */
 #include "DTypeConversions.h"
 
 #include <bit>

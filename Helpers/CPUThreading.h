@@ -1,3 +1,10 @@
+/**
+ * @file CPUThreading.h
+ * @author GreenBean
+ * @brief CPU thread pool and task queue with prioritised scheduling.
+ * @version 0.1
+ * @date 2026-10-18
+ */
 #pragma once
 #include <atomic>
 #include <condition_variable>
@@ -180,7 +187,7 @@ namespace BeanTensor::Threading {
         static ThreadPool pool(IncludedCPUFeatures().threads);
         return pool;
 #else
-      throw std::runtime_error("Cannot support -fno-threadsafe-statics - remove it, or you lose threading.");
+      [[unlikely]] throw std::runtime_error("Cannot support -fno-threadsafe-statics - remove it, or you lose threading.");
 #endif
 
     }

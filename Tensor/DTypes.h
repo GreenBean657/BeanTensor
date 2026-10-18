@@ -1,3 +1,10 @@
+/**
+ * @file DTypes.h
+ * @author GreenBean
+ * @brief Fixed-width dtype aliases, packed dtypes and dtype metadata.
+ * @version 0.1
+ * @date 2026-10-18
+ */
 #pragma once
 
 #include <cstddef>
@@ -35,6 +42,12 @@ namespace BeanTensor {
     enum class bfloat16_t : uint16_t {};
     enum class bfloat16x2_t : uint32_t {};
 #endif
+    /**
+     * Packed pair of signed 4-bit lanes in one byte.
+     * CUDA/HIP do NOT provide 4-bit type for INT (only FP4).
+     * @note (lo = bits[3:0], hi = bits[7:4])
+     */
+    enum class int4x2_t : uint8_t {};
     using float32_t = float;
     using float64_t = double;
 }
@@ -87,7 +100,8 @@ namespace BeanTensor::DataTypes {
         UInt64,
         UInt32,
         UInt16,
-        UInt8
+        UInt8,
+        Int4x2
     };
 
     inline size_t dtype_bytes(const DType& dt) {
@@ -106,6 +120,7 @@ namespace BeanTensor::DataTypes {
             case DType::UInt64: return sizeof(uint64_t);
             case DType::UInt16: return sizeof(uint16_t);
             case DType::UInt8: return sizeof(uint8_t);
+            case DType::Int4x2: return sizeof(int4x2_t);
             [[unlikely]] default: throw ErrorHandling::NotImplemented();
         }
     }
@@ -126,6 +141,7 @@ namespace BeanTensor::DataTypes {
             case DType::UInt64: return "UInt64";
             case DType::UInt16: return "UInt16";
             case DType::UInt8: return "UInt8";
+            case DType::Int4x2: return "Int4x2";
             [[unlikely]] default: throw ErrorHandling::NotImplemented();
         }
     }
