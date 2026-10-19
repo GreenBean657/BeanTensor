@@ -33,16 +33,26 @@ what the patch does and why it's safe: [CUDA_GLIBC_PATCH.md](CUDA_GLIBC_PATCH.md
 **BeanTensor will target a few major floating point and integer precision's, including:**
 - FP64 (double)
 - FP32 (float)
-- FP16 (half)
-- BF16 (bhalf)
+- FP16 (half) (supports packing as *float16_tx2*)
+- BF16 (bhalf) (supports packing as *bfloat16_tx2*)
 - INT64 (long)
 - INT32 (int)
 - INT16 (short)
 - INT8 (byte)
+- INT4 (nibble) (REQUIRES packing as *int4_tx2*)
 - UINT64 (unsigned long)
 - UINT32 (unsigned int)
 - UINT16 (unsigned short)
 - UINT8 (unsigned byte)
+
+Note: UINT4 will not be supported at this time. U's are primary for indexing, and the lack of acceleration for it (especially since it inheritly lacks a dtype as is, and needs packing) overcomplicates things. 
+
+Planned, but not introduced in the MVP:
+- FP4
+- FP8
+- INT1
+- INT2 
+
 When tensor core acceleration exists and the operation permits it, I intend for BeanTensor to use the accelerated tensor pathway.
 Additional precision to maximize Tensor implementations are planned in the future, but may not land within the capstone deadline. 
 
