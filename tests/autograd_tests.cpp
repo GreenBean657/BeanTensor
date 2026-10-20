@@ -18,7 +18,9 @@
 
 #include "Helpers/Errors.h"
 #include "Intrinsics/Native/DTypeConversions.h"
-#include "Math/Autograd/AutogradKernels.h"
+#include "Math/Autograd/BiasAddG/BiasAddGKernels.h"
+#include "Math/Autograd/GradAcc/GradAccKernels.h"
+#include "Math/Autograd/ReluG/ReluGKernels.h"
 #include "Tensor/Tensor.h"
 
 #if defined(USE_HIP)
@@ -259,13 +261,13 @@ static void check_kernel_tier(void (*acc)(T*, const T*, size_t, size_t),
 }
 
 static void test_simd_kernel_parity() {
-    if (ag::autograd_avx2_available()) {
+    if (ag::grad_acc_avx2_available() && ag::relu_g_avx2_available() && ag::bias_add_g_avx2_available()) {
         check_kernel_tier<float32_t, uint32_t>(ag::grad_acc_f32_range_avx2, ag::relu_g_f32_range_avx2, ag::bias_add_g_f32_colsum_avx2);
         check_kernel_tier<float64_t, uint64_t>(ag::grad_acc_f64_range_avx2, ag::relu_g_f64_range_avx2, ag::bias_add_g_f64_colsum_avx2);
     } else {
         std::cout << "AVX2 not available — skipping AVX2 autograd kernel parity\n";
     }
-    if (ag::autograd_avx512_available()) {
+    if (ag::grad_acc_avx512_available() && ag::relu_g_avx512_available() && ag::bias_add_g_avx512_available()) {
         check_kernel_tier<float32_t, uint32_t>(ag::grad_acc_f32_range_avx512, ag::relu_g_f32_range_avx512, ag::bias_add_g_f32_colsum_avx512);
         check_kernel_tier<float64_t, uint64_t>(ag::grad_acc_f64_range_avx512, ag::relu_g_f64_range_avx512, ag::bias_add_g_f64_colsum_avx512);
     } else {
