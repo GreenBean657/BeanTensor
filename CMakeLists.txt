@@ -160,23 +160,75 @@ set(CORE_SOURCES
         Math/LinearAlgebra/MatMul/GemmAVX2.cpp
         Math/LinearAlgebra/MatMul/GemmAVX512.cpp
         Math/BasicOps/BasicOps.h
-        Math/BasicOps/BasicOps.hpp
-        Math/BasicOps/BasicOpsKernels.h
-        Math/BasicOps/BasicOpsCPU.cpp
-        Math/BasicOps/BasicOpsAVX2.cpp
-        Math/BasicOps/BasicOpsAVX512.cpp
+        Math/BasicOps/SgdUpdate/SgdUpdate.h
+        Math/BasicOps/SgdUpdate/SgdUpdate.hpp
+        Math/BasicOps/SgdUpdate/SgdUpdateKernels.h
+        Math/BasicOps/SgdUpdate/SgdUpdateCPU.cpp
+        Math/BasicOps/SgdUpdate/SgdUpdateAVX2.cpp
+        Math/BasicOps/SgdUpdate/SgdUpdateAVX512.cpp
+        Math/BasicOps/Sum/Sum.h
+        Math/BasicOps/Sum/Sum.hpp
+        Math/BasicOps/Sum/SumKernels.h
+        Math/BasicOps/Sum/SumCPU.cpp
+        Math/BasicOps/Sum/SumAVX2.cpp
+        Math/BasicOps/Sum/SumAVX512.cpp
+        Math/BasicOps/Argmax/Argmax.h
+        Math/BasicOps/Argmax/Argmax.hpp
+        Math/BasicOps/Argmax/ArgmaxCPU.cpp
+        Math/BasicOps/Reshape.cpp
+        Math/BasicOps/BasicOpsShared.h
+        Math/BasicOps/BasicOpsCudaShared.h
+        Math/BasicOps/BasicOpsHipShared.h
         Math/ComplexOps/ComplexOps.h
-        Math/ComplexOps/ComplexOps.hpp
-        Math/ComplexOps/ComplexOpsKernels.h
-        Math/ComplexOps/ComplexOpsCPU.cpp
-        Math/ComplexOps/ComplexOpsAVX2.cpp
-        Math/ComplexOps/ComplexOpsAVX512.cpp
+        Math/ComplexOps/BiasAdd/BiasAdd.h
+        Math/ComplexOps/BiasAdd/BiasAdd.hpp
+        Math/ComplexOps/BiasAdd/BiasAddKernels.h
+        Math/ComplexOps/BiasAdd/BiasAddCPU.cpp
+        Math/ComplexOps/BiasAdd/BiasAddAVX2.cpp
+        Math/ComplexOps/BiasAdd/BiasAddAVX512.cpp
+        Math/ComplexOps/Relu/Relu.h
+        Math/ComplexOps/Relu/Relu.hpp
+        Math/ComplexOps/Relu/ReluKernels.h
+        Math/ComplexOps/Relu/ReluCPU.cpp
+        Math/ComplexOps/Relu/ReluAVX2.cpp
+        Math/ComplexOps/Relu/ReluAVX512.cpp
+        Math/ComplexOps/SoftmaxCE/SoftmaxCE.h
+        Math/ComplexOps/SoftmaxCE/SoftmaxCE.hpp
+        Math/ComplexOps/SoftmaxCE/SoftmaxCECPU.cpp
+        Math/ComplexOps/ComplexOpsShared.h
+        Math/ComplexOps/ComplexOpsCudaShared.h
+        Math/ComplexOps/ComplexOpsHipShared.h
         Math/Autograd/Autograd.h
-        Math/Autograd/Autograd.hpp
-        Math/Autograd/AutogradKernels.h
-        Math/Autograd/AutogradCPU.cpp
-        Math/Autograd/AutogradAVX2.cpp
-        Math/Autograd/AutogradAVX512.cpp
+        Math/Autograd/GradAcc/GradAcc.h
+        Math/Autograd/GradAcc/GradAcc.hpp
+        Math/Autograd/GradAcc/GradAccKernels.h
+        Math/Autograd/GradAcc/GradAccCPU.cpp
+        Math/Autograd/GradAcc/GradAccAVX2.cpp
+        Math/Autograd/GradAcc/GradAccAVX512.cpp
+        Math/Autograd/ReluG/ReluG.h
+        Math/Autograd/ReluG/ReluG.hpp
+        Math/Autograd/ReluG/ReluGKernels.h
+        Math/Autograd/ReluG/ReluGCPU.cpp
+        Math/Autograd/ReluG/ReluGAVX2.cpp
+        Math/Autograd/ReluG/ReluGAVX512.cpp
+        Math/Autograd/BiasAddG/BiasAddG.h
+        Math/Autograd/BiasAddG/BiasAddG.hpp
+        Math/Autograd/BiasAddG/BiasAddGKernels.h
+        Math/Autograd/BiasAddG/BiasAddGCPU.cpp
+        Math/Autograd/BiasAddG/BiasAddGAVX2.cpp
+        Math/Autograd/BiasAddG/BiasAddGAVX512.cpp
+        Math/Autograd/SoftmaxCEG/SoftmaxCEG.h
+        Math/Autograd/SoftmaxCEG/SoftmaxCEG.hpp
+        Math/Autograd/SoftmaxCEG/SoftmaxCEGCPU.cpp
+        Math/Autograd/TransposeLast2/TransposeLast2.h
+        Math/Autograd/TransposeLast2/TransposeLast2.hpp
+        Math/Autograd/TransposeLast2/TransposeLast2CPU.cpp
+        Math/Autograd/GemmG/GemmG.h
+        Math/Autograd/GemmG/GemmGCPU.cpp
+        Math/Autograd/Backward.cpp
+        Math/Autograd/AutogradShared.h
+        Math/Autograd/AutogradCudaShared.h
+        Math/Autograd/AutogradHipShared.h
         Helpers/Bits.h
 )
 
@@ -189,17 +241,33 @@ if (USE_CUDA)
     list(APPEND CORE_SOURCES
             Tensor/Ops/TensorOps.cu
             Math/LinearAlgebra/MatMul/MatmulCUDA.cu
-            Math/BasicOps/BasicOpsCUDA.cu
-            Math/ComplexOps/ComplexOpsCUDA.cu
-            Math/Autograd/AutogradCUDA.cu
+            Math/BasicOps/SgdUpdate/SgdUpdateCUDA.cu
+            Math/BasicOps/Sum/SumCUDA.cu
+            Math/BasicOps/Argmax/ArgmaxCUDA.cu
+            Math/ComplexOps/BiasAdd/BiasAddCUDA.cu
+            Math/ComplexOps/Relu/ReluCUDA.cu
+            Math/ComplexOps/SoftmaxCE/SoftmaxCECUDA.cu
+            Math/Autograd/GradAcc/GradAccCUDA.cu
+            Math/Autograd/ReluG/ReluGCUDA.cu
+            Math/Autograd/BiasAddG/BiasAddGCUDA.cu
+            Math/Autograd/SoftmaxCEG/SoftmaxCEGCUDA.cu
+            Math/Autograd/TransposeLast2/TransposeLast2CUDA.cu
     )
 elseif (USE_HIP)
     list(APPEND CORE_SOURCES
             Tensor/Ops/TensorOps.cpp
             Math/LinearAlgebra/MatMul/MatmulHIP.cpp
-            Math/BasicOps/BasicOpsHIP.cpp
-            Math/ComplexOps/ComplexOpsHIP.cpp
-            Math/Autograd/AutogradHIP.cpp
+            Math/BasicOps/SgdUpdate/SgdUpdateHIP.cpp
+            Math/BasicOps/Sum/SumHIP.cpp
+            Math/BasicOps/Argmax/ArgmaxHIP.cpp
+            Math/ComplexOps/BiasAdd/BiasAddHIP.cpp
+            Math/ComplexOps/Relu/ReluHIP.cpp
+            Math/ComplexOps/SoftmaxCE/SoftmaxCEHIP.cpp
+            Math/Autograd/GradAcc/GradAccHIP.cpp
+            Math/Autograd/ReluG/ReluGHIP.cpp
+            Math/Autograd/BiasAddG/BiasAddGHIP.cpp
+            Math/Autograd/SoftmaxCEG/SoftmaxCEGHIP.cpp
+            Math/Autograd/TransposeLast2/TransposeLast2HIP.cpp
     )
 elseif(USE_STRIX_HALO)
     message(FATAL_ERROR "NotImplementedError - Core Sources")
@@ -229,18 +297,45 @@ if(USE_HIP)
             Math/LinearAlgebra/MatMul/MatmulHIP.cpp
             Math/LinearAlgebra/MatMul/GemmAVX2.cpp
             Math/LinearAlgebra/MatMul/GemmAVX512.cpp
-            Math/BasicOps/BasicOpsCPU.cpp
-            Math/BasicOps/BasicOpsHIP.cpp
-            Math/BasicOps/BasicOpsAVX2.cpp
-            Math/BasicOps/BasicOpsAVX512.cpp
-            Math/ComplexOps/ComplexOpsCPU.cpp
-            Math/ComplexOps/ComplexOpsHIP.cpp
-            Math/ComplexOps/ComplexOpsAVX2.cpp
-            Math/ComplexOps/ComplexOpsAVX512.cpp
-            Math/Autograd/AutogradCPU.cpp
-            Math/Autograd/AutogradHIP.cpp
-            Math/Autograd/AutogradAVX2.cpp
-            Math/Autograd/AutogradAVX512.cpp
+            Math/BasicOps/SgdUpdate/SgdUpdateCPU.cpp
+            Math/BasicOps/SgdUpdate/SgdUpdateHIP.cpp
+            Math/BasicOps/Sum/SumCPU.cpp
+            Math/BasicOps/Sum/SumHIP.cpp
+            Math/BasicOps/Argmax/ArgmaxCPU.cpp
+            Math/BasicOps/Argmax/ArgmaxHIP.cpp
+            Math/BasicOps/Reshape.cpp
+            Math/BasicOps/SgdUpdate/SgdUpdateAVX2.cpp
+            Math/BasicOps/SgdUpdate/SgdUpdateAVX512.cpp
+            Math/BasicOps/Sum/SumAVX2.cpp
+            Math/BasicOps/Sum/SumAVX512.cpp
+            Math/ComplexOps/BiasAdd/BiasAddCPU.cpp
+            Math/ComplexOps/BiasAdd/BiasAddHIP.cpp
+            Math/ComplexOps/Relu/ReluCPU.cpp
+            Math/ComplexOps/Relu/ReluHIP.cpp
+            Math/ComplexOps/SoftmaxCE/SoftmaxCECPU.cpp
+            Math/ComplexOps/SoftmaxCE/SoftmaxCEHIP.cpp
+            Math/ComplexOps/BiasAdd/BiasAddAVX2.cpp
+            Math/ComplexOps/BiasAdd/BiasAddAVX512.cpp
+            Math/ComplexOps/Relu/ReluAVX2.cpp
+            Math/ComplexOps/Relu/ReluAVX512.cpp
+            Math/Autograd/GradAcc/GradAccCPU.cpp
+            Math/Autograd/GradAcc/GradAccHIP.cpp
+            Math/Autograd/ReluG/ReluGCPU.cpp
+            Math/Autograd/ReluG/ReluGHIP.cpp
+            Math/Autograd/BiasAddG/BiasAddGCPU.cpp
+            Math/Autograd/BiasAddG/BiasAddGHIP.cpp
+            Math/Autograd/SoftmaxCEG/SoftmaxCEGCPU.cpp
+            Math/Autograd/SoftmaxCEG/SoftmaxCEGHIP.cpp
+            Math/Autograd/TransposeLast2/TransposeLast2CPU.cpp
+            Math/Autograd/TransposeLast2/TransposeLast2HIP.cpp
+            Math/Autograd/GemmG/GemmGCPU.cpp
+            Math/Autograd/Backward.cpp
+            Math/Autograd/GradAcc/GradAccAVX2.cpp
+            Math/Autograd/GradAcc/GradAccAVX512.cpp
+            Math/Autograd/ReluG/ReluGAVX2.cpp
+            Math/Autograd/ReluG/ReluGAVX512.cpp
+            Math/Autograd/BiasAddG/BiasAddGAVX2.cpp
+            Math/Autograd/BiasAddG/BiasAddGAVX512.cpp
             Intrinsics/AVX2/DTypeConversions.cpp
             Intrinsics/AVX512/DTypeConversions.cpp
             Intrinsics/Dispatcher.cpp
@@ -251,12 +346,31 @@ if(USE_HIP)
             Tensor/Ops/TensorOps.cpp
             Math/LinearAlgebra/MatMul/MatmulCPU.cpp
             Math/LinearAlgebra/MatMul/MatmulHIP.cpp
-            Math/BasicOps/BasicOpsCPU.cpp
-            Math/BasicOps/BasicOpsHIP.cpp
-            Math/ComplexOps/ComplexOpsCPU.cpp
-            Math/ComplexOps/ComplexOpsHIP.cpp
-            Math/Autograd/AutogradCPU.cpp
-            Math/Autograd/AutogradHIP.cpp
+            Math/BasicOps/SgdUpdate/SgdUpdateCPU.cpp
+            Math/BasicOps/SgdUpdate/SgdUpdateHIP.cpp
+            Math/BasicOps/Sum/SumCPU.cpp
+            Math/BasicOps/Sum/SumHIP.cpp
+            Math/BasicOps/Argmax/ArgmaxCPU.cpp
+            Math/BasicOps/Argmax/ArgmaxHIP.cpp
+            Math/BasicOps/Reshape.cpp
+            Math/ComplexOps/BiasAdd/BiasAddCPU.cpp
+            Math/ComplexOps/BiasAdd/BiasAddHIP.cpp
+            Math/ComplexOps/Relu/ReluCPU.cpp
+            Math/ComplexOps/Relu/ReluHIP.cpp
+            Math/ComplexOps/SoftmaxCE/SoftmaxCECPU.cpp
+            Math/ComplexOps/SoftmaxCE/SoftmaxCEHIP.cpp
+            Math/Autograd/GradAcc/GradAccCPU.cpp
+            Math/Autograd/GradAcc/GradAccHIP.cpp
+            Math/Autograd/ReluG/ReluGCPU.cpp
+            Math/Autograd/ReluG/ReluGHIP.cpp
+            Math/Autograd/BiasAddG/BiasAddGCPU.cpp
+            Math/Autograd/BiasAddG/BiasAddGHIP.cpp
+            Math/Autograd/SoftmaxCEG/SoftmaxCEGCPU.cpp
+            Math/Autograd/SoftmaxCEG/SoftmaxCEGHIP.cpp
+            Math/Autograd/TransposeLast2/TransposeLast2CPU.cpp
+            Math/Autograd/TransposeLast2/TransposeLast2HIP.cpp
+            Math/Autograd/GemmG/GemmGCPU.cpp
+            Math/Autograd/Backward.cpp
             Intrinsics/Dispatcher.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native"
     )
@@ -284,35 +398,34 @@ if(USE_HIP)
             Math/LinearAlgebra/MatMul/GemmAVX2.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx2;-mfma;-mf16c"
     )
-    # BasicOps AVX512 kernels need only AVX512F codegen (fp32/fp64 fma/add);
+    # Per-op AVX512 kernels need only AVX512F codegen (fp32/fp64 fma/add);
     # -mavx512dq/-mf16c ride along to match the Intrinsics AVX512 file.
     set_source_files_properties(
-            Math/BasicOps/BasicOpsAVX512.cpp
+            Math/BasicOps/SgdUpdate/SgdUpdateAVX512.cpp
+            Math/BasicOps/Sum/SumAVX512.cpp
+            Math/ComplexOps/BiasAdd/BiasAddAVX512.cpp
+            Math/ComplexOps/Relu/ReluAVX512.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512dq;-mf16c"
     )
-    # BasicOps AVX2 kernels need -mfma (the sgd fmadd path), like GEMM's.
+    # Per-op AVX2 kernels get the same -mfma flag set as GEMM's AVX2 file.
     set_source_files_properties(
-            Math/BasicOps/BasicOpsAVX2.cpp
+            Math/BasicOps/SgdUpdate/SgdUpdateAVX2.cpp
+            Math/BasicOps/Sum/SumAVX2.cpp
+            Math/ComplexOps/BiasAdd/BiasAddAVX2.cpp
+            Math/ComplexOps/Relu/ReluAVX2.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx2;-mfma;-mf16c"
     )
-    # ComplexOps AVX512 kernels need only AVX512F codegen (fp32/fp64 add/max) —
-    # same flag set as BasicOps AVX512.
+    # Autograd kernels share the per-op flag split (fp32/fp64 add/cmp only).
     set_source_files_properties(
-            Math/ComplexOps/ComplexOpsAVX512.cpp
-            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512dq;-mf16c"
-    )
-    # ComplexOps AVX2 kernels get the same -mfma flag set as BasicOps AVX2.
-    set_source_files_properties(
-            Math/ComplexOps/ComplexOpsAVX2.cpp
-            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx2;-mfma;-mf16c"
-    )
-    # Autograd kernels share the ComplexOps flag split (fp32/fp64 add/cmp only).
-    set_source_files_properties(
-            Math/Autograd/AutogradAVX512.cpp
+            Math/Autograd/GradAcc/GradAccAVX512.cpp
+            Math/Autograd/ReluG/ReluGAVX512.cpp
+            Math/Autograd/BiasAddG/BiasAddGAVX512.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512dq;-mf16c"
     )
     set_source_files_properties(
-            Math/Autograd/AutogradAVX2.cpp
+            Math/Autograd/GradAcc/GradAccAVX2.cpp
+            Math/Autograd/ReluG/ReluGAVX2.cpp
+            Math/Autograd/BiasAddG/BiasAddGAVX2.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx2;-mfma;-mf16c"
     )
 else()
@@ -334,33 +447,33 @@ else()
             Math/LinearAlgebra/MatMul/GemmAVX2.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c"
     )
-    # Same split as the HIP branch: BasicOps AVX512 gets AVX512F codegen only,
+    # Same split as the HIP branch: per-op AVX512 gets AVX512F codegen only,
     # AVX2 gets -mfma for the sgd fmadd path.
     set_source_files_properties(
-            Math/BasicOps/BasicOpsAVX512.cpp
+            Math/BasicOps/SgdUpdate/SgdUpdateAVX512.cpp
+            Math/BasicOps/Sum/SumAVX512.cpp
+            Math/ComplexOps/BiasAdd/BiasAddAVX512.cpp
+            Math/ComplexOps/Relu/ReluAVX512.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mf16c"
     )
     set_source_files_properties(
-            Math/BasicOps/BasicOpsAVX2.cpp
-            PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c"
-    )
-    # Same split as the HIP branch: ComplexOps AVX512 gets AVX512F codegen only,
-    # AVX2 gets -mfma to match the BasicOps AVX2 file.
-    set_source_files_properties(
-            Math/ComplexOps/ComplexOpsAVX512.cpp
-            PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mf16c"
-    )
-    set_source_files_properties(
-            Math/ComplexOps/ComplexOpsAVX2.cpp
+            Math/BasicOps/SgdUpdate/SgdUpdateAVX2.cpp
+            Math/BasicOps/Sum/SumAVX2.cpp
+            Math/ComplexOps/BiasAdd/BiasAddAVX2.cpp
+            Math/ComplexOps/Relu/ReluAVX2.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c"
     )
     # Same split as the HIP branch for the Autograd kernels.
     set_source_files_properties(
-            Math/Autograd/AutogradAVX512.cpp
+            Math/Autograd/GradAcc/GradAccAVX512.cpp
+            Math/Autograd/ReluG/ReluGAVX512.cpp
+            Math/Autograd/BiasAddG/BiasAddGAVX512.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mf16c"
     )
     set_source_files_properties(
-            Math/Autograd/AutogradAVX2.cpp
+            Math/Autograd/GradAcc/GradAccAVX2.cpp
+            Math/Autograd/ReluG/ReluGAVX2.cpp
+            Math/Autograd/BiasAddG/BiasAddGAVX2.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c"
     )
 endif()
@@ -368,9 +481,17 @@ if (USE_CUDA)
     set_source_files_properties(
             Tensor/Ops/TensorOps.cu
             Math/LinearAlgebra/MatMul/MatmulCUDA.cu
-            Math/BasicOps/BasicOpsCUDA.cu
-            Math/ComplexOps/ComplexOpsCUDA.cu
-            Math/Autograd/AutogradCUDA.cu
+            Math/BasicOps/SgdUpdate/SgdUpdateCUDA.cu
+            Math/BasicOps/Sum/SumCUDA.cu
+            Math/BasicOps/Argmax/ArgmaxCUDA.cu
+            Math/ComplexOps/BiasAdd/BiasAddCUDA.cu
+            Math/ComplexOps/Relu/ReluCUDA.cu
+            Math/ComplexOps/SoftmaxCE/SoftmaxCECUDA.cu
+            Math/Autograd/GradAcc/GradAccCUDA.cu
+            Math/Autograd/ReluG/ReluGCUDA.cu
+            Math/Autograd/BiasAddG/BiasAddGCUDA.cu
+            Math/Autograd/SoftmaxCEG/SoftmaxCEGCUDA.cu
+            Math/Autograd/TransposeLast2/TransposeLast2CUDA.cu
         PROPERTIES LANGUAGE CUDA
     )
 endif()
