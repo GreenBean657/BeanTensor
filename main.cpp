@@ -12,7 +12,6 @@
 
 
 int main() {
-    BeanTensor::Tensors::detail::gemm_g_node()
     std::cout << "Hello, World!" << std::endl;
     std::cout << sizeof(bool) << std::endl;
     std::cout << sizeof(uint8_t) << std::endl;
