@@ -10,11 +10,13 @@
 #include <atomic>
 #include <bit>
 #include <cstring>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <random>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "Helpers/Hardware.h"
@@ -1096,11 +1098,78 @@ static void test_convert_dtype_int4x2() {
     CHECK(threw);
 }
 
+static void test_move_defers_pending_error() {
+    // A failed pending task drained by a move must rethrow at the
+    // destination's next sync() — never silently discarded (noexcept moves).
+    Tensor t({4}, DType::Float32);
+    std::promise<void> p;
+    t.give_future(p.get_future().share());
+    p.set_exception(std::make_exception_ptr(BeanTensor::ErrorHandling::UnReachableCode()));
+    Tensor moved(std::move(t)); // must not throw
+    auto threw = false;
+    try {
+        moved.sync();
+    } catch (const BeanTensor::ErrorHandling::UnReachableCode&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    // Thrown-once: the poison was consumed by that sync().
+    moved.sync();
+
+    // Chained moves carry the deferred error along.
+    Tensor t2({4}, DType::Float32);
+    std::promise<void> p2;
+    t2.give_future(p2.get_future().share());
+    p2.set_exception(std::make_exception_ptr(BeanTensor::ErrorHandling::UnReachableCode()));
+    Tensor m2(std::move(t2));
+    Tensor m3(std::move(m2));
+    threw = false;
+    try {
+        m3.sync();
+    } catch (const BeanTensor::ErrorHandling::UnReachableCode&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    // Move assignment defers the source's error the same way.
+    Tensor src({4}, DType::Float32);
+    std::promise<void> p3;
+    src.give_future(p3.get_future().share());
+    p3.set_exception(std::make_exception_ptr(BeanTensor::ErrorHandling::UnReachableCode()));
+    Tensor dst({4}, DType::Float32);
+    dst = std::move(src);
+    threw = false;
+    try {
+        dst.sync();
+    } catch (const BeanTensor::ErrorHandling::UnReachableCode&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    // Move assignment also preserves the target's OWN pending error.
+    Tensor dst2({4}, DType::Float32);
+    std::promise<void> p4;
+    dst2.give_future(p4.get_future().share());
+    p4.set_exception(std::make_exception_ptr(BeanTensor::ErrorHandling::UnReachableCode()));
+    Tensor src2({4}, DType::Float32);
+    dst2 = std::move(src2);
+    threw = false;
+    try {
+        dst2.sync();
+    } catch (const BeanTensor::ErrorHandling::UnReachableCode&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 static void verify_alignment() {
     static_assert(alignof(BeanTensor::Tensors::Node) == 8, "Node must stay 8-aligned, or be reviewed.");
     static_assert(alignof(BeanTensor::Tensors::Tensor) == 8, "Tensor must stay 8-aligned, or be reviewed.");
     // BT_TENSOR_MAX_DIMS 3: 216 + std::vector view_parents (24 bytes). Re-verify with offsetof on change.
     static_assert(sizeof(BeanTensor::Tensors::Tensor) == 240, "Tensor size changed; re-verify layout and update AGENTS.md.");
+    static_assert(std::is_nothrow_move_constructible_v<BeanTensor::Tensors::Tensor>, "Tensor move ctor must stay noexcept, or be reviewed.");
+    static_assert(std::is_nothrow_move_assignable_v<BeanTensor::Tensors::Tensor>, "Tensor move assignment must stay noexcept, or be reviewed.");
 }
 
 int main() {
@@ -1120,6 +1189,7 @@ int main() {
     test_convert_dtype_async_cpu();
     test_clone();
     test_at_cpu();
+    test_move_defers_pending_error();
     test_gpu();
     if (failures == 0) {
         std::cout << "ALL TESTS PASSED" << std::endl;

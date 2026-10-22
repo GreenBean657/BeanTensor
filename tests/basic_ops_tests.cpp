@@ -1,7 +1,7 @@
 /**
  * @file basic_ops_tests.cpp
  * @author GreenBean
- * @brief Basic ops tests - framework-free assertion suite.
+ * @brief Reduction, optimization and shape ops tests - framework-free assertion suite.
  * Covers reshape, sgd_update/sgd_step, sum and argmax across the full dtype family (CPU threaded + SIMD tiers),
  * and the GPU (CUDA/HIP) paths for all four ops when a backend and device exist.
  * @version 0.1
@@ -636,14 +636,17 @@ static void test_sgd_cpu() {
         }
         CHECK(threw);
 
+        // A grad of a different dtype no longer throws: sgd_update converts a
+        // private copy into the weight dtype (the single grad-conversion rule).
         auto g_dtype = Tensor({2}, DType::Float64, Device::CPU);
-        threw = false;
-        try {
-            w.sgd_update(g_dtype, 0.1);
-        } catch (const BeanTensor::ErrorHandling::MismatchedDTypes&) {
-            threw = true;
-        }
-        CHECK(threw);
+        g_dtype.set<float64_t>({0}, 0.5);
+        g_dtype.set<float64_t>({1}, -0.25);
+        w.set<float32_t>({0}, 1.0f);
+        w.set<float32_t>({1}, 2.0f);
+        w.sgd_update(g_dtype, 0.1);
+        w.sync();
+        CHECK(near(w.at<float32_t>({0}), 0.95f, 1e-6));
+        CHECK(near(w.at<float32_t>({1}), 2.025f, 1e-6));
     }
     {
         // sgd_step with no gradient throws NoGradient.
@@ -813,7 +816,7 @@ int main() {
     test_sgd_cpu();
     test_gpu();
     if (failures == 0) {
-        std::cout << "all basic-ops tests passed\n";
+        std::cout << "all reduction/optimization/shape tests passed\n";
         return 0;
     }
     std::cerr << failures << " check(s) failed\n";

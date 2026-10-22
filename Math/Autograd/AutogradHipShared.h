@@ -13,6 +13,13 @@
  */
 #pragma once
 
+#if defined(USE_HIP)
+#include <cstddef>
+#include <cstdint>
+
+#include <hip/hip_runtime.h>
+#include <hip/hip_bf16.h>
+
 #include "Tensor/DTypes.h"
 
 namespace BeanTensor::Tensors::detail::autograd_gpu {
@@ -90,3 +97,5 @@ namespace BeanTensor::Tensors::detail::autograd_gpu {
         return static_cast<int4x2_t>(static_cast<uint8_t>((lo & 0xF) | ((hi & 0xF) << 4)));
     }
 }
+
+#endif

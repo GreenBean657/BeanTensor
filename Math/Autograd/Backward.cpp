@@ -13,29 +13,36 @@
 #include <vector>
 
 #include "Math/Autograd/Autograd.h"
+#include "Math/Autograd/GradDType.h"
 #include "Tensor/Tensor.h"
 
 namespace BeanTensor::Tensors {
 
     /**
-     * Allocates grad with this tensor's shape, dtype and device, zero-filled, and syncs
+     * Allocates grad with this tensor's shape, grad_dtype and device, zero-filled, and syncs
      * so the fill lands before any reader queues work. No-op if grad already exists.
      * Ownership: this tensor owns the heap-allocated grad.
-     * @brief Lazily allocate a zeroed gradient tensor.
+     * @brief Lazily allocate a zeroed gradient tensor in grad_dtype.
+     * @param grad_dtype Dtype of the gradient buffer for this backward() call.
      */
-    void Tensor::ensure_grad() {
+    void Tensor::ensure_grad(const DataTypes::DType grad_dtype) {
         if (this->grad != nullptr) {
             return;
         }
-        this->grad = new Tensor(std::vector<size_t>(this->shape, this->shape + this->ndim), this->dtype, this->device, false);
+        this->grad = new Tensor(std::vector<size_t>(this->shape, this->shape + this->ndim), grad_dtype, this->device, false);
         this->grad->set_zero();
         this->grad->sync(); // the zero-fill must land before any reader queues work
     }
 
     /**
-     * If no grad exists, adopts delta as the grad (the move drains delta's workers).
-     * Otherwise syncs delta and the existing grad, then adds delta in place on this
-     * tensor's device. delta must match this tensor's shape and dtype.
+     * If no grad exists, adopts delta as the grad (the move drains delta's workers);
+     * the adopted buffer's dtype is the delta's, so a leaf's first backward() call
+     * pins its grad dtype to that call's assigned grad dtype. Otherwise, when the
+     * dtypes differ (a later call assigned a different grad dtype), delta is
+     * converted into the pinned buffer's dtype via the single grad-conversion rule
+     * (GradDType.h) — accumulation semantics are preserved across calls. Then syncs
+     * delta and the existing grad and adds delta in place on this tensor's device.
+     * delta must match this tensor's shape.
      * @brief Add a gradient contribution into this tensor's grad.
      * @param delta Gradient contribution; consumed (moved from or left drained).
      * @throws ErrorHandling::UnReachableCode if the device is neither CPU nor GPU.
@@ -44,6 +51,11 @@ namespace BeanTensor::Tensors {
         if (this->grad == nullptr) {
             this->grad = new Tensor(std::move(delta)); // the move drains delta's workers
             return;
+        }
+        if (delta.dtype != this->grad->dtype) {
+            // The existing buffer's dtype wins (leaf grads accumulate across
+            // calls); the incoming delta converts into it, in place.
+            detail::grad_convert_inplace(delta, this->grad->dtype);
         }
         delta.sync();
         // grad may still have queued writers (backward()'s async set_zero on
@@ -68,7 +80,7 @@ namespace BeanTensor::Tensors {
      * @param a First input tensor.
      * @param b Optional second input tensor; nullptr for a unary op.
      */
-    void Tensor::wire_node(void (*backward_fn)(Tensor*, Tensor**, size_t), const Tensor& a, const Tensor* b) {
+    void Tensor::wire_node(void (*backward_fn)(Tensor*, Tensor**, size_t, DataTypes::DType), const Tensor& a, const Tensor* b) {
         if (!a.requires_grad && (b == nullptr || !b->requires_grad)) {
             return;
         }
@@ -100,17 +112,21 @@ namespace BeanTensor::Tensors {
     }
 
     /**
-     * Walks the graph from this tensor, zeroes the grads of node-owning (intermediate)
-     * tensors so they hold only this call's delta (leaf grads accumulate across calls),
-     * seeds this tensor's grad with ones, then fires each node's backward function in
-     * topological order (Kahn's algorithm over consumer counts). Syncs every visited
-     * tensor and its grad before returning.
+     * Walks the graph from this tensor, rebuilds/zeros the grads of node-owning
+     * (intermediate) tensors in grad_dtype so they hold only this call's delta in
+     * this call's dtype (leaf grads accumulate across calls; a leaf buffer keeps
+     * the dtype its first call pinned), seeds this tensor's grad with ones in
+     * grad_dtype, then fires each node's backward function in topological order
+     * (Kahn's algorithm over consumer counts), handing every node the assigned
+     * grad_dtype. Syncs every visited tensor and its grad before returning.
      * @brief Reverse-mode backpropagation from this tensor.
+     * @param grad_dtype Dtype of the seed and every intermediate delta; free per
+     * call, any supported dtype, no engine default.
      * @throws ErrorHandling::NoGradient if this tensor neither requires grad nor has a node.
      * @throws ErrorHandling::DimensionTooLarge if a tensor's consumer count exceeds 255.
      * @throws ErrorHandling::UnReachableCode if not every node fires (a cycle).
      */
-    void Tensor::backward() {
+    void Tensor::backward(const DataTypes::DType grad_dtype) {
         if (!this->requires_grad && this->node == nullptr) {
             throw ErrorHandling::NoGradient();
         }
@@ -131,17 +147,21 @@ namespace BeanTensor::Tensors {
                 }
             }
         }
-        // Intermediate (node-owning) grads hold only this call's delta; leaf
-        // grads accumulate across calls.
+        // Intermediate (node-owning) grads hold only this call's delta, in this
+        // call's grad dtype: a stale buffer of a different dtype is dropped and
+        // rebuilt. Leaf grads accumulate across calls (see accumulate_grad).
         for (const auto t : visited) {
             if (t->node != nullptr) {
-                t->ensure_grad();
+                if (t->grad != nullptr && t->grad->dtype != grad_dtype) {
+                    t->zero_grad();
+                }
+                t->ensure_grad(grad_dtype);
                 t->grad->set_zero();
             }
         }
-        // Seed the root with ones.
-        this->ensure_grad();
-        auto ones = Tensor(std::vector<size_t>(this->shape, this->shape + this->ndim), this->dtype, this->device, false);
+        // Seed the root with ones in the assigned grad dtype.
+        this->ensure_grad(grad_dtype);
+        auto ones = Tensor(std::vector<size_t>(this->shape, this->shape + this->ndim), grad_dtype, this->device, false);
         ones.set_one();
         this->accumulate_grad(std::move(ones));
         // Kahn's algorithm over consumer counts: a node fires once every
@@ -156,7 +176,7 @@ namespace BeanTensor::Tensors {
                 continue;
             }
             for (auto i = size_t{0}; i < t->node->_n_inputs; ++i) {
-                auto* const in = t->node->_inputs[i];
+                const auto* in = t->node->_inputs[i];
                 if (in->node != nullptr) {
                     if (in->node->_n_outputs_pending == std::numeric_limits<uint8_t>::max()) {
                         throw ErrorHandling::DimensionTooLarge("backward graph fan-in exceeds 255");
@@ -177,14 +197,16 @@ namespace BeanTensor::Tensors {
         }
         auto fired = size_t{0};
         while (!ready.empty()) {
-            auto* const t = ready.back();
+            const auto* t = ready.back();
             ready.pop_back();
             auto* const n = t->node;
-            n->_backward_fn(t->grad, n->_inputs, n->_n_inputs);
+            n->_backward_fn(t->grad, n->_inputs, n->_n_inputs, grad_dtype);
             ++fired;
             for (auto i = size_t{0}; i < n->_n_inputs; ++i) {
-                auto* const in = n->_inputs[i];
-                if (in->node != nullptr && --in->node->_n_outputs_pending == 0) {
+                if (
+                    auto* const in = n->_inputs[i];
+                    in->node != nullptr && --in->node->_n_outputs_pending == 0
+                    ) {
                     ready.push_back(in);
                 }
             }

@@ -25,9 +25,10 @@ namespace BeanTensor::Tensors {
         void relu_g_gpu(const Tensor&, const Tensor&, Tensor&);
 
         /**
-         * @brief Backward trampoline for relu; matches Node::_backward_fn's signature.
+         * @brief Backward trampoline for relu; matches Node::_backward_fn's
+         * signature. The trailing DType is the calling backward()'s assigned grad dtype.
          */
-        void relu_g_node(Tensor*, Tensor**, size_t);
+        void relu_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
     }
 }
 

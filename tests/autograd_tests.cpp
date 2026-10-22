@@ -5,7 +5,10 @@
 // (fp64) of a full relu(x·W + b) -> softmax_ce chain, threaded/SIMD paths
 // (large tensors), every dtype pathway (fp16/bf16, packed x2, all integer
 // dtypes, int4x2), gradient accumulation across backward() calls, fan-out
-// DAGs, zero_grad, error paths, and — when a backend + device exist — the
+// DAGs, zero_grad, error paths, per-call grad dtype override
+// (backward(DType): fp64/fp16/fp32/int8/int32 on the same graph, with the
+// intermediate-delta probe and leaf/intermediate grad dtype checks), and —
+// when a backend + device exist — the
 // same checks on the GPU plus CPU/GPU gradient parity.
 #include <algorithm>
 #include <cmath>
@@ -20,6 +23,7 @@
 #include "Intrinsics/Native/DTypeConversions.h"
 #include "Math/Autograd/BiasAddG/BiasAddGKernels.h"
 #include "Math/Autograd/GradAcc/GradAccKernels.h"
+#include "Math/Autograd/GradDType.h"
 #include "Math/Autograd/ReluG/ReluGKernels.h"
 #include "Tensor/Tensor.h"
 
@@ -287,7 +291,7 @@ static void test_relu_g_f32(const Device dev) {
     x.set<float32_t>({0, 3}, std::numeric_limits<float32_t>::quiet_NaN());
     x.set<float32_t>({0, 4}, 1.0e-30f);
     auto y = x.relu();
-    y.backward();
+    y.backward(DType::Float32);
     CHECK(x.has_grad());
     auto& g = x.gradient();
     // A select: NaN and 0 inputs get exactly +0, positives pass dy = 1 through.
@@ -320,7 +324,7 @@ static void test_relu_g_threaded(const Device dev, const DType dt) {
         x.to(Device::GPU);
     }
     auto y = x.relu();
-    y.backward();
+    y.backward(dt);
     auto g = x.gradient().clone(true);
     if (dev == Device::GPU) {
         g.to(Device::CPU);
@@ -346,7 +350,7 @@ static void test_bias_add_g_f32(const Device dev) {
     x.set_zero();
     b.set_zero();
     auto y = x.bias_add(b);
-    y.backward();
+    y.backward(DType::Float32);
     for (auto c = size_t{0}; c < 4; ++c) {
         CHECK(idet::bit_cast_memcpy<uint32_t>(b.gradient().at<float32_t>({c})) == idet::bit_cast_memcpy<uint32_t>(3.0f));
         for (auto r = size_t{0}; r < 3; ++r) {
@@ -366,7 +370,7 @@ static void test_bias_add_g_threaded(const Device dev, const DType dt) {
     x.set_zero();
     b.set_zero();
     auto y = x.bias_add(b);
-    y.backward();
+    y.backward(dt);
     for (auto c = size_t{0}; c < cols; ++c) {
         CHECK(std::fabs(b.gradient().at<T>({c}) - static_cast<T>(rows)) <= T{0});
     }
@@ -394,7 +398,7 @@ static void run_gemm_g_case(const Device dev, const DType dt, const size_t batch
         set_flat<T>(b, b_shape, i, static_cast<T>(bv[i]));
     }
     auto y = a.matmul(b);
-    y.backward();
+    y.backward(dt);
     std::vector<float64_t> da;
     std::vector<float64_t> db;
     ref_gemm_grads_ones(av, bv, bt, m, k, n, da, db);
@@ -429,7 +433,7 @@ static void test_gemm_g_one_side(const Device dev) {
     a.set_one();
     b.set_one();
     auto y = a.matmul(b);
-    y.backward();
+    y.backward(DType::Float32);
     CHECK(a.has_grad());
     CHECK(!b.has_grad());
     CHECK(idet::bit_cast_memcpy<uint32_t>(a.gradient().at<float32_t>({1, 1})) == idet::bit_cast_memcpy<uint32_t>(2.0f));
@@ -454,7 +458,7 @@ static void run_sce_g_case(const Device dev, const DType dt, const DType it, con
         targets.set<I>({r}, static_cast<I>(tv[r]));
     }
     auto loss = logits.softmax_ce(targets);
-    loss.backward();
+    loss.backward(dt);
     CHECK(!targets.has_grad());
     const auto want = ref_sce_grad(lv, rows, cols, tv);
     auto bad = size_t{0};
@@ -493,7 +497,7 @@ static void test_softmax_ce_g_threaded(const Device dev) {
         targets.to(Device::GPU);
     }
     auto loss = logits.softmax_ce(targets);
-    loss.backward();
+    loss.backward(DType::Float64);
     const auto want = ref_sce_grad(lv, rows, cols, tv);
     auto bad = size_t{0};
     for (auto i = size_t{0}; i < rows * cols; i += 13) {
@@ -552,13 +556,13 @@ namespace {
      * this scope, as backward() requires. Returns the loss.
      */
     template<typename T>
-    T chain_forward_backward(Tensor& x, Tensor& w, Tensor& b, Tensor& t, const bool do_backward) {
+    T chain_forward_backward(Tensor& x, Tensor& w, Tensor& b, Tensor& t, const bool do_backward, const DType dt) {
         auto z = x.matmul(w);
         auto zb = z.bias_add(b);
         auto a = zb.relu();
         auto loss = a.softmax_ce(t);
         if (do_backward) {
-            loss.backward();
+            loss.backward(dt);
         }
         return loss.at<T>({0});
     }
@@ -571,7 +575,7 @@ static void test_chain_finite_difference() {
     Tensor b({Chain::h}, DType::Float64, Device::CPU, true);
     Tensor t({Chain::n}, DType::Int32, Device::CPU, false);
     c.load<float64_t>(x, w, b, t);
-    static_cast<void>(chain_forward_backward<float64_t>(x, w, b, t, true));
+    static_cast<void>(chain_forward_backward<float64_t>(x, w, b, t, true, DType::Float64));
 
     constexpr auto step = 1e-6;
     constexpr auto tol = 1e-7;
@@ -589,9 +593,9 @@ static void test_chain_finite_difference() {
                 }
             };
             put(orig + step);
-            const auto up = chain_forward_backward<float64_t>(x, w, b, t, false);
+            const auto up = chain_forward_backward<float64_t>(x, w, b, t, false, DType::Float64);
             put(orig - step);
-            const auto down = chain_forward_backward<float64_t>(x, w, b, t, false);
+            const auto down = chain_forward_backward<float64_t>(x, w, b, t, false, DType::Float64);
             put(orig);
             if (!near64(analytic, (up - down) / (2.0 * step), tol)) {
                 ++bad;
@@ -615,8 +619,8 @@ static void test_accumulation_and_zero_grad(const Device dev) {
     x.set<float32_t>({1, 0}, 2.0f);
     x.set<float32_t>({1, 1}, -2.0f);
     auto y = x.relu();
-    y.backward();
-    y.backward(); // leaf grads accumulate across calls
+    y.backward(DType::Float32);
+    y.backward(DType::Float32); // leaf grads accumulate across calls
     CHECK(idet::bit_cast_memcpy<uint32_t>(x.gradient().at<float32_t>({0, 0})) == idet::bit_cast_memcpy<uint32_t>(2.0f));
     CHECK(idet::bit_cast_memcpy<uint32_t>(x.gradient().at<float32_t>({0, 1})) == 0u);
     CHECK(idet::bit_cast_memcpy<uint32_t>(x.gradient().at<float32_t>({1, 0})) == idet::bit_cast_memcpy<uint32_t>(2.0f));
@@ -624,7 +628,7 @@ static void test_accumulation_and_zero_grad(const Device dev) {
     CHECK(idet::bit_cast_memcpy<uint32_t>(y.gradient().at<float32_t>({0, 0})) == idet::bit_cast_memcpy<uint32_t>(1.0f));
     x.zero_grad();
     CHECK(!x.has_grad());
-    y.backward();
+    y.backward(DType::Float32);
     CHECK(idet::bit_cast_memcpy<uint32_t>(x.gradient().at<float32_t>({1, 0})) == idet::bit_cast_memcpy<uint32_t>(1.0f));
 }
 
@@ -638,7 +642,7 @@ static void test_fan_out(const Device dev) {
     x.set<float64_t>({1, 1}, 4.0);
     auto h = x.relu();
     auto y = h.matmul(h);
-    y.backward();
+    y.backward(DType::Float64);
     // h = [[1,0],[3,4]]; G·hᵀ = [[1,7],[1,7]]; hᵀ·G = [[4,4],[4,4]]; dH = [[5,11],[5,11]].
     CHECK(near64(h.gradient().at<float64_t>({0, 0}), 5.0, 0.0));
     CHECK(near64(h.gradient().at<float64_t>({0, 1}), 11.0, 0.0));
@@ -652,7 +656,7 @@ static void test_no_gradient_errors() {
     auto threw = false;
     try {
         Tensor t({2}, DType::Float32);
-        t.backward();
+        t.backward(DType::Float32);
     } catch (const BeanTensor::ErrorHandling::NoGradient&) {
         threw = true;
     }
@@ -671,7 +675,7 @@ static void test_no_gradient_errors() {
     auto r = a.relu();
     threw = false;
     try {
-        r.backward();
+        r.backward(DType::Float32);
     } catch (const BeanTensor::ErrorHandling::NoGradient&) {
         threw = true;
     }
@@ -690,7 +694,7 @@ static void test_int_pathways(const Device dev, const DType dt) {
         x.set<T>({0, 0}, std::is_signed_v<T> ? static_cast<T>(-2) : T{0});
         x.set<T>({0, 1}, static_cast<T>(3));
         auto y = x.relu();
-        y.backward();
+        y.backward(dt);
         CHECK(x.gradient().at<T>({0, 0}) == (std::is_signed_v<T> ? T{0} : T{1}));
         CHECK(x.gradient().at<T>({0, 1}) == T{1});
     }
@@ -701,7 +705,7 @@ static void test_int_pathways(const Device dev, const DType dt) {
         x.set_zero();
         b.set_zero();
         auto y = x.bias_add(b);
-        y.backward();
+        y.backward(dt);
         for (auto c = size_t{0}; c < 3; ++c) {
             CHECK(b.gradient().at<T>({c}) == static_cast<T>(5));
             CHECK(x.gradient().at<T>({1, c}) == T{1});
@@ -720,7 +724,7 @@ static void test_int_pathways(const Device dev, const DType dt) {
             b.set<T>({i / 2, i % 2}, static_cast<T>(bv[i]));
         }
         auto y = a.matmul(b);
-        y.backward();
+        y.backward(dt);
         for (auto i = size_t{0}; i < 2; ++i) {
             for (auto k = size_t{0}; k < 3; ++k) {
                 CHECK(a.gradient().at<T>({i, k}) == static_cast<T>(bv[k * 2] + bv[k * 2 + 1]));
@@ -741,7 +745,7 @@ static void test_int_pathways(const Device dev, const DType dt) {
         targets.set<int32_t>({0}, 0);
         targets.set<int32_t>({1}, 2);
         auto loss = logits.softmax_ce(targets);
-        loss.backward();
+        loss.backward(dt);
         for (auto j = size_t{0}; j < 3; ++j) {
             CHECK(logits.gradient().at<T>({0, j}) == T{0});
             CHECK(logits.gradient().at<T>({1, j}) == T{0});
@@ -755,7 +759,7 @@ static void test_int4x2_pathways(const Device dev) {
         Tensor x({1, 1}, DType::Int4x2, dev, true);
         x.set<int4x2_t>({0, 0}, pack_int4(-2, 3));
         auto y = x.relu();
-        y.backward();
+        y.backward(DType::Int4x2);
         const auto g = x.gradient().at<int4x2_t>({0, 0});
         CHECK(int4_lo(g) == 0);
         CHECK(int4_hi(g) == 1);
@@ -767,7 +771,7 @@ static void test_int4x2_pathways(const Device dev) {
         x.set_zero();
         b.set_zero();
         auto y = x.bias_add(b);
-        y.backward();
+        y.backward(DType::Int4x2);
         for (auto c = size_t{0}; c < 2; ++c) {
             const auto g = b.gradient().at<int4x2_t>({c});
             CHECK(int4_lo(g) == 5);
@@ -787,7 +791,7 @@ static void test_int4x2_pathways(const Device dev) {
             b.set<int4x2_t>({i / 2, i % 2}, pack_int4(blo[i], bhi[i]));
         }
         auto y = a.matmul(b);
-        y.backward();
+        y.backward(DType::Int4x2);
         for (auto i = size_t{0}; i < 2; ++i) {
             for (auto k = size_t{0}; k < 2; ++k) {
                 const auto g = a.gradient().at<int4x2_t>({i, k});
@@ -807,7 +811,7 @@ static void test_int4x2_pathways(const Device dev) {
         targets.set<int8_t>({0}, 3);
         targets.set<int8_t>({1}, 0);
         auto loss = logits.softmax_ce(targets);
-        loss.backward();
+        loss.backward(DType::Int4x2);
         const auto g = logits.gradient().at<int4x2_t>({0, 1});
         CHECK(int4_lo(g) == 0);
         CHECK(int4_hi(g) == 0);
@@ -822,7 +826,7 @@ static void test_half_pathways(const Device dev, const DType dt) {
         x.set<H>({0, 0}, narrow_lane<H>(-1.0f));
         x.set<H>({0, 1}, narrow_lane<H>(2.0f));
         auto y = x.relu();
-        y.backward();
+        y.backward(dt);
         CHECK(idet::bit_cast_memcpy<uint16_t>(x.gradient().at<H>({0, 0})) == 0u);
         CHECK(idet::bit_cast_memcpy<uint16_t>(x.gradient().at<H>({0, 1})) == idet::bit_cast_memcpy<uint16_t>(narrow_lane<H>(1.0f)));
     }
@@ -833,7 +837,7 @@ static void test_half_pathways(const Device dev, const DType dt) {
         x.set_zero();
         b.set_zero();
         auto y = x.bias_add(b);
-        y.backward();
+        y.backward(dt);
         for (auto c = size_t{0}; c < 3; ++c) {
             CHECK(idet::bit_cast_memcpy<uint16_t>(b.gradient().at<H>({c})) == idet::bit_cast_memcpy<uint16_t>(narrow_lane<H>(4.0f)));
         }
@@ -851,7 +855,7 @@ static void test_half_pathways(const Device dev, const DType dt) {
             b.set<H>({i / 2, i % 2}, narrow_lane<H>(bv[i]));
         }
         auto y = a.matmul(b);
-        y.backward();
+        y.backward(dt);
         for (auto i = size_t{0}; i < 2; ++i) {
             for (auto k = size_t{0}; k < 3; ++k) {
                 CHECK(near64(widen_lane(a.gradient().at<H>({i, k})), bv[k * 2] + bv[k * 2 + 1], 0.0));
@@ -878,7 +882,7 @@ static void test_half_pathways(const Device dev, const DType dt) {
             targets.set<int16_t>({r}, static_cast<int16_t>(tv[r]));
         }
         auto loss = logits.softmax_ce(targets);
-        loss.backward();
+        loss.backward(dt);
         const auto want = ref_sce_grad(lv, rows, cols, tv);
         for (auto i = size_t{0}; i < rows * cols; ++i) {
             CHECK(near64(widen_lane(logits.gradient().at<H>({i / cols, i % cols})), want[i], 5e-3));
@@ -893,7 +897,7 @@ static void test_packed_pathways(const Device dev, const DType dt) {
         Tensor x({1, 1}, dt, dev, true);
         x.set<P>({0, 0}, pack_lanes<P, H>(-1.0f, 2.0f));
         auto y = x.relu();
-        y.backward();
+        y.backward(dt);
         const auto g = x.gradient().at<P>({0, 0});
         CHECK(idet::bit_cast_memcpy<uint32_t>(g) == (static_cast<uint32_t>(idet::bit_cast_memcpy<uint16_t>(narrow_lane<H>(1.0f))) << 16));
     }
@@ -904,7 +908,7 @@ static void test_packed_pathways(const Device dev, const DType dt) {
         x.set_zero();
         b.set_zero();
         auto y = x.bias_add(b);
-        y.backward();
+        y.backward(dt);
         for (auto c = size_t{0}; c < 3; ++c) {
             const auto g = b.gradient().at<P>({c});
             CHECK(near64(lane_lo_f32<H>(g), 4.0, 0.0));
@@ -922,7 +926,7 @@ static void test_packed_pathways(const Device dev, const DType dt) {
             b.set<P>({i / 2, i % 2}, pack_lanes<P, H>(bv[i], 2.0f * bv[i]));
         }
         auto y = a.matmul(b);
-        y.backward();
+        y.backward(dt);
         for (auto i = size_t{0}; i < 2; ++i) {
             for (auto k = size_t{0}; k < 2; ++k) {
                 const auto ga = a.gradient().at<P>({i, k});
@@ -952,7 +956,7 @@ static void test_packed_pathways(const Device dev, const DType dt) {
             targets.set<uint32_t>({r}, static_cast<uint32_t>(tv[r]));
         }
         auto loss = logits.softmax_ce(targets);
-        loss.backward();
+        loss.backward(dt);
         const auto want = ref_sce_grad(lv, rows, cols, tv);
         for (auto r = size_t{0}; r < rows; ++r) {
             for (auto e = size_t{0}; e < cols_store; ++e) {
@@ -1012,8 +1016,8 @@ static void test_chain_gpu_cpu_parity() {
     wg.to(Device::GPU);
     bg.to(Device::GPU);
     tg.to(Device::GPU);
-    const auto loss_cpu = chain_forward_backward<float64_t>(x, w, b, t, true);
-    const auto loss_gpu = chain_forward_backward<float64_t>(xg, wg, bg, tg, true);
+    const auto loss_cpu = chain_forward_backward<float64_t>(x, w, b, t, true, DType::Float64);
+    const auto loss_gpu = chain_forward_backward<float64_t>(xg, wg, bg, tg, true, DType::Float64);
     CHECK(near64(loss_cpu, loss_gpu, 1e-12));
     auto bad = size_t{0};
     for (auto i = size_t{0}; i < Chain::d * Chain::h; ++i) {
@@ -1038,17 +1042,253 @@ static void test_grad_follows_to() {
     Tensor x({2}, DType::Float32, Device::CPU, true);
     x.set_one();
     auto y = x.relu();
-    y.backward();
+    y.backward(DType::Float32);
     x.to(Device::GPU);
     CHECK(idet::bit_cast_memcpy<uint32_t>(x.gradient().at<float32_t>({1})) == idet::bit_cast_memcpy<uint32_t>(1.0f));
 }
 #endif
+
+// =====================================================================
+// Per-call grad dtype override: backward(DType)
+// =====================================================================
+
+namespace tdetail = BeanTensor::Tensors::detail;
+
+namespace {
+    /**
+     * matmul -> bias_add -> relu -> softmax_ce on 2x3 x 3x4 CPU tensors of one
+     * dtype; every intermediate is a member so it outlives backward(), as the
+     * graph's raw parent pointers require. Fixed seeds make two instances
+     * value-identical.
+     */
+    struct GradDtypeChain {
+        Tensor x;
+        Tensor w;
+        Tensor b;
+        Tensor t;
+        Tensor z;
+        Tensor zb;
+        Tensor a;
+        Tensor loss;
+        explicit GradDtypeChain(const DType dt)
+            : x({2, 3}, dt, Device::CPU, true),
+              w({3, 4}, dt, Device::CPU, true),
+              b({4}, dt, Device::CPU, true),
+              t({2}, DType::Int32, Device::CPU, false),
+              z({1}, dt, Device::CPU, false),
+              zb({1}, dt, Device::CPU, false),
+              a({1}, dt, Device::CPU, false),
+              loss({1}, dt, Device::CPU, false) {
+            x.random(-0.5, 0.5, 11);
+            w.random(-0.5, 0.5, 22);
+            b.random(-0.25, 0.25, 33);
+            t.set<int32_t>({0}, 1);
+            t.set<int32_t>({1}, 3);
+            z = x.matmul(w);
+            zb = z.bias_add(b);
+            a = zb.relu();
+            loss = a.softmax_ce(t);
+        }
+    };
+}
+
+// The SAME graph, backward() called with five different grad dtypes. The probe
+// (tdetail::grad_probe_count) records deltas delivered into INTERMEDIATE
+// (node-owning) tensors; the intermediate grads' own dtype is checked directly
+// via get_dtype(). Per call the intermediates a, zb and z each receive one
+// delta (softmax_ce_g -> a, relu_g -> zb, bias_add_g -> z); gemm_g feeds only
+// the leaves x/w, so exactly 3 intermediate deliveries land per call.
+static void test_grad_dtype_override_same_graph() {
+    auto c = GradDtypeChain(DType::Float32);
+    const auto cases = std::vector<DType>{DType::Float64, DType::Float16, DType::Float32, DType::Int8, DType::Int32};
+    for (const auto gd : cases) {
+        tdetail::grad_probe_reset();
+        c.loss.backward(gd);
+        CHECK(tdetail::grad_probe_count(gd) == 3);
+        for (const auto other : cases) {
+            if (other != gd) {
+                CHECK(tdetail::grad_probe_count(other) == 0);
+            }
+        }
+        // Intermediate (node-owning) grads hold THIS call's delta in THIS call's dtype.
+        CHECK(c.loss.gradient().get_dtype() == gd);
+        CHECK(c.a.gradient().get_dtype() == gd);
+        CHECK(c.zb.gradient().get_dtype() == gd);
+        CHECK(c.z.gradient().get_dtype() == gd);
+        CHECK(c.x.has_grad() && c.w.has_grad() && c.b.has_grad());
+        std::cout << "backward(" << BeanTensor::DataTypes::dtype_to_string(gd)
+                  << ") on fp32 graph: " << tdetail::grad_probe_count(gd)
+                  << " intermediate deltas carried the assigned dtype\n";
+    }
+    // Leaf grads accumulate across calls: the first call (Float64) pinned the
+    // buffer dtype; later calls' deltas converted into it.
+    CHECK(c.x.gradient().get_dtype() == DType::Float64);
+    CHECK(c.w.gradient().get_dtype() == DType::Float64);
+    CHECK(c.b.gradient().get_dtype() == DType::Float64);
+    auto bad = size_t{0};
+    for (auto i = size_t{0}; i < 6; ++i) {
+        if (!std::isfinite(get_flat<float64_t>(c.x.gradient(), {2, 3}, i))) {
+            ++bad;
+        }
+    }
+    for (auto i = size_t{0}; i < 12; ++i) {
+        if (!std::isfinite(get_flat<float64_t>(c.w.gradient(), {3, 4}, i))) {
+            ++bad;
+        }
+    }
+    for (auto i = size_t{0}; i < 4; ++i) {
+        if (!std::isfinite(c.b.gradient().at<float64_t>({i}))) {
+            ++bad;
+        }
+    }
+    CHECK(bad == 0);
+}
+
+// fp64 grads on an fp32 graph must match fp32 grads on the identical fp32
+// graph (same seeds): both differentiate the same fp32-valued forward, so only
+// rounding separates them.
+static void test_grad_dtype_override_numeric() {
+    auto c32 = GradDtypeChain(DType::Float32);
+    auto c64 = GradDtypeChain(DType::Float32);
+    c32.loss.backward(DType::Float32);
+    c64.loss.backward(DType::Float64);
+    CHECK(c32.x.gradient().get_dtype() == DType::Float32);
+    CHECK(c64.x.gradient().get_dtype() == DType::Float64);
+    auto bad = size_t{0};
+    for (auto i = size_t{0}; i < 6; ++i) {
+        if (!near64(static_cast<float64_t>(get_flat<float32_t>(c32.x.gradient(), {2, 3}, i)),
+                    get_flat<float64_t>(c64.x.gradient(), {2, 3}, i), 1e-5)) {
+            ++bad;
+        }
+    }
+    for (auto i = size_t{0}; i < 12; ++i) {
+        if (!near64(static_cast<float64_t>(get_flat<float32_t>(c32.w.gradient(), {3, 4}, i)),
+                    get_flat<float64_t>(c64.w.gradient(), {3, 4}, i), 1e-5)) {
+            ++bad;
+        }
+    }
+    for (auto i = size_t{0}; i < 4; ++i) {
+        if (!near64(static_cast<float64_t>(c32.b.gradient().at<float32_t>({i})),
+                    c64.b.gradient().at<float64_t>({i}), 1e-5)) {
+            ++bad;
+        }
+    }
+    CHECK(bad == 0);
+}
+
+// fp16 grads on an fp32 graph, and fp32 grads on an fp16 graph: leaf grads
+// carry the assigned dtype, intermediates carry it (probe), and values stay
+// within half-precision reach of the matching-dtype reference.
+static void test_grad_dtype_override_half_mixed() {
+    // fp16 grad dtype on an fp32 graph.
+    {
+        auto c = GradDtypeChain(DType::Float32);
+        auto ref = GradDtypeChain(DType::Float32);
+        tdetail::grad_probe_reset();
+        c.loss.backward(DType::Float16);
+        ref.loss.backward(DType::Float32);
+        CHECK(tdetail::grad_probe_count(DType::Float16) == 3);
+        CHECK(c.z.gradient().get_dtype() == DType::Float16);
+        CHECK(c.x.gradient().get_dtype() == DType::Float16);
+        CHECK(c.w.gradient().get_dtype() == DType::Float16);
+        CHECK(c.b.gradient().get_dtype() == DType::Float16);
+        auto bad = size_t{0};
+        for (auto i = size_t{0}; i < 12; ++i) {
+            const auto got = widen_lane(get_flat<float16_t>(c.w.gradient(), {3, 4}, i));
+            const auto want = get_flat<float32_t>(ref.w.gradient(), {3, 4}, i);
+            if (!near64(static_cast<float64_t>(got), static_cast<float64_t>(want), 1e-2)) {
+                ++bad;
+            }
+        }
+        for (auto i = size_t{0}; i < 4; ++i) {
+            const auto got = widen_lane(c.b.gradient().at<float16_t>({i}));
+            const auto want = ref.b.gradient().at<float32_t>({i});
+            if (!near64(static_cast<float64_t>(got), static_cast<float64_t>(want), 1e-2)) {
+                ++bad;
+            }
+        }
+        CHECK(bad == 0);
+    }
+    // fp32 grad dtype on an fp16 graph.
+    {
+        auto c = GradDtypeChain(DType::Float16);
+        auto ref = GradDtypeChain(DType::Float16);
+        tdetail::grad_probe_reset();
+        c.loss.backward(DType::Float32);
+        ref.loss.backward(DType::Float16);
+        CHECK(tdetail::grad_probe_count(DType::Float32) == 3);
+        CHECK(c.z.gradient().get_dtype() == DType::Float32);
+        CHECK(c.x.gradient().get_dtype() == DType::Float32);
+        CHECK(c.w.gradient().get_dtype() == DType::Float32);
+        CHECK(c.b.gradient().get_dtype() == DType::Float32);
+        auto bad = size_t{0};
+        for (auto i = size_t{0}; i < 12; ++i) {
+            const auto got = get_flat<float32_t>(c.w.gradient(), {3, 4}, i);
+            const auto want = widen_lane(get_flat<float16_t>(ref.w.gradient(), {3, 4}, i));
+            if (!near64(static_cast<float64_t>(got), static_cast<float64_t>(want), 1e-2)) {
+                ++bad;
+            }
+        }
+        for (auto i = size_t{0}; i < 4; ++i) {
+            const auto got = c.b.gradient().at<float32_t>({i});
+            const auto want = widen_lane(ref.b.gradient().at<float16_t>({i}));
+            if (!near64(static_cast<float64_t>(got), static_cast<float64_t>(want), 1e-2)) {
+                ++bad;
+            }
+        }
+        CHECK(bad == 0);
+    }
+}
+
+// Integer grad dtypes stay assignable: the full chain runs with int8 deltas
+// (wrap/clamp, NaN -> 0 through the single conversion rule), and an exact
+// truncation check on a minimal relu graph (seed 1 -> int32 1 through the
+// positive lane, 0 through the non-positive lane).
+static void test_grad_dtype_override_int_sanity() {
+    auto c = GradDtypeChain(DType::Float32);
+    tdetail::grad_probe_reset();
+    c.loss.backward(DType::Int8);
+    CHECK(tdetail::grad_probe_count(DType::Int8) == 3);
+    CHECK(c.z.gradient().get_dtype() == DType::Int8);
+    CHECK(c.x.gradient().get_dtype() == DType::Int8);
+    CHECK(c.w.gradient().get_dtype() == DType::Int8);
+    CHECK(c.b.gradient().get_dtype() == DType::Int8);
+    // Exact integer semantics on a one-node graph.
+    Tensor x({1, 2}, DType::Float32, Device::CPU, true);
+    x.set<float32_t>({0, 0}, 2.0f);
+    x.set<float32_t>({0, 1}, -1.0f);
+    auto y = x.relu();
+    y.backward(DType::Int32);
+    CHECK(x.gradient().get_dtype() == DType::Int32);
+    CHECK(x.gradient().at<int32_t>({0, 0}) == 1);
+    CHECK(x.gradient().at<int32_t>({0, 1}) == 0);
+    CHECK(y.gradient().at<int32_t>({0, 0}) == 1);
+}
+
+// sgd_step auto-converts a grad whose dtype differs from the weight dtype.
+static void test_sgd_step_mixed_dtype() {
+    Tensor w({2}, DType::Float32, Device::CPU, true);
+    w.set<float32_t>({0}, 1.5f);
+    w.set<float32_t>({1}, 2.5f);
+    auto y = w.relu();
+    y.backward(DType::Float64);
+    CHECK(w.gradient().get_dtype() == DType::Float64);
+    w.sgd_step(0.1);
+    w.sync();
+    CHECK(near64(static_cast<float64_t>(w.at<float32_t>({0})), 1.4, 1e-6));
+    CHECK(near64(static_cast<float64_t>(w.at<float32_t>({1})), 2.4, 1e-6));
+}
 
 int main() {
     test_simd_kernel_parity();
     run_device_suite(Device::CPU);
     test_chain_finite_difference();
     test_no_gradient_errors();
+    test_grad_dtype_override_same_graph();
+    test_grad_dtype_override_numeric();
+    test_grad_dtype_override_half_mixed();
+    test_grad_dtype_override_int_sanity();
+    test_sgd_step_mixed_dtype();
 #if defined(USE_HIP) || defined(USE_CUDA)
     if (gpu_available()) {
         run_device_suite(Device::GPU);
