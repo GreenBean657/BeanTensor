@@ -56,14 +56,14 @@ namespace BeanTensor::Tensors::detail {
         };
         using DType = DataTypes::DType;
         switch (idx.dtype) {
-            case DType::Int8: run(static_cast<const int8_t*>(idx_base)); break;
-            case DType::UInt8: run(static_cast<const uint8_t*>(idx_base)); break;
-            case DType::Int16: run(static_cast<const int16_t*>(idx_base)); break;
-            case DType::UInt16: run(static_cast<const uint16_t*>(idx_base)); break;
-            case DType::Int32: run(static_cast<const int32_t*>(idx_base)); break;
-            case DType::UInt32: run(static_cast<const uint32_t*>(idx_base)); break;
-            case DType::Int64: run(static_cast<const int64_t*>(idx_base)); break;
-            case DType::UInt64: run(static_cast<const uint64_t*>(idx_base)); break;
+            case DType::Int8: run(reinterpret_cast<const int8_t*>(idx_base)); break;
+            case DType::UInt8: run(reinterpret_cast<const uint8_t*>(idx_base)); break;
+            case DType::Int16: run(reinterpret_cast<const int16_t*>(idx_base)); break;
+            case DType::UInt16: run(reinterpret_cast<const uint16_t*>(idx_base)); break;
+            case DType::Int32: run(reinterpret_cast<const int32_t*>(idx_base)); break;
+            case DType::UInt32: run(reinterpret_cast<const uint32_t*>(idx_base)); break;
+            case DType::Int64: run(reinterpret_cast<const int64_t*>(idx_base)); break;
+            case DType::UInt64: run(reinterpret_cast<const uint64_t*>(idx_base)); break;
             [[unlikely]] default: throw ErrorHandling::UnReachableCode();
         }
     }
@@ -108,14 +108,14 @@ namespace BeanTensor::Tensors::detail {
         };
         using DType = DataTypes::DType;
         switch (idx.dtype) {
-            case DType::Int8: run(static_cast<const int8_t*>(idx_base)); break;
-            case DType::UInt8: run(static_cast<const uint8_t*>(idx_base)); break;
-            case DType::Int16: run(static_cast<const int16_t*>(idx_base)); break;
-            case DType::UInt16: run(static_cast<const uint16_t*>(idx_base)); break;
-            case DType::Int32: run(static_cast<const int32_t*>(idx_base)); break;
-            case DType::UInt32: run(static_cast<const uint32_t*>(idx_base)); break;
-            case DType::Int64: run(static_cast<const int64_t*>(idx_base)); break;
-            case DType::UInt64: run(static_cast<const uint64_t*>(idx_base)); break;
+            case DType::Int8: run(reinterpret_cast<const int8_t*>(idx_base)); break;
+            case DType::UInt8: run(reinterpret_cast<const uint8_t*>(idx_base)); break;
+            case DType::Int16: run(reinterpret_cast<const int16_t*>(idx_base)); break;
+            case DType::UInt16: run(reinterpret_cast<const uint16_t*>(idx_base)); break;
+            case DType::Int32: run(reinterpret_cast<const int32_t*>(idx_base)); break;
+            case DType::UInt32: run(reinterpret_cast<const uint32_t*>(idx_base)); break;
+            case DType::Int64: run(reinterpret_cast<const int64_t*>(idx_base)); break;
+            case DType::UInt64: run(reinterpret_cast<const uint64_t*>(idx_base)); break;
             [[unlikely]] default: throw ErrorHandling::UnReachableCode();
         }
     }
