@@ -177,6 +177,11 @@ set(CORE_SOURCES
         Math/Reductions/Argmax/Argmax.hpp
         Math/Reductions/Argmax/ArgmaxCPU.cpp
         Math/Shape/Reshape.cpp
+        Math/Shape/Indexing/Indexing.h
+        Math/Shape/Indexing/Indexing.hpp
+        Math/Shape/Indexing/IndexingShared.h
+        Math/Shape/Indexing/IndexingCPU.cpp
+        Math/Shape/Slice.cpp
         Math/Reductions/ReductionsShared.h
         Math/Reductions/ReductionsCudaShared.h
         Math/Reductions/ReductionsHipShared.h
@@ -261,6 +266,7 @@ if (USE_CUDA)
             Math/Autograd/BiasAddG/BiasAddGCUDA.cu
             Math/Autograd/SoftmaxCEG/SoftmaxCEGCUDA.cu
             Math/Autograd/TransposeLast2/TransposeLast2CUDA.cu
+            Math/Shape/Indexing/IndexingCUDA.cu
     )
 elseif (USE_HIP)
     list(APPEND CORE_SOURCES
@@ -277,6 +283,7 @@ elseif (USE_HIP)
             Math/Autograd/BiasAddG/BiasAddGHIP.cpp
             Math/Autograd/SoftmaxCEG/SoftmaxCEGHIP.cpp
             Math/Autograd/TransposeLast2/TransposeLast2HIP.cpp
+            Math/Shape/Indexing/IndexingHIP.cpp
     )
 elseif(USE_STRIX_HALO)
     message(FATAL_ERROR "NotImplementedError - Core Sources")
@@ -348,6 +355,7 @@ if(USE_HIP)
             Intrinsics/AVX2/DTypeConversions.cpp
             Intrinsics/AVX512/DTypeConversions.cpp
             Intrinsics/Dispatcher.cpp
+            Math/Shape/Indexing/IndexingHIP.cpp
             PROPERTIES LANGUAGE HIP
     )
     set_source_files_properties(
@@ -501,6 +509,7 @@ if (USE_CUDA)
             Math/Autograd/BiasAddG/BiasAddGCUDA.cu
             Math/Autograd/SoftmaxCEG/SoftmaxCEGCUDA.cu
             Math/Autograd/TransposeLast2/TransposeLast2CUDA.cu
+            Math/Shape/Indexing/IndexingCUDA.cu
         PROPERTIES LANGUAGE CUDA
     )
 endif()

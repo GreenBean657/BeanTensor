@@ -494,6 +494,23 @@ namespace BeanTensor::Tensors {
         [[nodiscard]] uint64_t argmax() const;
 
         /**
+         * Index of the maximum element along one axis, written as int64 indices into an output tensor.
+         * The output holds one index per slice orthogonal to `axis`, in this tensor's shape with the
+         * reduced dimension removed (a rank-1 input reduces to shape {1}). PyTorch-compatible NaN rule:
+         * NaN beats every non-NaN value, so the first NaN along the axis wins when present; otherwise the
+         * first strict maximum wins ties. Packed dtypes compare per element on the widened (lo, hi) lane
+         * pair, lexicographic, NaN-wins per lane. Accumulation order is backend-defined, but the indices
+         * themselves are exact and bit-identical across backends. Blocks before returning (same move-drain
+         * contract as argmax()/matmul()). The output never joins the autograd graph.
+         * @brief Index of the largest element along one axis.
+         * @param axis Axis to reduce; must be < ndim.
+         * @return Int64 tensor of per-slice argmax indices (input shape minus `axis`).
+         * @throws ErrorHandling::IndexOutOfRange axis out of bounds or tensor is empty.
+         * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
+         */
+        [[nodiscard]] Tensor argmax(const size_t axis) const;
+
+        /**
          * Add a rank-1 bias vector to every row of this tensor, out of place:
          * out[..., c] = this[..., c] + bias[c]. bias must have shape
          * {shape[ndim-1]}, share this tensor's dtype and device, and both must
@@ -877,6 +894,8 @@ namespace BeanTensor::Tensors {
         friend void detail::sum_gpu(const Tensor&, Tensor&);
         friend void detail::argmax_cpu(const Tensor&, uint64_t&);
         friend void detail::argmax_gpu(const Tensor&, uint64_t&);
+        friend void detail::argmax_axis_cpu(const Tensor&, Tensor&, size_t);
+        friend void detail::argmax_axis_gpu(const Tensor&, Tensor&, size_t);
         friend void detail::bias_add_cpu(const Tensor&, const Tensor&, Tensor&);
         friend void detail::bias_add_gpu(const Tensor&, const Tensor&, Tensor&);
         friend void detail::relu_cpu(const Tensor&, const Tensor&);

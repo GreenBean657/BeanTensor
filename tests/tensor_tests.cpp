@@ -1172,6 +1172,218 @@ static void verify_alignment() {
     static_assert(std::is_nothrow_move_assignable_v<BeanTensor::Tensors::Tensor>, "Tensor move assignment must stay noexcept, or be reviewed.");
 }
 
+// slice/split/index_select/gather/cat on CPU: view semantics, byte-movement,
+// and the documented error paths. Values are exact ints so at() compares bit-exact.
+static void test_indexing_cpu() {
+    // Values are exact small ints; compare via bit_cast to avoid -Werror=float-equal.
+    auto eq = [](float32_t a, float32_t b) {
+        return std::bit_cast<uint32_t>(a) == std::bit_cast<uint32_t>(b);
+    };
+    // ---- slice: leading-dim slice is contiguous; inner slice is not ----
+    Tensor t({2, 3}, DType::Float32);
+    for (auto r = size_t{0}; r < 2; ++r)
+        for (auto c = size_t{0}; c < 3; ++c)
+            t.set<float32_t>({r, c}, static_cast<float32_t>(r * 3 + c));
+    t.sync();
+
+    // Leading-dim slice -> contiguous view of shape {1,3}.
+    auto lead = t.slice({{0, 1}, {0, 3}});
+    CHECK(lead.is_same_shape(Tensor({1, 3})));
+    CHECK(eq(lead.at<float32_t>({0}), 0.0f));
+    CHECK(eq(lead.at<float32_t>({2}), 2.0f));
+
+    // Inner-dim slice -> non-contiguous view, but reads are offset-correct.
+    auto inner = t.slice({{0, 2}, {1, 3}});
+    CHECK(inner.is_same_shape(Tensor({2, 2})));
+    CHECK(eq(inner.at<float32_t>({0, 0}), 1.0f)); // maps to t(0,1)
+    CHECK(eq(inner.at<float32_t>({1, 1}), 5.0f)); // maps to t(1,2)
+
+    // slice is a live view: a write through the parent propagates into it.
+    t.set<float32_t>({0, 2}, 123.0f);
+    CHECK(eq(inner.at<float32_t>({0, 1}), 123.0f));
+
+    // Error paths.
+    bool threw = false;
+    try { [[maybe_unused]] auto bad = t.slice({{0, 2}}); } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { [[maybe_unused]] auto bad = t.slice({{0, 3}, {0, 3}}); } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) { threw = true; }
+    CHECK(threw);
+
+    // ---- split: equal chunks along an axis are slice views that round-trip with cat ----
+    Tensor grid({2, 3}, DType::Float32);
+    for (auto r = size_t{0}; r < 2; ++r)
+        for (auto c = size_t{0}; c < 3; ++c)
+            grid.set<float32_t>({r, c}, static_cast<float32_t>(r * 3 + c));
+    grid.sync();
+
+    auto cols = grid.split(1, 3); // three {2,1} column views
+    CHECK(cols.size() == 3);
+    for (auto i = size_t{0}; i < 3; ++i) {
+        CHECK(cols[i].is_same_shape(Tensor({2, 1})));
+        CHECK(cols[i].at<float32_t>({0}) == static_cast<float32_t>(i));
+        CHECK(cols[i].at<float32_t>({1}) == static_cast<float32_t>(3 + i));
+    }
+
+    // cat(split(axis, n), axis) reproduces the original.
+    auto rebuilt = Tensor::cat(cols, 1);
+    CHECK(rebuilt.is_same_shape(Tensor({2, 3})));
+    for (auto r = size_t{0}; r < 2; ++r)
+        for (auto c = size_t{0}; c < 3; ++c)
+            CHECK(rebuilt.at<float32_t>({r, c}) == static_cast<float32_t>(r * 3 + c));
+
+    // ---- index_select: pick columns by a rank-1 integer index tensor ----
+    Tensor src({2, 3}, DType::Float32);
+    for (auto r = size_t{0}; r < 2; ++r)
+        for (auto c = size_t{0}; c < 3; ++c)
+            src.set<float32_t>({r, c}, static_cast<float32_t>(r * 3 + c));
+    src.sync();
+
+    Tensor idx({3}, DType::Int64);
+    idx.set<int64_t>({0}, 2);
+    idx.set<int64_t>({1}, 0);
+    idx.set<int64_t>({2}, 2);
+    idx.sync();
+    auto sel = src.index_select(1, idx); // {2,3} axis-1 -> {2,3}; cols [2,0,2]
+    CHECK(sel.is_same_shape(Tensor({2, 3})));
+    CHECK(sel.at<float32_t>({0, 0}) == 2.0f);
+    CHECK(sel.at<float32_t>({0, 1}) == 0.0f);
+    CHECK(sel.at<float32_t>({0, 2}) == 2.0f);
+    CHECK(sel.at<float32_t>({1, 0}) == 5.0f);
+    CHECK(sel.at<float32_t>({1, 2}) == 5.0f);
+
+    // Duplicate + out-of-order indices are allowed and preserved in order.
+    Tensor dup({2}, DType::Int64);
+    dup.set<int64_t>({0}, 1);
+    dup.set<int64_t>({1}, 1);
+    dup.sync();
+    auto duped = src.index_select(1, dup); // {2,1}
+    CHECK(duped.is_same_shape(Tensor({2, 1})));
+    CHECK(duped.at<float32_t>({0}) == 1.0f);
+    CHECK(duped.at<float32_t>({1}) == 4.0f);
+
+    // ---- gather: same-rank integer index tensor ----
+    Tensor gidx({2, 2}, DType::Int64);
+    gidx.set<int64_t>({0, 0}, 0);
+    gidx.set<int64_t>({0, 1}, 2);
+    gidx.set<int64_t>({1, 0}, 1);
+    gidx.set<int64_t>({1, 1}, 0);
+    gidx.sync();
+    auto gat = src.gather(1, gidx); // {2,2}
+    CHECK(gat.is_same_shape(Tensor({2, 2})));
+    CHECK(gat.at<float32_t>({0, 0}) == 0.0f);
+    CHECK(gat.at<float32_t>({0, 1}) == 2.0f);
+    CHECK(gat.at<float32_t>({1, 0}) == 4.0f);
+    CHECK(gat.at<float32_t>({1, 1}) == 3.0f);
+
+    // ---- cat along axis 0 ----
+    Tensor a({2, 2}, DType::Float32);
+    Tensor b({2, 2}, DType::Float32);
+    for (auto i = size_t{0}; i < 4; ++i) {
+        a.set<float32_t>({i / 2, i % 2}, static_cast<float32_t>(i));
+        b.set<float32_t>({i / 2, i % 2}, static_cast<float32_t>(10 + i));
+    }
+    a.sync();
+    b.sync();
+    auto c0 = Tensor::cat({a, b}, 0); // {4,2}
+    CHECK(c0.is_same_shape(Tensor({4, 2})));
+    CHECK(c0.at<float32_t>({2, 0}) == 10.0f); // first element of b
+    CHECK(c0.at<float32_t>({3, 1}) == 13.0f);
+
+    // ---- error paths ----
+    threw = false;
+    try { src.index_select(5, idx); } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    Tensor notrank1({2, 2}, DType::Int64);
+    try { src.index_select(1, notrank1); } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    Tensor floatidx({2}, DType::Float32);
+    try { src.index_select(1, floatidx); } catch (const BeanTensor::ErrorHandling::MismatchedDTypes&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { Tensor::cat(std::vector<Tensor>{}, size_t{0}); } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) { threw = true; }
+    CHECK(threw);
+}
+
+// index_select/gather/cat on GPU must match the CPU results bit-for-bit.
+static void test_indexing_gpu() {
+#if defined(USE_HIP) || defined(USE_CUDA)
+    if (!gpu_available()) {
+        std::cout << "indexing GPU tests skipped (no device)\n";
+        return;
+    }
+    // Reference CPU tensors.
+    Tensor cpu_src({2, 3}, DType::Float32);
+    for (auto r = size_t{0}; r < 2; ++r)
+        for (auto c = size_t{0}; c < 3; ++c)
+            cpu_src.set<float32_t>({r, c}, static_cast<float32_t>(r * 3 + c));
+    cpu_src.sync();
+
+    auto gpu_src = cpu_src.clone(true);
+    gpu_src.to(Device::GPU);
+
+    // index_select parity.
+    Tensor cpu_idx({3}, DType::Int64);
+    cpu_idx.set<int64_t>({0}, 2);
+    cpu_idx.set<int64_t>({1}, 0);
+    cpu_idx.set<int64_t>({2}, 1);
+    cpu_idx.sync();
+    auto cpu_sel = cpu_src.index_select(1, cpu_idx);
+    Tensor gpu_idx = cpu_idx.clone(true);
+    gpu_idx.to(Device::GPU);
+    auto gpu_sel = gpu_src.index_select(1, gpu_idx);
+    gpu_sel.to(Device::CPU);
+    gpu_sel.sync();
+    cpu_sel.sync();
+    CHECK(cpu_sel.contents_to_string() == gpu_sel.contents_to_string());
+
+    // gather parity.
+    Tensor cpu_g({2, 2}, DType::Int64);
+    cpu_g.set<int64_t>({0, 0}, 0);
+    cpu_g.set<int64_t>({0, 1}, 2);
+    cpu_g.set<int64_t>({1, 0}, 1);
+    cpu_g.set<int64_t>({1, 1}, 0);
+    cpu_g.sync();
+    auto cpu_gat = cpu_src.gather(1, cpu_g);
+    Tensor gpu_g = cpu_g.clone(true);
+    gpu_g.to(Device::GPU);
+    auto gpu_gat = gpu_src.gather(1, gpu_g);
+    gpu_gat.to(Device::CPU);
+    gpu_gat.sync();
+    CHECK(cpu_gat.contents_to_string() == gpu_gat.contents_to_string());
+
+    // cat parity along axis 0 and axis 1.
+    Tensor cpu_a({2, 2}, DType::Float32);
+    Tensor cpu_b({2, 2}, DType::Float32);
+    for (auto i = size_t{0}; i < 4; ++i) {
+        cpu_a.set<float32_t>({i / 2, i % 2}, static_cast<float32_t>(i));
+        cpu_b.set<float32_t>({i / 2, i % 2}, static_cast<float32_t>(10 + i));
+    }
+    cpu_a.sync();
+    cpu_b.sync();
+    auto cpu_c0 = Tensor::cat({cpu_a, cpu_b}, 0);
+    auto cpu_c1 = Tensor::cat({cpu_a, cpu_b}, 1);
+    Tensor gpu_a = cpu_a.clone(true);
+    gpu_a.to(Device::GPU);
+    Tensor gpu_b = cpu_b.clone(true);
+    gpu_b.to(Device::GPU);
+    auto gpu_c0 = Tensor::cat({gpu_a, gpu_b}, 0);
+    auto gpu_c1 = Tensor::cat({gpu_a, gpu_b}, 1);
+    gpu_c0.to(Device::CPU);
+    gpu_c1.to(Device::CPU);
+    gpu_c0.sync();
+    gpu_c1.sync();
+    cpu_c0.sync();
+    cpu_c1.sync();
+    CHECK(cpu_c0.contents_to_string() == gpu_c0.contents_to_string());
+    CHECK(cpu_c1.contents_to_string() == gpu_c1.contents_to_string());
+#else
+    std::cout << "indexing GPU tests skipped (CPU-only build)\n";
+#endif
+}
+
 int main() {
     std::cout << "TensorTests" << std::endl;
     test_fills_cpu();
@@ -1190,6 +1402,8 @@ int main() {
     test_clone();
     test_at_cpu();
     test_move_defers_pending_error();
+    test_indexing_cpu();
+    test_indexing_gpu();
     test_gpu();
     if (failures == 0) {
         std::cout << "ALL TESTS PASSED" << std::endl;
