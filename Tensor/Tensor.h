@@ -2,7 +2,7 @@
  * @file Tensor.h
  * @author GreenBean
  * @brief Tensor class declaration: dtype, shape, device and buffer ownership.
- * @version 0.1
+ * @version 0.2
  * @date 2026-10-18
  */
 #pragma once
@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <future>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include "DTypes.h"
@@ -25,10 +26,12 @@
 #endif
 
 #include "Ops/TensorOps.h"
-#include "Math/LinearAlgebra/MatMul/Matmul.h"
-#include "Math/BasicOps/BasicOps.h"
-#include "Math/ComplexOps/ComplexOps.h"
-#include "Math/Autograd/Autograd.h"
+#include "Math/LinearAlgebra/LinearAlgebra.h" // IWYU pragma: keep
+#include "Math/Reductions/Reductions.h" // IWYU pragma: keep
+#include "Math/Activations/Activations.h" // IWYU pragma: keep
+#include "Math/Optimization/Optimization.h" // IWYU pragma: keep
+#include "Math/Autograd/Autograd.h" // IWYU pragma: keep
+#include "Math/Shape/Shape.h" // IWYU pragma: keep
 namespace BeanTensor::Tensors {
     class Tensor;
 }
@@ -52,14 +55,14 @@ namespace BeanTensor::Tensors {
         switch (device) {
             case Device::CPU: return "CPU";
             case Device::GPU: return "GPU";
-            default: return "Unknown";
+            [[unlikely]] default: return "Unknown";
         }
     };
 
     // Defined ahead of Tensor: Tensor's inline destructor and move assignment
     // delete their owned Node, which requires the complete type.
     struct alignas(8) Node {
-        void (*_backward_fn)(Tensor*, Tensor**, size_t);
+        void (*_backward_fn)(Tensor*, Tensor**, size_t, DataTypes::DType);
         Tensor* _inputs[BT_TENSOR_MAX_PARENTS];
         Tensor* _saved[BT_TENSOR_MAX_PARENTS];
         uint8_t _n_inputs;
@@ -74,10 +77,7 @@ namespace BeanTensor::Tensors {
             // a destructor cannot throw, and the buffers must be freed
             // regardless (the error already surfaced at sync() if anyone
             // was listening).
-            for (auto& f : this->pending_tasks) {
-                try { f.get(); } catch (...) {}
-            }
-            pending_tasks.clear();
+            (void)drain_tasks(); // OK to discard, a destructor doesn't need to care about errors - the Tensor is gone anyway.
             hand_off_children();
             detach_from_parents();
             kill_cpu_data();
@@ -101,12 +101,13 @@ namespace BeanTensor::Tensors {
 
         /**
          * Move constructor. The source's pending tasks are drained first
-         * (workers capture the source's address), then its buffers and view
-         * links are stolen and re-pointed to this object.
+         * (workers capture the source's address); a drained task error is
+         * re-queued on this tensor as a poisoned future, surfacing at this
+         * tensor's next sync() instead of being discarded. Buffers and view
+         * links are then stolen and re-pointed to this object.
          * @param o Source tensor, left empty and unlinked.
          */
-        // TODO: UNSTABLE COMMIT - Move constructor does not have any noexcept specification
-        Tensor(Tensor&& o) {
+        Tensor(Tensor&& o) noexcept {
             steal_from(o);
         }
 
@@ -114,15 +115,18 @@ namespace BeanTensor::Tensors {
         /**
          * Move assignment. Releases this tensor's current view links and
          * buffers (child views are handed their own copies, as in the
-         * destructor), then steals from the source.
+         * destructor), then steals from the source. Drained task errors —
+         * this tensor's own and the source's — are re-queued as poisoned
+         * futures, surfacing at the next sync() instead of being discarded.
          * @param o Source tensor, left empty and unlinked.
          */
-        // TODO: UNSTABLE COMMIT - Move assignment operator does not have any noexcept specification
-        Tensor& operator=(Tensor&& o)  {
+        Tensor& operator=(Tensor&& o) noexcept {
             if (this == &o) {
                 return *this;
             }
-            sync();
+            // Drain this tensor's own pending work first; its error is
+            // re-queued after the steal so it survives the overwrite.
+            const auto own_error = drain_tasks();
             hand_off_children();
             detach_from_parents();
             kill_cpu_data();
@@ -133,6 +137,9 @@ namespace BeanTensor::Tensors {
             this->node = nullptr;
             this->grad = nullptr;
             steal_from(o);
+            if (own_error.valid()) {
+                this->pending_tasks.insert(this->pending_tasks.begin(), own_error);
+            }
             return *this;
         }
 
@@ -234,7 +241,9 @@ namespace BeanTensor::Tensors {
          * The compute is queued asynchronously — failures materialize at
          * out.sync() — but the returned tensor is moved out, and the move
          * drains pending work, so matmul effectively blocks before returning
-         * (same as clone()).
+         * (same as clone()). A failure drained by that move is re-queued on
+         * the result as a poisoned future and still surfaces at its next
+         * sync(), per the async error contract.
          * @brief Matrix multiplication (rank-2) / batched matrix multiplication (rank-3).
          * @param other Right operand (k×n, or B×k×n with matching batch extent).
          * @return New tensor (m×n, or B×m×n) holding the product.
@@ -261,10 +270,117 @@ namespace BeanTensor::Tensors {
         [[nodiscard]] Tensor reshape(const std::vector<size_t>& new_shape);
 
         /**
+         * View into a per-dimension [start, end) box of this tensor. The
+         * result shares this tensor's buffer (view semantics: bumped offset,
+         * inherited strides, owns_data=false; writes through either are
+         * visible in both; if this tensor dies first, the view takes its own
+         * strided copy via notify_child). Slicing a leading dimension prefix
+         * (or any box whose inherited strides match the contiguous strides of
+         * its own shape) yields a contiguous view; slicing an inner dimension
+         * yields a non-contiguous one, which ops requiring contiguous operands
+         * reject with NotImplemented. Works identically on CPU and GPU — no
+         * data moves, so the call is synchronous.
+         * @brief Strided view over per-dimension [start, end) ranges.
+         * @param ranges One [start, end) pair per dimension; rank must match
+         * exactly. Empty ranges (start == end) yield a zero-extent dimension.
+         * @return View tensor sharing this tensor's buffer.
+         * @throws ErrorHandling::MismatchedShapes Range count differs from the rank.
+         * @throws ErrorHandling::IndexOutOfRange start > end or end > shape[d].
+         */
+        [[nodiscard]] Tensor slice(const std::vector<std::pair<size_t, size_t>>&);
+
+        /**
+         * Split into equal view chunks along an axis — the lazy inverse of
+         * cat: cat(split(axis, n), axis) reproduces this tensor. Each chunk
+         * is a slice view (leading-axis chunks are contiguous; inner-axis
+         * chunks are not). Synchronous and metadata-only, like slice.
+         * @brief Split into equal slice views along an axis.
+         * @param axis Axis to split along.
+         * @param sections Number of chunks; must be nonzero and divide shape[axis].
+         * @return One view per chunk, in axis order.
+         * @throws ErrorHandling::IndexOutOfRange axis out of bounds.
+         * @throws ErrorHandling::MismatchedShapes sections is 0 or does not divide shape[axis].
+         */
+        [[nodiscard]] std::vector<Tensor> split(size_t, size_t);
+
+        /**
+         * Select slabs along an axis by index: out[..., j, ...] =
+         * this[..., indices[j], ...]. indices must be rank-1, of a plain
+         * integer dtype (Int8..UInt64), contiguous, and on the same device;
+         * this tensor must be contiguous. The output is a fresh contiguous
+         * tensor with shape[axis] replaced by indices.numel (duplicate and
+         * out-of-order indices are allowed; the output never joins the
+         * autograd graph). CPU: the copy runs on the caller thread and index
+         * bounds errors throw directly. GPU: the copy queues onto the thread
+         * pool; the returned tensor is moved out, and the move drains pending
+         * work, so index_select effectively blocks before returning, with
+         * drained failures re-queued on the result and surfacing at its next
+         * sync() (same contract as matmul).
+         * @brief Select slabs along an axis by an index tensor.
+         * @param axis Axis to select along.
+         * @param indices Rank-1 integer index tensor.
+         * @return New tensor with the selected slabs.
+         * @throws ErrorHandling::IndexOutOfRange axis out of bounds, or an index
+         * outside [0, shape[axis]) (GPU: at sync()).
+         * @throws ErrorHandling::MismatchedShapes indices is not rank-1.
+         * @throws ErrorHandling::MismatchedDTypes indices dtype is not an integer kind.
+         * @throws ErrorHandling::MismatchedDevices Devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand.
+         */
+        [[nodiscard]] Tensor index_select(size_t, const Tensor&) const;
+
+        /**
+         * Gather elements along an axis: out[m] = this[m with m[axis] replaced
+         * by indices[m]]. indices must share this tensor's rank, be of a plain
+         * integer dtype, contiguous, on the same device, and its extents must
+         * not exceed this tensor's on the non-axis dimensions (PyTorch rule);
+         * the output takes the indices' shape and this tensor's dtype. The
+         * output never joins the autograd graph. Blocking contract matches
+         * index_select (CPU: direct throw; GPU: at the result's sync()).
+         * @brief Gather elements along an axis by an index tensor.
+         * @param axis Axis to gather along.
+         * @param indices Integer index tensor, same rank as this tensor.
+         * @return New tensor with the indices' shape.
+         * @throws ErrorHandling::IndexOutOfRange axis out of bounds, or an index
+         * outside [0, shape[axis]) (GPU: at sync()).
+         * @throws ErrorHandling::MismatchedShapes Rank mismatch, or an off-axis
+         * index extent exceeds the input's.
+         * @throws ErrorHandling::MismatchedDTypes indices dtype is not an integer kind.
+         * @throws ErrorHandling::MismatchedDevices Devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand.
+         */
+        [[nodiscard]] Tensor gather(size_t, const Tensor&) const;
+
+        /**
+         * Concatenate a list of tensors along an axis into a fresh contiguous
+         * tensor (the materializing inverse of split). Every input must share
+         * rank, dtype and device, have equal shapes except along the axis, and
+         * be contiguous; the output extent along the axis is the sum of the
+         * inputs'. The output never joins the autograd graph. Blocking
+         * contract matches index_select (CPU: caller thread; GPU: queued, then
+         * drained by the move out, failures surfacing at the result's sync()).
+         * @brief Concatenate tensors along an axis.
+         * @param tensors Non-empty list of inputs.
+         * @param axis Axis to concatenate along.
+         * @return New contiguous tensor holding all inputs in list order.
+         * @throws ErrorHandling::MismatchedShapes Empty list, rank mismatch, or
+         * off-axis shape mismatch.
+         * @throws ErrorHandling::IndexOutOfRange axis out of bounds.
+         * @throws ErrorHandling::MismatchedDTypes Dtypes differ.
+         * @throws ErrorHandling::MismatchedDevices Devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous input.
+         */
+        [[nodiscard]] static Tensor cat(const std::vector<Tensor>&, size_t);
+
+        /**
          * Plain SGD update, in place: w = w - lr * grad, elementwise. grad must
-         * share this tensor's shape, dtype, and device, and both must be
-         * contiguous. Async on both devices: the update queues onto the thread
-         * pool and errors materialize at sync().
+         * share this tensor's shape and device, and both must be contiguous.
+         * When grad's dtype differs from this tensor's (backward(DType) makes
+         * the grad dtype a per-call knob), a private copy of grad is converted
+         * into the weight dtype via the single grad-conversion rule
+         * (Math/Autograd/GradDType.h) and the update proceeds on the copy —
+         * no MismatchedDTypes throw. Async on both devices: the update queues
+         * onto the thread pool and errors materialize at sync().
          * Compute contract: fp32/fp64 use a single fma rounding (AVX2/AVX512
          * kernels when the CPU supports them); fp16/bf16 widen to fp32, fmaf,
          * narrow RNE; packed x2 dtypes compute per lane; integer dtypes compute
@@ -273,10 +389,10 @@ namespace BeanTensor::Tensors {
          * ones truncate down (asymmetric by up to 1), and a NaN update leaves
          * the integer element unchanged.
          * @brief In-place SGD: w -= lr * grad.
-         * @param grad Gradient tensor (same shape/dtype/device as this).
+         * @param grad Gradient tensor (same shape/device as this; any dtype —
+         * a mismatch converts a copy into this tensor's dtype).
          * @param lr Learning rate.
          * @throws ErrorHandling::MismatchedShapes Shapes differ.
-         * @throws ErrorHandling::MismatchedDTypes Dtypes differ.
          * @throws ErrorHandling::MismatchedDevices Devices differ.
          * @throws ErrorHandling::NotImplemented Non-contiguous operand.
          */
@@ -294,20 +410,28 @@ namespace BeanTensor::Tensors {
          * Backpropagate from this tensor through the recorded computation
          * graph. matmul/bias_add/relu/softmax_ce attach a Node to their output
          * whenever an input has requires_grad=true; backward() seeds this
-         * tensor's gradient with ones and fires every reachable node in
-         * reverse-topological order (Kahn's algorithm over
+         * tensor's gradient with ones IN grad_dtype and fires every reachable
+         * node in reverse-topological order (Kahn's algorithm over
          * Node::_n_outputs_pending), each node's _backward_fn accumulating the
-         * local gradients into its inputs' Tensor::grad. Leaf gradients
-         * (requires_grad tensors with no node) accumulate across calls;
-         * intermediate (node-owning) tensors' grads are zeroed at the start of
-         * every call, so they always hold the current call's delta. Parents
-         * are raw pointers: every tensor in the graph must outlive backward().
-         * Blocks before returning (syncs every visited tensor and gradient).
+         * local gradients into its inputs' Tensor::grad. grad_dtype is a free
+         * per-call parameter (any supported dtype, integer kinds included) with
+         * no engine default: the seed and every intermediate node-to-node delta
+         * ARE grad_dtype — backward nodes boundary-cast operands/deltas into it
+         * via the single rule in Math/Autograd/GradDType.h. Leaf gradients
+         * (requires_grad tensors with no node) accumulate across calls: the
+         * first call's buffer pins the leaf's grad dtype and later calls with a
+         * different grad_dtype convert their deltas into the pinned buffer
+         * dtype (same single rule). Intermediate (node-owning) tensors' grads
+         * are per-call: they are rebuilt in grad_dtype whenever it changed and
+         * zeroed at the start of every call, so they always hold the current
+         * call's delta in the current call's dtype. Parents are raw pointers:
+         * every tensor in the graph must outlive backward(). Blocks before
+         * returning (syncs every visited tensor and gradient).
          * @brief Run backpropagation from this tensor.
          * @throws ErrorHandling::NoGradient requires_grad is false and this
          * tensor has no graph node.
          */
-        void backward();
+        void backward(DataTypes::DType);
 
         /**
          * Drop this tensor's accumulated gradient (frees Tensor::grad).
@@ -324,11 +448,19 @@ namespace BeanTensor::Tensors {
         }
 
         /**
+         * @brief Read this tensor's dtype (e.g. to check a gradient buffer's dtype in tests).
+         * @return The tensor's DataTypes::DType.
+         */
+        [[nodiscard]] DataTypes::DType get_dtype() const {
+            return this->dtype;
+        }
+
+        /**
          * @brief Access the accumulated gradient tensor.
          * @return Reference to Tensor::grad.
          * @throws ErrorHandling::NoGradient No gradient accumulated yet.
          */
-        [[nodiscard]] Tensor& gradient() {
+        [[nodiscard]] Tensor& gradient() const {
             if (this->grad == nullptr) {
                 throw ErrorHandling::NoGradient();
             }
@@ -368,7 +500,9 @@ namespace BeanTensor::Tensors {
          * be contiguous. Async on both devices: the add queues onto the thread
          * pool and errors materialize at out.sync() — but the returned tensor
          * is moved out, and the move drains pending work, so bias_add
-         * effectively blocks before returning (same as matmul()).
+         * effectively blocks before returning (same as matmul()). A failure
+         * drained by that move is re-queued on the result as a poisoned
+         * future and still surfaces at its next sync().
          * Compute contract: fp32/fp64 add in their storage width (AVX2/AVX512
          * kernels when the CPU supports them, bit-identical to scalar);
          * fp16/bf16 widen to fp32, add, narrow RNE; packed x2 dtypes compute
@@ -377,7 +511,6 @@ namespace BeanTensor::Tensors {
          * has requires_grad=true the output joins the computation graph
          * (bias_add_G backward: dx = dy, dbias = column-sums of dy).
          * @brief Out-of-place per-row bias add along the last dimension.
-         * @param bias Rank-1 bias tensor (length = this tensor's last dimension).
          * @return New tensor, same shape/dtype/device as this.
          * @throws ErrorHandling::MismatchedShapes Bias is not rank-1 or its length differs from the last dimension.
          * @throws ErrorHandling::MismatchedDTypes Dtypes differ.
@@ -392,7 +525,9 @@ namespace BeanTensor::Tensors {
          * survives, on every backend and dispatch tier (the AVX kernels use
          * max(zero, x), whose unordered result is exactly x). Unsigned integer
          * dtypes copy through; int4x2 clamps per nibble. Async on both devices;
-         * effectively blocks before returning (same move-drain as bias_add).
+         * effectively blocks before returning (same move-drain as bias_add,
+         * with drained failures re-queued on the result, surfacing at its
+         * next sync()).
          * When this tensor has requires_grad=true the output joins the
          * computation graph (relu_G backward: dx = x > 0 ? dy : 0 — a select,
          * so a NaN input zeroes its gradient lane).
@@ -423,7 +558,6 @@ namespace BeanTensor::Tensors {
          * computation graph (softmax_ce_G backward: dlogits = (softmax -
          * onehot(target)) * dloss / rows; targets never require gradients).
          * @brief Mean softmax cross-entropy loss over rank-2 logits.
-         * @param targets Rank-1 integer tensor of class indices, one per row.
          * @return Shape-{1} tensor holding the mean loss.
          * @throws ErrorHandling::MismatchedShapes Logits not rank-2, empty, or targets rank/length mismatch.
          * @throws ErrorHandling::MismatchedDTypes Targets dtype is not an integer kind.
@@ -593,27 +727,60 @@ namespace BeanTensor::Tensors {
         }
 
         /**
+         * Drain pending pool work, awaiting every task, without throwing. The
+         * first task error is captured into a poisoned shared_future that
+         * rethrows at get(): the move operations re-queue it on the surviving
+         * tensor so it surfaces at that tensor's next sync(); the destructor
+         * discards it (unsynced errors are dropped on destroy). noexcept: a
+         * poison allocation failure terminates — the standard noexcept bargain.
+         * @return Poisoned future holding the first drained error, or invalid.
+         */
+        [[nodiscard]] std::shared_future<void> drain_tasks() const noexcept {
+            const auto tasks = std::move(pending_tasks);
+            pending_tasks.clear();
+            std::shared_future<void> deferred_error;
+            for (const auto& f : tasks) {
+                try {
+                    f.get();
+                } catch (...) {
+                    if (!deferred_error.valid()) {
+                        std::promise<void> poison;
+                        poison.set_exception(std::current_exception());
+                        deferred_error = poison.get_future().share();
+                    }
+                }
+            }
+            return deferred_error;
+        }
+
+        /**
          * Move workhorse: drain the source, steal every member, and re-point
          * the view links (parents' children lists and children's view_parents
-         * lists) from the source address to this object.
+         * lists) from the source address to this object. A drained task error
+         * is not discarded: it is prepended to this tensor's pending_tasks as
+         * a poisoned future, surfacing at this tensor's next sync() per the
+         * async error contract.
          * @param o Source tensor, left empty and unlinked.
          */
-        void steal_from(Tensor& o) {
-            o.sync(); // pending workers capture &o — must drain before the move
-            std::copy(o.shape, o.shape + BT_TENSOR_MAX_DIMS, this->shape);
-            std::copy(o.dims, o.dims + BT_TENSOR_MAX_DIMS, this->dims);
+        void steal_from(Tensor& o) noexcept {
+            const auto deferred_error = o.drain_tasks(); // pending workers capture &o — must drain before the steal
+            std::copy_n(o.shape, BT_TENSOR_MAX_DIMS, this->shape);
+            std::copy_n(o.dims, BT_TENSOR_MAX_DIMS, this->dims);
             this->ndim = o.ndim;
             this->numel = o.numel;
             this->nbytes = o.nbytes;
             this->offset = o.offset;
             this->pending_tasks = std::move(o.pending_tasks);
+            if (deferred_error.valid()) {
+                this->pending_tasks.insert(this->pending_tasks.begin(), deferred_error);
+            }
             this->convert_buffer = o.convert_buffer;
             this->convert_buffer_size = o.convert_buffer_size;
             this->stream = o.stream;
             this->data = o.data;
             this->grad = o.grad;
             this->node = o.node;
-            std::copy(o.parents, o.parents + BT_TENSOR_MAX_PARENTS, this->parents);
+            std::copy_n(o.parents, BT_TENSOR_MAX_PARENTS, this->parents);
             this->children = std::move(o.children);
             this->view_parents = std::move(o.view_parents);
             this->dtype = o.dtype;
@@ -663,17 +830,22 @@ namespace BeanTensor::Tensors {
         void write_element(size_t elem_offset, const void* src, size_t bytes);
 
         /**
-         * Lazily allocate this tensor's gradient buffer (same shape/dtype/
-         * device, zero-filled). No-op when grad already exists.
+         * Lazily allocate this tensor's gradient buffer (same shape and device,
+         * grad_dtype element type, zero-filled). No-op when grad already exists.
+         * @brief Lazily allocate a zeroed gradient tensor in grad_dtype.
          */
-        void ensure_grad();
+        void ensure_grad(DataTypes::DType);
 
         /**
          * Accumulate a fresh gradient contribution into Tensor::grad: the
          * first contribution's buffer is adopted (moved); later ones are
          * added elementwise per dtype contract (floats single-rounding add,
-         * halfs widen-add-narrow RNE, packed per lane, integers wrap).
-         * @param delta Fresh gradient contribution, same shape/dtype/device.
+         * halfs widen-add-narrow RNE, packed per lane, integers wrap). When
+         * the existing grad buffer's dtype differs from delta's (a leaf buffer
+         * pinned by an earlier backward() call), delta is first converted into
+         * the buffer's dtype via the single grad-conversion rule
+         * (Math/Autograd/GradDType.h).
+         * @param delta Fresh gradient contribution, same shape/device.
          */
         void accumulate_grad(Tensor&& delta);
 
@@ -688,7 +860,7 @@ namespace BeanTensor::Tensors {
          * @param a First op input.
          * @param b Second op input, when the op is binary.
          */
-        void wire_node(void (*backward_fn)(Tensor*, Tensor**, size_t), const Tensor& a, const Tensor* b = nullptr);
+        void wire_node(void (*backward_fn)(Tensor*, Tensor**, size_t, DataTypes::DType), const Tensor& a, const Tensor* b = nullptr);
 
         friend void detail::set_amount_gpu(Tensor& t, int64_t amount);
         friend void detail::set_amount_gpu(Tensor& t, uint64_t amount);
@@ -707,14 +879,14 @@ namespace BeanTensor::Tensors {
         friend void detail::argmax_gpu(const Tensor&, uint64_t&);
         friend void detail::bias_add_cpu(const Tensor&, const Tensor&, Tensor&);
         friend void detail::bias_add_gpu(const Tensor&, const Tensor&, Tensor&);
-        friend void detail::relu_cpu(const Tensor&, Tensor&);
-        friend void detail::relu_gpu(const Tensor&, Tensor&);
+        friend void detail::relu_cpu(const Tensor&, const Tensor&);
+        friend void detail::relu_gpu(const Tensor&, const Tensor&);
         friend void detail::softmax_ce_cpu(const Tensor&, const Tensor&, Tensor&);
         friend void detail::softmax_ce_gpu(const Tensor&, const Tensor&, Tensor&);
-        friend void detail::gemm_g_node(Tensor*, Tensor**, size_t);
-        friend void detail::bias_add_g_node(Tensor*, Tensor**, size_t);
-        friend void detail::relu_g_node(Tensor*, Tensor**, size_t);
-        friend void detail::softmax_ce_g_node(Tensor*, Tensor**, size_t);
+        friend void detail::gemm_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::bias_add_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::relu_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::softmax_ce_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::grad_acc_cpu(Tensor&, const Tensor&);
         friend void detail::grad_acc_gpu(Tensor&, const Tensor&);
         friend void detail::transpose_last2_cpu(const Tensor&, Tensor&);
@@ -725,6 +897,12 @@ namespace BeanTensor::Tensors {
         friend void detail::bias_add_g_gpu(const Tensor&, Tensor&);
         friend void detail::softmax_ce_g_cpu(const Tensor&, const Tensor&, const Tensor&, Tensor&);
         friend void detail::softmax_ce_g_gpu(const Tensor&, const Tensor&, const Tensor&, Tensor&);
+        friend void detail::index_select_cpu(const Tensor&, const Tensor&, Tensor&, size_t);
+        friend void detail::index_select_gpu(const Tensor&, const Tensor&, Tensor&, size_t);
+        friend void detail::gather_cpu(const Tensor&, const Tensor&, Tensor&, size_t);
+        friend void detail::gather_gpu(const Tensor&, const Tensor&, Tensor&, size_t);
+        friend void detail::cat_cpu(const std::vector<Tensor>&, Tensor&, size_t);
+        friend void detail::cat_gpu(const std::vector<Tensor>&, Tensor&, size_t);
         friend void Intrinsics::detail::launch_conv_cpu(Tensor& t, const DataTypes::DType& new_dtype, ConversionClampMethod method);
 
     };

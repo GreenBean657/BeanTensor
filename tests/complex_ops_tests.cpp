@@ -1,7 +1,7 @@
 /**
  * @file complex_ops_tests.cpp
  * @author GreenBean
- * @brief Complex ops tests - framework-free assertion suite.
+ * @brief Linear algebra and activation ops tests - framework-free assertion suite.
  * Covers bias_add, relu and softmax_ce across the full dtype family on CPU (SIMD tiers, FP32-compute pathway,
  * integer wrap semantics, int4x2 per-nibble), threaded paths, argument validation,
  * and the GPU kernels when a backend and device exist.
@@ -585,7 +585,7 @@ static void test_softmax_ce_target_oob() {
     CHECK(threw);
 }
 
-static void test_complexops_argument_validation() {
+static void test_ops_argument_validation() {
     {
         // bias length must match the last dimension.
         Tensor t({2, 3}, DType::Float32);
@@ -899,7 +899,7 @@ static void test_softmax_ce_gpu_target_oob() {
     CHECK(threw);
 }
 
-static void test_complexops_device_mismatch() {
+static void test_ops_device_mismatch() {
     bool threw = false;
     try {
         Tensor t({2, 2}, DType::Float32, Device::CPU);
@@ -934,7 +934,7 @@ int main() {
     test_softmax_ce_cpu_ints();
     test_softmax_ce_nan();
     test_softmax_ce_target_oob();
-    test_complexops_argument_validation();
+    test_ops_argument_validation();
 #if defined(USE_HIP) || defined(USE_CUDA)
     if (gpu_available()) {
         test_bias_add_gpu_f32();
@@ -945,16 +945,16 @@ int main() {
         test_softmax_ce_gpu();
         test_softmax_ce_gpu_packed();
         test_softmax_ce_gpu_target_oob();
-        test_complexops_device_mismatch();
+        test_ops_device_mismatch();
     } else {
-        std::cout << "GPU not available — skipping GPU complex-ops tests\n";
+        std::cout << "GPU not available — skipping GPU linear-algebra/activation tests\n";
     }
 #endif
 
     if (failures == 0) {
-        std::cout << "All complex-ops tests passed\n";
+        std::cout << "All linear-algebra/activation tests passed\n";
     } else {
-        std::cerr << failures << " complex-ops test(s) failed\n";
+        std::cerr << failures << " linear-algebra/activation test(s) failed\n";
     }
     return failures == 0 ? 0 : 1;
 }

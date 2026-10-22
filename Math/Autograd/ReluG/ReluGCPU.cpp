@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "Math/Autograd/AutogradShared.h"
+#include "Math/Autograd/GradDType.h"
 #include "Math/Autograd/ReluG/ReluG.h"
 #include "Math/Autograd/ReluG/ReluGKernels.h"
 #include "Tensor/Tensor.h"
@@ -329,15 +330,22 @@ namespace BeanTensor::Tensors::detail {
     }
 
     /**
-     * Skips work when x does not require grad; otherwise computes dx on x's device
-     * into a fresh tensor and hands it to x.accumulate_grad. Syncs output_grad and x first.
+     * Skips work when x does not require grad; otherwise computes dx into a fresh
+     * grad_dtype tensor and hands it to x.accumulate_grad. output_grad already
+     * carries grad_dtype; relu_g requires dy/x/dx in one dtype, so x is
+     * boundary-cast into grad_dtype (GradDType.h, the single conversion rule)
+     * when it differs — the x > 0 mask is then evaluated on the converted
+     * values (sign-exact for float<->float; integer grad dtypes see the
+     * truncated/clamped x, inherent to requesting an integer gradient chain).
+     * Syncs output_grad and x first.
      * @brief Backward trampoline for relu.
-     * @param output_grad Gradient of this node's output tensor.
+     * @param output_grad Gradient of this node's output tensor, in grad_dtype.
      * @param inputs Input tensors of the forward op.
      * @param n_inputs Number of entries in inputs.
+     * @param grad_dtype The calling backward()'s assigned gradient dtype.
      * @throws ErrorHandling::UnReachableCode if n_inputs is not 1 or the device is neither CPU nor GPU.
      */
-    void relu_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs) {
+    void relu_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
         if (n_inputs != 1) [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
@@ -347,13 +355,30 @@ namespace BeanTensor::Tensors::detail {
         }
         output_grad->sync();
         x.sync();
-        auto dx = Tensor(std::vector<size_t>(x.shape, x.shape + x.ndim), x.dtype, x.device, false);
-        if (x.device == Device::CPU) {
-            relu_g_cpu(*output_grad, x, dx);
-        } else if (x.device == Device::GPU) {
-            relu_g_gpu(*output_grad, x, dx);
-        } else [[unlikely]] {
-            throw ErrorHandling::UnReachableCode();
+        auto dx = Tensor(std::vector<size_t>(x.shape, x.shape + x.ndim), grad_dtype, x.device, false);
+        /**
+         * Captures output_grad, dx and x by reference (all outlive the call).
+         * Dispatches relu_g on x's device with dy = *output_grad, x = x_op, dx = dx.
+         * @brief Device dispatch for relu_g_node with the (possibly converted) operand.
+         * @param x_op Forward input in grad_dtype.
+         */
+        auto run = [&](const Tensor& x_op) {
+            if (x.device == Device::CPU) {
+                relu_g_cpu(*output_grad, x_op, dx);
+            } else if (x.device == Device::GPU) {
+                relu_g_gpu(*output_grad, x_op, dx);
+            } else [[unlikely]] {
+                throw ErrorHandling::UnReachableCode();
+            }
+        };
+        if (x.dtype == grad_dtype) {
+            run(x);
+        } else {
+            auto xg = grad_converted_copy(x, grad_dtype);
+            run(xg);
+        }
+        if (x.node != nullptr) {
+            grad_probe_hit(dx.dtype); // test hook: an intermediate received a delta
         }
         x.accumulate_grad(std::move(dx));
     }

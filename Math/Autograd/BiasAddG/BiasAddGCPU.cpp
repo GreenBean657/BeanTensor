@@ -15,6 +15,7 @@
 #include "Math/Autograd/AutogradShared.h"
 #include "Math/Autograd/BiasAddG/BiasAddG.h"
 #include "Math/Autograd/BiasAddG/BiasAddGKernels.h"
+#include "Math/Autograd/GradDType.h"
 #include "Tensor/Tensor.h"
 
 #include "Helpers/CPUThreading.h"
@@ -419,15 +420,19 @@ namespace BeanTensor::Tensors::detail {
 
     /**
      * inputs are (x, bias). dx is a copy of output_grad (the forward add is bias-only per
-     * element); dbias is the column-sum of output_grad. Each is computed only if its tensor
-     * requires grad, then handed to accumulate_grad. Syncs the tensors it reads.
+     * element) — output_grad already carries grad_dtype, so dx does too; dbias is the
+     * column-sum of output_grad, allocated in grad_dtype so the kernels (which dispatch
+     * on dy's dtype and store in it) build the delta directly in the assigned dtype.
+     * Each is computed only if its tensor requires grad, then handed to
+     * accumulate_grad. Syncs the tensors it reads.
      * @brief Backward trampoline for bias_add.
-     * @param output_grad Gradient of this node's output tensor.
+     * @param output_grad Gradient of this node's output tensor, in grad_dtype.
      * @param inputs Input tensors of the forward op.
      * @param n_inputs Number of entries in inputs.
+     * @param grad_dtype The calling backward()'s assigned gradient dtype.
      * @throws ErrorHandling::UnReachableCode if n_inputs is not 2 or the device is neither CPU nor GPU.
      */
-    void bias_add_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs) {
+    void bias_add_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
         if (n_inputs != 2) [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
@@ -438,17 +443,23 @@ namespace BeanTensor::Tensors::detail {
             x.sync();
             // dx = dy, exactly (the forward add per element is bias-only).
             auto dx = output_grad->clone(true);
+            if (x.node != nullptr) {
+                grad_probe_hit(dx.dtype); // test hook: an intermediate received a delta
+            }
             x.accumulate_grad(std::move(dx));
         }
         if (bias.requires_grad) {
             bias.sync();
-            auto dbias = Tensor(std::vector<size_t>(bias.shape, bias.shape + bias.ndim), bias.dtype, bias.device, false);
+            auto dbias = Tensor(std::vector<size_t>(bias.shape, bias.shape + bias.ndim), grad_dtype, bias.device, false);
             if (bias.device == Device::CPU) {
                 bias_add_g_cpu(*output_grad, dbias);
             } else if (bias.device == Device::GPU) {
                 bias_add_g_gpu(*output_grad, dbias);
             } else [[unlikely]] {
                 throw ErrorHandling::UnReachableCode();
+            }
+            if (bias.node != nullptr) {
+                grad_probe_hit(dbias.dtype);
             }
             bias.accumulate_grad(std::move(dbias));
         }

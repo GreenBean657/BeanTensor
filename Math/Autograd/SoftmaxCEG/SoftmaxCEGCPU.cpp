@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "Math/Autograd/AutogradShared.h"
+#include "Math/Autograd/GradDType.h"
 #include "Math/Autograd/SoftmaxCEG/SoftmaxCEG.h"
 #include "Tensor/Tensor.h"
 
@@ -409,14 +410,22 @@ namespace BeanTensor::Tensors::detail {
 
     /**
      * inputs are (logits, targets). Only logits receives a gradient (targets are
-     * class indices); skipped when logits does not require grad. Syncs the three tensors it reads.
+     * class indices); skipped when logits does not require grad. The kernel keeps
+     * its operand-dtype semantics — it runs on the logits in their OWN dtype (the
+     * integer-logit fp64 accumulation and the packed-lane class structure are
+     * forward-op contracts, not grad-precision choices), with the scalar dloss
+     * boundary-cast from grad_dtype into the logits dtype first (GradDType.h, the
+     * single conversion rule); the computed dlogits delta is then boundary-cast
+     * into grad_dtype so the delta leaving the node IS the assigned dtype.
+     * Syncs the three tensors it reads.
      * @brief Backward trampoline for softmax_ce.
-     * @param output_grad Gradient of this node's output tensor.
+     * @param output_grad Gradient of this node's output tensor, in grad_dtype.
      * @param inputs Input tensors of the forward op.
      * @param n_inputs Number of entries in inputs.
+     * @param grad_dtype The calling backward()'s assigned gradient dtype.
      * @throws ErrorHandling::UnReachableCode if n_inputs is not 2 or the device is neither CPU nor GPU.
      */
-    void softmax_ce_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs) {
+    void softmax_ce_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
         if (n_inputs != 2) [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
@@ -428,13 +437,18 @@ namespace BeanTensor::Tensors::detail {
         output_grad->sync();
         logits.sync();
         targets.sync();
+        auto dloss = grad_converted_copy(*output_grad, logits.dtype);
         auto dlogits = Tensor(std::vector<size_t>(logits.shape, logits.shape + logits.ndim), logits.dtype, logits.device, false);
         if (logits.device == Device::CPU) {
-            softmax_ce_g_cpu(*output_grad, logits, targets, dlogits);
+            softmax_ce_g_cpu(dloss, logits, targets, dlogits);
         } else if (logits.device == Device::GPU) {
-            softmax_ce_g_gpu(*output_grad, logits, targets, dlogits);
+            softmax_ce_g_gpu(dloss, logits, targets, dlogits);
         } else [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
+        }
+        grad_convert_inplace(dlogits, grad_dtype); // the delta leaves in the assigned dtype
+        if (logits.node != nullptr) {
+            grad_probe_hit(dlogits.dtype); // test hook: an intermediate received a delta
         }
         logits.accumulate_grad(std::move(dlogits));
     }

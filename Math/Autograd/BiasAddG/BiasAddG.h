@@ -25,9 +25,10 @@ namespace BeanTensor::Tensors {
         void bias_add_g_gpu(const Tensor&, Tensor&);
 
         /**
-         * @brief Backward trampoline for bias_add; matches Node::_backward_fn's signature.
+         * @brief Backward trampoline for bias_add; matches Node::_backward_fn's
+         * signature. The trailing DType is the calling backward()'s assigned grad dtype.
          */
-        void bias_add_g_node(Tensor*, Tensor**, size_t);
+        void bias_add_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
     }
 }
 

@@ -17,8 +17,9 @@ namespace BeanTensor::Tensors {
     namespace detail {
 
         /**
-         * @brief Backward trampoline for matmul (gemm); matches Node::_backward_fn's signature.
+         * @brief Backward trampoline for matmul (gemm); matches Node::_backward_fn's
+         * signature. The trailing DType is the calling backward()'s assigned grad dtype.
          */
-        void gemm_g_node(Tensor*, Tensor**, size_t);
+        void gemm_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
     }
 }
