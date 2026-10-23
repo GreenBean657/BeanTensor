@@ -3,7 +3,7 @@
  * @author GreenBean
  * @brief Tensor class declaration: dtype, shape, device and buffer ownership.
  * @version 0.3.3
- * @date 2026-10-18
+ * @date 2026-10-23
  */
 #pragma once
 #define BT_TENSOR_MAX_DIMS 3
@@ -33,6 +33,7 @@
 #include "Math/Compare/Compare.h" // IWYU pragma: keep
 #include "Math/Activations/Activations.h" // IWYU pragma: keep
 #include "Math/Optimization/Optimization.h" // IWYU pragma: keep
+#include "Math/Loss/Loss.h" // IWYU pragma: keep
 #include "Math/Autograd/Autograd.h" // IWYU pragma: keep
 #include "Math/Shape/Shape.h" // IWYU pragma: keep
 namespace BeanTensor::Tensors {
@@ -419,6 +420,50 @@ namespace BeanTensor::Tensors {
         void sgd_step(float64_t lr);
 
         /**
+         * Adam update from an explicit gradient, in place:
+         * m = beta1*m + (1-beta1)*grad, v = beta2*v + (1-beta2)*grad^2,
+         * w = w - lr * (m/(1-beta1^t)) / (sqrt(v/(1-beta2^t)) + epsilon),
+         * elementwise. The first/second moments m/v and the step counter t
+         * are optimizer-side state kept in an external map keyed by this
+         * tensor's address (Math/Optimization/Adam/AdamCPU.cpp) — Tensor's
+         * verified sizeof layout does not grow. The moments persist across
+         * calls; the map entry dies with the process, and this tensor must
+         * outlive the optimizer's use of it (the same raw-pointer discipline
+         * as backward()'s graph parents). Float kinds only (fp32/fp64 in
+         * their storage width, fp16/bf16 and the lanes of packed x2 widened
+         * to fp32 with RNE narrowing, exactly like sgd_update's compute
+         * contract); integer kinds throw ErrorHandling::NotImplemented, as
+         * Adam's moment math is float-only. When grad's dtype differs from
+         * this tensor's, a private copy converts into the weight dtype via
+         * the single grad-conversion rule (Math/Autograd/GradDType.h) — no
+         * MismatchedDTypes throw. Requires 0 <= beta1, beta2 < 1 and
+         * epsilon > 0 (documented contract). Async on both devices: the
+         * update queues onto the thread pool and errors materialize at sync().
+         * @brief In-place Adam moment step, w -= lr * m_hat / (sqrt(v_hat) + eps).
+         * @param grad Gradient tensor (same shape/device as this; any dtype —
+         * a mismatch converts a copy into this tensor's dtype).
+         * @param lr Learning rate.
+         * @param beta1 First-moment decay.
+         * @param beta2 Second-moment decay.
+         * @param epsilon Denominator epsilon.
+         * @throws ErrorHandling::MismatchedShapes Shapes differ.
+         * @throws ErrorHandling::MismatchedDevices Devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand, or a non-float dtype.
+         */
+        void adam_update(const Tensor&, float64_t, float64_t, float64_t, float64_t);
+
+        /**
+         * Adam step using this tensor's accumulated gradient: adam_update(*grad, lr, beta1, beta2, epsilon).
+         * @brief In-place Adam step from Tensor::grad.
+         * @param lr Learning rate.
+         * @param beta1 First-moment decay.
+         * @param beta2 Second-moment decay.
+         * @param epsilon Denominator epsilon.
+         * @throws ErrorHandling::NoGradient requires_grad is false or grad is null.
+         */
+        void adam_step(float64_t, float64_t, float64_t, float64_t);
+
+        /**
          * Backpropagate from this tensor through the recorded computation
          * graph. matmul/bias_add/relu/softmax_ce and the elementwise
          * add/sub/mul/div/pow (tensor-tensor and tensor-scalar) and exp/log
@@ -642,6 +687,37 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::IndexOutOfRange A target index is out of bounds (at sync()).
          */
         [[nodiscard]] Tensor softmax_ce(const Tensor&) const;
+
+        /**
+         * Mean squared error loss, rank-agnostic: out = mean of (this -
+         * target)^2 over ALL elements, any rank 1..BT_TENSOR_MAX_DIMS, reduced
+         * to a shape-{1} tensor of this tensor's dtype and device. this and
+         * target must have identical shapes and dtypes, share a device, and be
+         * contiguous (a loss does not broadcast). Accumulation follows the
+         * mean()/softmax_ce taxonomy: fp32 in fp32, fp64 in fp64, fp16/bf16
+         * widened to fp32 (RNE narrow on store), the lanes of packed x2 dtypes
+         * and the nibbles of int4x2 are logical elements of the same single
+         * scalar mean (dividing by 2 * numel, stored duplicated into both
+         * lanes like softmax_ce's mean), integer dtypes accumulate in fp64
+         * and narrow by clamp + truncate (a NaN mean stores 0). Float
+         * reduction order is backend-defined, so the loss is not guaranteed
+         * bit-identical between CPU/GPU tiers. Blocks before returning (the
+         * merge happens on the caller thread / a stream-syncing worker).
+         * When this tensor has requires_grad=true the output joins the
+         * computation graph (mse_g backward: d/dthis = 2*(this-target)/numel
+         * * dloss; targets never receive a gradient). A callable free-function
+         * form lives at BeanTensor::Loss::mse (Math/Loss/Loss.h) with an
+         * identical contract, for callers that do not go through a Tensor
+         * method (e.g. the Module layer).
+         * @brief Mean squared error: mean of (this - target)^2 over all elements.
+         * @param target Targets, identical shape/dtype/device, contiguous.
+         * @return Shape-{1} tensor holding the mean loss.
+         * @throws ErrorHandling::MismatchedShapes Shapes differ, or a tensor is empty.
+         * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
+         * @throws ErrorHandling::MismatchedDevices Operand devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand.
+         */
+        [[nodiscard]] Tensor mse(const Tensor&) const;
 
         /**
          * Broadcasting semantics (identical for add/sub/mul/div/pow): the two
@@ -1167,6 +1243,8 @@ namespace BeanTensor::Tensors {
         friend void detail::matmul_gpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::sgd_update_cpu(const Tensor&, const Tensor&, float64_t);
         friend void detail::sgd_update_gpu(const Tensor&, const Tensor&, float64_t);
+        friend void detail::adam_update_cpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&, float64_t, float64_t, float64_t, float64_t, float64_t, float64_t);
+        friend void detail::adam_update_gpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&, float64_t, float64_t, float64_t, float64_t, float64_t, float64_t);
         friend void detail::sum_cpu(const Tensor&, const Tensor&);
         friend void detail::sum_gpu(const Tensor&, const Tensor&);
         friend void detail::argmax_cpu(const Tensor&, uint64_t&);
@@ -1183,10 +1261,13 @@ namespace BeanTensor::Tensors {
         friend void detail::relu_gpu(const Tensor&, const Tensor&);
         friend void detail::softmax_ce_cpu(const Tensor&, const Tensor&, Tensor&);
         friend void detail::softmax_ce_gpu(const Tensor&, const Tensor&, const Tensor&);
+        friend void detail::mse_cpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::mse_gpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::gemm_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::bias_add_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::relu_g_node(const Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::softmax_ce_g_node(const Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::mse_g_node(const Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::ew_binary_g_node_impl(Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseOp);
         friend void detail::ew_scalar_g_node_impl(Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseOp);
         friend void detail::ew_unary_g_node_impl(Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseUnaryOp);
@@ -1204,6 +1285,8 @@ namespace BeanTensor::Tensors {
         friend void detail::bias_add_g_gpu(const Tensor&, const Tensor&);
         friend void detail::softmax_ce_g_cpu(const Tensor&, const Tensor&, const Tensor&, Tensor&);
         friend void detail::softmax_ce_g_gpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&);
+        friend void detail::mse_g_cpu(const Tensor&, const Tensor&, const Tensor&, Tensor&);
+        friend void detail::mse_g_gpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&);
         friend void detail::index_select_cpu(const Tensor&, const Tensor&, const Tensor&, size_t);
         friend void detail::index_select_gpu(const Tensor&, const Tensor&, const Tensor&, size_t);
         friend void detail::gather_cpu(const Tensor&, const Tensor&, const Tensor&, size_t);

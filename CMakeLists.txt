@@ -176,6 +176,20 @@ set(CORE_SOURCES
         Math/Optimization/SgdUpdate/SgdUpdateCPU.cpp
         Math/Optimization/SgdUpdate/SgdUpdateAVX2.cpp
         Math/Optimization/SgdUpdate/SgdUpdateAVX512.cpp
+        Math/Optimization/Adam/Adam.h
+        Math/Optimization/Adam/Adam.hpp
+        Math/Optimization/Adam/AdamCPU.cpp
+        Math/Loss/Loss.h
+        Math/Loss/Loss.cpp
+        Math/Loss/LossShared.h
+        Math/Loss/LossCudaShared.h
+        Math/Loss/LossHipShared.h
+        Math/Loss/Mse/Mse.h
+        Math/Loss/Mse/Mse.hpp
+        Math/Loss/Mse/MseCPU.cpp
+        Math/Loss/MseG/MseG.h
+        Math/Loss/MseG/MseG.hpp
+        Math/Loss/MseG/MseGCPU.cpp
         Math/Reductions/Sum/Sum.h
         Math/Reductions/Sum/Sum.hpp
         Math/Reductions/Sum/SumKernels.h
@@ -279,6 +293,9 @@ if (USE_CUDA)
             Math/Elementwise/ElementwiseCUDA.cu
             Math/LinearAlgebra/MatMul/MatmulCUDA.cu
             Math/Optimization/SgdUpdate/SgdUpdateCUDA.cu
+            Math/Optimization/Adam/AdamCUDA.cu
+            Math/Loss/Mse/MseCUDA.cu
+            Math/Loss/MseG/MseGCUDA.cu
             Math/Reductions/Sum/SumCUDA.cu
             Math/Reductions/Argmax/ArgmaxCUDA.cu
             Math/Compare/Equal/EqualCUDA.cu
@@ -299,6 +316,9 @@ elseif (USE_HIP)
             Math/Elementwise/ElementwiseHIP.cpp
             Math/LinearAlgebra/MatMul/MatmulHIP.cpp
             Math/Optimization/SgdUpdate/SgdUpdateHIP.cpp
+            Math/Optimization/Adam/AdamHIP.cpp
+            Math/Loss/Mse/MseHIP.cpp
+            Math/Loss/MseG/MseGHIP.cpp
             Math/Reductions/Sum/SumHIP.cpp
             Math/Reductions/Argmax/ArgmaxHIP.cpp
             Math/Reductions/Mean/MeanHIP.cpp
@@ -347,6 +367,13 @@ if(USE_HIP)
             Math/LinearAlgebra/MatMul/GemmAVX512.cpp
             Math/Optimization/SgdUpdate/SgdUpdateCPU.cpp
             Math/Optimization/SgdUpdate/SgdUpdateHIP.cpp
+            Math/Optimization/Adam/AdamCPU.cpp
+            Math/Optimization/Adam/AdamHIP.cpp
+            Math/Loss/Loss.cpp
+            Math/Loss/Mse/MseCPU.cpp
+            Math/Loss/Mse/MseHIP.cpp
+            Math/Loss/MseG/MseGCPU.cpp
+            Math/Loss/MseG/MseGHIP.cpp
             Math/Reductions/Sum/SumCPU.cpp
             Math/Reductions/Sum/SumHIP.cpp
             Math/Reductions/Argmax/ArgmaxCPU.cpp
@@ -409,6 +436,10 @@ if(USE_HIP)
             Math/LinearAlgebra/MatMul/MatmulHIP.cpp
             Math/Optimization/SgdUpdate/SgdUpdateCPU.cpp
             Math/Optimization/SgdUpdate/SgdUpdateHIP.cpp
+            Math/Optimization/Adam/AdamCPU.cpp
+            Math/Loss/Loss.cpp
+            Math/Loss/Mse/MseCPU.cpp
+            Math/Loss/MseG/MseGCPU.cpp
             Math/Reductions/Sum/SumCPU.cpp
             Math/Reductions/Sum/SumHIP.cpp
             Math/Reductions/Argmax/ArgmaxCPU.cpp
@@ -594,6 +625,9 @@ if (USE_CUDA)
             Math/Elementwise/ElementwiseCUDA.cu
             Math/LinearAlgebra/MatMul/MatmulCUDA.cu
             Math/Optimization/SgdUpdate/SgdUpdateCUDA.cu
+            Math/Optimization/Adam/AdamCUDA.cu
+            Math/Loss/Mse/MseCUDA.cu
+            Math/Loss/MseG/MseGCUDA.cu
             Math/Reductions/Sum/SumCUDA.cu
             Math/Reductions/Argmax/ArgmaxCUDA.cu
             Math/Compare/Equal/EqualCUDA.cu
@@ -766,6 +800,24 @@ if(BUILD_TESTING)
             -mf16c
     )
     add_test(NAME BeanTensorV5ElementwiseTests COMMAND BeanTensorV5ElementwiseTests)
+
+    add_executable(BeanTensorV5LossAdamTests tests/mse_adam_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5LossAdamTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5LossAdamTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5LossAdamTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5LossAdamTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5LossAdamTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5LossAdamTests COMMAND BeanTensorV5LossAdamTests)
 endif()
 
 if(USE_HIP)
