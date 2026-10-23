@@ -6,13 +6,12 @@
  * Divergent twin of Math/Compare/CompareHipShared.h — the two backends are
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same IEEE equality semantics (NaN never equal).
- * @version 0.1
+ * @version 0.1.1
  * @date 2026-10-22
  */
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
 
 namespace BeanTensor::Tensors::detail::compare_gpu {
     /**
@@ -33,6 +32,6 @@ namespace BeanTensor::Tensors::detail::compare_gpu {
      */
     [[nodiscard]] inline __host__ size_t grid_for(const size_t numel) {
         const auto blocks = (numel + BT_GPU_THREADS - 1) / BT_GPU_THREADS;
-        return blocks < 1 ? 1 : (blocks > BT_GPU_MAX_BLOCKS ? BT_GPU_MAX_BLOCKS : blocks);
+        return blocks < 1 ? 1 : blocks > BT_GPU_MAX_BLOCKS ? BT_GPU_MAX_BLOCKS : blocks;
     }
 }

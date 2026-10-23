@@ -3,11 +3,9 @@
  * @author GreenBean
  * @brief CPU backend for sum. Hosts the Tensor::sum method definition
  * (mirrors how Tensor::matmul lives in MatmulCPU.cpp).
- * @version 0.1
+ * @version 0.2
  * @date 2026-10-20
  */
-#include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <future>
 #include <type_traits>
@@ -19,7 +17,6 @@
 #include "Math/Reductions/Sum/SumKernels.h"
 #include "Tensor/Tensor.h"
 
-#include "Helpers/CPUThreading.h"
 #include "Helpers/Hardware.h"
 #include "Intrinsics/Native/DTypeConversions.h"
 
@@ -108,7 +105,7 @@ namespace BeanTensor::Tensors::detail {
          * @param end One past the last element summed.
          * @return {sum_lo, sum_hi} raw nibble sums.
          */
-        [[nodiscard]] inline std::pair<uint64_t, uint64_t> sum_range_i4x2(const int4x2_t* data, const size_t begin, const size_t end) {
+        [[nodiscard]] std::pair<uint64_t, uint64_t> sum_range_i4x2(const int4x2_t* data, const size_t begin, const size_t end) {
             auto total_lo = uint64_t{0};
             auto total_hi = uint64_t{0};
             for (auto i = begin; i < end; ++i) {
@@ -126,7 +123,7 @@ namespace BeanTensor::Tensors::detail {
      * @param t Input tensor.
      * @param out Single element output tensor, same dtype as t.
      */
-    void sum_cpu(const Tensor& t, Tensor& out) {
+    void sum_cpu(const Tensor& t, const Tensor& out) {
         if (t.device != Device::CPU || out.device != Device::CPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("CPU", stringify_device_source(t.device));
         }
@@ -138,8 +135,8 @@ namespace BeanTensor::Tensors::detail {
                 using SumFn = float32_t(*)(const float32_t*, size_t, size_t);
                 const SumFn kernel = Math::Reductions::sum_avx512_available()
                     ? Math::Reductions::sum_f32_range_avx512
-                    : (Math::Reductions::sum_avx2_available() ? Math::Reductions::sum_f32_range_avx2 : sum_range_scalar<float32_t>);
-                std::vector<float32_t> partials(IncludedCPUFeatures().threads, 0.0f);
+                    : Math::Reductions::sum_avx2_available() ? Math::Reductions::sum_f32_range_avx2 : sum_range_scalar<float32_t>;
+                std::vector partials(IncludedCPUFeatures().threads, 0.0f);
                 drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = kernel(data, b, e); }, t));
                 auto total = 0.0f;
                 for (const auto p : partials) {
@@ -153,8 +150,8 @@ namespace BeanTensor::Tensors::detail {
                 using SumFn = float64_t(*)(const float64_t*, size_t, size_t);
                 const SumFn kernel = Math::Reductions::sum_avx512_available()
                     ? Math::Reductions::sum_f64_range_avx512
-                    : (Math::Reductions::sum_avx2_available() ? Math::Reductions::sum_f64_range_avx2 : sum_range_scalar<float64_t>);
-                std::vector<float64_t> partials(IncludedCPUFeatures().threads, 0.0);
+                    : Math::Reductions::sum_avx2_available() ? Math::Reductions::sum_f64_range_avx2 : sum_range_scalar<float64_t>;
+                std::vector partials(IncludedCPUFeatures().threads, 0.0);
                 drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = kernel(data, b, e); }, t));
                 auto total = 0.0;
                 for (const auto p : partials) {
@@ -165,7 +162,7 @@ namespace BeanTensor::Tensors::detail {
             }
             case DType::Float16: {
                 const auto* data = static_cast<const float16_t*>(t.data) + t.offset;
-                std::vector<float32_t> partials(IncludedCPUFeatures().threads, 0.0f);
+                std::vector partials(IncludedCPUFeatures().threads, 0.0f);
                 drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_half<float16_t>(data, b, e); }, t));
                 auto total = 0.0f;
                 for (const auto p : partials) {
@@ -176,7 +173,7 @@ namespace BeanTensor::Tensors::detail {
             }
             case DType::BFloat16: {
                 const auto* data = static_cast<const bfloat16_t*>(t.data) + t.offset;
-                std::vector<float32_t> partials(IncludedCPUFeatures().threads, 0.0f);
+                std::vector partials(IncludedCPUFeatures().threads, 0.0f);
                 drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_half<bfloat16_t>(data, b, e); }, t));
                 auto total = 0.0f;
                 for (const auto p : partials) {
@@ -191,9 +188,9 @@ namespace BeanTensor::Tensors::detail {
                 drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_packed<float16x2_t>(data, b, e); }, t));
                 auto total_lo = 0.0f;
                 auto total_hi = 0.0f;
-                for (const auto& p : partials) {
-                    total_lo += p.first;
-                    total_hi += p.second;
+                for (const auto& [p_lo, p_hi] : partials) {
+                    total_lo += p_lo;
+                    total_hi += p_hi;
                 }
                 *static_cast<float16x2_t*>(out.data) = pack_lanes<float16x2_t>(
                     Intrinsics::detail::bit_cast_memcpy<uint16_t>(narrow_lane<float16_t>(total_lo)),
@@ -206,9 +203,9 @@ namespace BeanTensor::Tensors::detail {
                 drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_packed<bfloat16x2_t>(data, b, e); }, t));
                 auto total_lo = 0.0f;
                 auto total_hi = 0.0f;
-                for (const auto& p : partials) {
-                    total_lo += p.first;
-                    total_hi += p.second;
+                for (const auto& [p_lo, p_hi] : partials) {
+                    total_lo += p_lo;
+                    total_hi += p_hi;
                 }
                 *static_cast<bfloat16x2_t*>(out.data) = pack_lanes<bfloat16x2_t>(
                     Intrinsics::detail::bit_cast_memcpy<uint16_t>(narrow_lane<bfloat16_t>(total_lo)),
@@ -217,7 +214,7 @@ namespace BeanTensor::Tensors::detail {
             }
             case DType::Int8: case DType::UInt8: case DType::Int16: case DType::UInt16:
             case DType::Int32: case DType::UInt32: case DType::Int64: case DType::UInt64: {
-                std::vector<uint64_t> partials(IncludedCPUFeatures().threads, uint64_t{0});
+                std::vector partials(IncludedCPUFeatures().threads, uint64_t{0});
                 /**
                  * Runs sum_range_int<T> over every chunk and drains the futures.
                  * @brief Threaded integer sum for one concrete element type.
@@ -250,7 +247,7 @@ namespace BeanTensor::Tensors::detail {
                     case DType::Int32: *static_cast<int32_t*>(out.data) = static_cast<int32_t>(total); break;
                     case DType::UInt32: *static_cast<uint32_t*>(out.data) = static_cast<uint32_t>(total); break;
                     case DType::Int64: *static_cast<int64_t*>(out.data) = static_cast<int64_t>(total); break;
-                    case DType::UInt64: *static_cast<uint64_t*>(out.data) = static_cast<uint64_t>(total); break;
+                    case DType::UInt64: *static_cast<uint64_t*>(out.data) = total; break;
                     [[unlikely]] default: throw ErrorHandling::UnReachableCode();
                 }
                 break;
@@ -261,9 +258,9 @@ namespace BeanTensor::Tensors::detail {
                 drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_i4x2(data, b, e); }, t));
                 auto total_lo = uint64_t{0};
                 auto total_hi = uint64_t{0};
-                for (const auto& p : partials) {
-                    total_lo += p.first;
-                    total_hi += p.second;
+                for (const auto& [p_lo, p_hi] : partials) {
+                    total_lo += p_lo;
+                    total_hi += p_hi;
                 }
                 *static_cast<int4x2_t*>(out.data) = i4_pack(static_cast<int8_t>(total_lo & 0x0Fu), static_cast<int8_t>(total_hi & 0x0Fu));
                 break;

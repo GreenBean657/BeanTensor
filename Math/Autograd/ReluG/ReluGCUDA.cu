@@ -11,7 +11,6 @@
  */
 #if defined(USE_CUDA)
 #include <cstdint>
-#include <limits>
 #include <type_traits>
 
 #include <cuda_fp16.h>
@@ -30,7 +29,7 @@ namespace BeanTensor::Tensors::detail {
         /**
          * dx[i] = x[i] > 0 ? dy[i] : 0 - a select, not a multiply: NaN in x
          * fails the comparison and zeroes the lane, a selected dy is stored
-         * bit-exact (no rounding). Halfs compare widened; packed per lane;
+         * bit-exact (no rounding). float16's compare widened; packed per lane;
          * unsigned integers copy dy through; int4x2 per nibble. Launched as
          * grid_for(numel) blocks of BT_GPU_THREADS threads, grid-stride over numel.
          * @brief relu backward kernel (all dtypes).
@@ -44,7 +43,7 @@ namespace BeanTensor::Tensors::detail {
             const size_t tid = threadIdx.x + blockIdx.x * blockDim.x;
             const size_t stride = blockDim.x * gridDim.x;
             for (size_t i = tid; i < numel; i += stride) {
-                if constexpr (std::is_same_v<T, float32_t> || std::is_same_v<T, float64_t>) {
+                if constexpr (std::is_same_v<T, float32_t> || std::is_same_v<T, float64_t> || std::is_signed_v<T>) {
                     dx[i] = x[i] > T{0} ? dy[i] : T{0};
                 } else if constexpr (std::is_same_v<T, float16_t>) {
                     dx[i] = __half2float(x[i]) > 0.0f ? dy[i] : __float2half_rn(0.0f);
@@ -65,8 +64,6 @@ namespace BeanTensor::Tensors::detail {
                 } else if constexpr (std::is_same_v<T, int4x2_t>) {
                     dx[i] = dev_pack_int4(dev_int4_lo(x[i]) > 0 ? dev_int4_lo(dy[i]) : 0,
                                           dev_int4_hi(x[i]) > 0 ? dev_int4_hi(dy[i]) : 0);
-                } else if constexpr (std::is_signed_v<T>) {
-                    dx[i] = x[i] > T{0} ? dy[i] : T{0};
                 } else {
                     dx[i] = dy[i];
                 }
@@ -100,7 +97,7 @@ namespace BeanTensor::Tensors::detail {
      * @throws ErrorHandling::DirectFunctionCallOnWrongDataSource if any tensor is not on the GPU.
      * @throws ErrorHandling::NotImplemented (from the worker, at sync) for an unsupported dtype.
      */
-    __host__ void relu_g_gpu(const Tensor& dy, const Tensor& x, Tensor& dx) {
+    __host__ void relu_g_gpu(const Tensor& dy, const Tensor& x, const Tensor& dx) {
         if (dy.device != Device::GPU || x.device != Device::GPU || dx.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(x.device));
         }

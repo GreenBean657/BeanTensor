@@ -2,7 +2,7 @@
  * @file Equal.hpp
  * @author GreenBean
  * @brief CPU only build fall back for equal - throws and does nothing else.
- * @version 0.1
+ * @version 0.1.1
  * @date 2026-10-22
  */
 #pragma once
@@ -18,7 +18,7 @@ namespace BeanTensor::Tensors {
         /**
          * @brief CPU-only build stub for the GPU equal op. Always throws.
          */
-        inline void equal_gpu(const Tensor&, const Tensor&, Tensor&) {
+        inline void equal_gpu(const Tensor&, const Tensor&, const Tensor&) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
     }

@@ -2,7 +2,7 @@
  * @file MatmulCUDA.cu
  * @author GreenBean
  * @brief CUDA backend for matmul.
- * @version 0.1
+ * @version 0.1.1
  * @date 2026-10-18
  */
 
@@ -45,28 +45,28 @@ namespace BeanTensor::Tensors::detail {
          * @param v Packed fp16x2 element.
          * @return The lane value.
          */
-        __device__ __forceinline__ float16_t dev_lane_lo(const float16x2_t v) { return __low2half(v); }
+        __device__ __forceinline__ float16_t dev_lane_lo(const float16x2_t& v) { return __low2half(v); }
         /**
          * Device-side lane extraction for the lane-plane deinterleave.
          * @brief High fp16 lane of a packed fp16x2 element.
          * @param v Packed fp16x2 element.
          * @return The lane value.
          */
-        __device__ __forceinline__ float16_t dev_lane_hi(const float16x2_t v) { return __high2half(v); }
+        __device__ __forceinline__ float16_t dev_lane_hi(const float16x2_t& v) { return __high2half(v); }
         /**
          * Device-side lane extraction for the lane-plane deinterleave.
          * @brief Low bf16 lane of a packed bfloat16x2 element.
          * @param v Packed bfloat16x2 element.
          * @return The lane value.
          */
-        __device__ __forceinline__ bfloat16_t dev_lane_lo(const bfloat16x2_t v) { return __low2bfloat16(v); }
+        __device__ __forceinline__ bfloat16_t dev_lane_lo(const bfloat16x2_t& v) { return __low2bfloat16(v); }
         /**
          * Device-side lane extraction for the lane-plane deinterleave.
          * @brief High bf16 lane of a packed bfloat16x2 element.
          * @param v Packed bfloat16x2 element.
          * @return The lane value.
          */
-        __device__ __forceinline__ bfloat16_t dev_lane_hi(const bfloat16x2_t v) { return __high2bfloat16(v); }
+        __device__ __forceinline__ bfloat16_t dev_lane_hi(const bfloat16x2_t& v) { return __high2bfloat16(v); }
         /**
          * Device-side lane packing for the lane-plane interleave.
          * @brief Pack two fp16 lanes into one fp16x2 element.
@@ -102,7 +102,7 @@ namespace BeanTensor::Tensors::detail {
                 const auto bi = e / per_batch;
                 const auto r = e - bi * per_batch;
                 const auto v = src[e];
-                dst[(2 * bi) * per_batch + r] = dev_lane_lo(v);
+                dst[2 * bi * per_batch + r] = dev_lane_lo(v);
                 dst[(2 * bi + 1) * per_batch + r] = dev_lane_hi(v);
             }
         }
@@ -121,7 +121,7 @@ namespace BeanTensor::Tensors::detail {
             for (size_t e = tid; e < numel; e += stride) {
                 const auto bi = e / per_batch;
                 const auto r = e - bi * per_batch;
-                dst[e] = dev_pack_lanes(src[(2 * bi) * per_batch + r], src[(2 * bi + 1) * per_batch + r]);
+                dst[e] = dev_pack_lanes(src[2 * bi * per_batch + r], src[(2 * bi + 1) * per_batch + r]);
             }
         }
 
@@ -329,7 +329,7 @@ namespace BeanTensor::Tensors::detail {
         __host__ void launch_gemm_int_fallback(const void* a_data, const void* b_data, void* c_data,
                                       const size_t batch, const size_t m, const size_t k, const size_t n) {
             constexpr auto tile = size_t{16};
-            const dim3 block_dims(static_cast<uint32_t>(tile), static_cast<uint32_t>(tile), uint32_t{1});
+            constexpr dim3 block_dims(tile, tile, uint32_t{1});
             const dim3 grid_dims(static_cast<uint32_t>((n + tile - 1) / tile),
                                  static_cast<uint32_t>((m + tile - 1) / tile),
                                  static_cast<uint32_t>(batch));
@@ -417,7 +417,7 @@ namespace BeanTensor::Tensors::detail {
         __host__ void launch_gemm_int4x2_fallback(const void* a_data, const void* b_data, void* c_data,
                                          const size_t batch, const size_t m, const size_t k, const size_t n) {
             constexpr auto tile = size_t{16};
-            const dim3 block_dims(static_cast<uint32_t>(tile), static_cast<uint32_t>(tile), uint32_t{1});
+            constexpr dim3 block_dims(tile, tile, uint32_t{1});
             const dim3 grid_dims(static_cast<uint32_t>((n + tile - 1) / tile),
                                  static_cast<uint32_t>((m + tile - 1) / tile),
                                  static_cast<uint32_t>(batch));
@@ -493,7 +493,7 @@ namespace BeanTensor::Tensors::detail {
      * @param b Right operand, k x n or batch x k x n.
      * @param out Preallocated output, m x n or batch x m x n.
      */
-    __host__ void matmul_gpu(const Tensor& a, const Tensor& b, Tensor& out) {
+    __host__ void matmul_gpu(const Tensor& a, const Tensor& b, const Tensor& out) {
         if (a.device != Device::GPU || b.device != Device::GPU || out.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(a.device));
         }
@@ -505,7 +505,7 @@ namespace BeanTensor::Tensors::detail {
         const auto m = a.shape[a.ndim == 3 ? 1 : 0];
         const auto k = a.shape[a.ndim == 3 ? 2 : 1];
         const auto n = b.shape[b.ndim == 3 ? 2 : 1];
-        const auto int32_max = static_cast<size_t>(std::numeric_limits<int32_t>::max());
+        constexpr auto int32_max = static_cast<size_t>(std::numeric_limits<int32_t>::max());
         if (m > int32_max || k > int32_max || n > int32_max) {
             throw ErrorHandling::DimensionTooLarge("m/k/n exceed cuBLAS 32-bit indexing limits");
         }
@@ -514,8 +514,10 @@ namespace BeanTensor::Tensors::detail {
         }
         // The fallback kernels put the batch index on grid.z, whose launch
         // limit is 65535 on every supported GPU.
-        constexpr size_t grid_z_max = 65535;
-        if (dtype_uses_int_fallback(a.dtype) && batch > grid_z_max) {
+        if (
+            constexpr size_t grid_z_max = 65535;
+            dtype_uses_int_fallback(a.dtype) && batch > grid_z_max
+            ) {
             throw ErrorHandling::DimensionTooLarge("batch count exceeds the GPU grid.z launch limit (65535)");
         }
         auto a_data = a.data;

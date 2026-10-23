@@ -2,7 +2,7 @@
  * @file GemmAVX512.cpp
  * @author GreenBean
  * @brief AVX512F GEMM row-range kernels.
- * @version 0.1
+ * @version 0.1.1
  * @date 2026-10-18
  */
 #include "Math/LinearAlgebra/MatMul/GemmKernels.h"
@@ -154,7 +154,7 @@ namespace BeanTensor::Math::LinearAlgebra {
          */
         [[nodiscard]] __mmask32 col_mask16(const size_t cols) noexcept {
             assert(cols <= 16 && "col_mask16: cols must be in [0, 16]"); //Private namespace - compile out is OK.
-            return static_cast<__mmask32>((uint32_t{1} << cols) - 1u);
+            return (uint32_t{1} << cols) - 1u;
         }
 
         /**
@@ -165,7 +165,7 @@ namespace BeanTensor::Math::LinearAlgebra {
          */
         [[nodiscard]] __mmask32 col_mask32(const size_t cols) noexcept {
             assert(cols <= 16 && "col_mask32: cols must be in [0, 16]"); //Private namespace - compile out is OK.
-            return static_cast<__mmask32>(cols >= 16 ? 0xFFFFFFFFu : ((uint32_t{1} << (2 * cols)) - 1u));
+            return cols >= 16 ? 0xFFFFFFFFu : (uint32_t{1} << (2 * cols)) - 1u;
         }
 
         /**
@@ -177,7 +177,7 @@ namespace BeanTensor::Math::LinearAlgebra {
         [[nodiscard]] uint32_t load_bf16_pair(const bfloat16_t* p) {
             static_assert(sizeof(bfloat16_t) == sizeof(uint16_t));
             auto v = uint32_t{0};
-            memcpy(&v, static_cast<const void*>(p), sizeof v);
+            memcpy(&v, p, sizeof v);
             return v;
         }
     }
@@ -205,7 +205,7 @@ namespace BeanTensor::Math::LinearAlgebra {
             const auto* a3 = a2 + k;
             for (auto j = size_t{0}; j < n; j += 16) {
                 const auto remaining = n - j;
-                const auto mask = static_cast<__mmask16>(remaining >= 16 ? 0xFFFFu : ((uint32_t{1} << remaining) - 1u));
+                const auto mask = static_cast<__mmask16>(remaining >= 16 ? 0xFFFFu : (uint32_t{1} << remaining) - 1u);
                 auto acc0 = _mm512_setzero_ps();
                 auto acc1 = _mm512_setzero_ps();
                 auto acc2 = _mm512_setzero_ps();
@@ -227,7 +227,7 @@ namespace BeanTensor::Math::LinearAlgebra {
             const auto* a0 = a + i * k;
             for (auto j = size_t{0}; j < n; j += 16) {
                 const auto remaining = n - j;
-                const auto mask = static_cast<__mmask16>(remaining >= 16 ? 0xFFFFu : ((uint32_t{1} << remaining) - 1u));
+                const auto mask = static_cast<__mmask16>(remaining >= 16 ? 0xFFFFu : (uint32_t{1} << remaining) - 1u);
                 auto acc = _mm512_setzero_ps();
                 for (auto kk = size_t{0}; kk < k; ++kk) {
                     acc = _mm512_fmadd_ps(_mm512_set1_ps(a0[kk]), _mm512_maskz_loadu_ps(mask, b + kk * n + j), acc);
@@ -259,7 +259,7 @@ namespace BeanTensor::Math::LinearAlgebra {
             const auto* a3 = a2 + k;
             for (auto j = size_t{0}; j < n; j += 8) {
                 const auto remaining = n - j;
-                const auto mask = static_cast<__mmask8>(remaining >= 8 ? 0xFFu : ((uint32_t{1} << remaining) - 1u));
+                const auto mask = static_cast<__mmask8>(remaining >= 8 ? 0xFFu : (uint32_t{1} << remaining) - 1u);
                 auto acc0 = _mm512_setzero_pd();
                 auto acc1 = _mm512_setzero_pd();
                 auto acc2 = _mm512_setzero_pd();
@@ -281,7 +281,7 @@ namespace BeanTensor::Math::LinearAlgebra {
             const auto* a0 = a + i * k;
             for (auto j = size_t{0}; j < n; j += 8) {
                 const auto remaining = n - j;
-                const auto mask = static_cast<__mmask8>(remaining >= 8 ? 0xFFu : ((uint32_t{1} << remaining) - 1u));
+                const auto mask = static_cast<__mmask8>(remaining >= 8 ? 0xFFu : (uint32_t{1} << remaining) - 1u);
                 auto acc = _mm512_setzero_pd();
                 for (auto kk = size_t{0}; kk < k; ++kk) {
                     acc = _mm512_fmadd_pd(_mm512_set1_pd(a0[kk]), _mm512_maskz_loadu_pd(mask, b + kk * n + j), acc);
@@ -324,7 +324,7 @@ namespace BeanTensor::Math::LinearAlgebra {
             } else {
                 alignas(32) uint16_t tmp[16];
                 _mm256_storeu_si256(reinterpret_cast<__m256i*>(tmp), narrowed);
-                memcpy(dst, tmp, cols * sizeof(uint16_t));
+                memcpy(reinterpret_cast<uint16_t*>(dst), tmp, cols * sizeof(uint16_t));
             }
         };
         auto i = row_begin;
@@ -482,11 +482,11 @@ namespace BeanTensor::Math::LinearAlgebra {
             const auto hi = reinterpret_cast<__m256i>(_mm512_cvtneps_pbh(acc_hi));
             const auto zipped = _mm512_permutexvar_epi16(zip_store, _mm512_inserti64x4(_mm512_castsi256_si512(lo), hi, 1));
             if (cols >= 16) {
-                _mm512_storeu_si512(reinterpret_cast<__m512i*>(dst), zipped);
+                _mm512_storeu_si512(dst, zipped);
             } else {
                 alignas(64) uint16_t tmp[32];
                 _mm512_storeu_si512(reinterpret_cast<__m512i*>(tmp), zipped);
-                memcpy(static_cast<void*>(dst), tmp, cols * sizeof(uint32_t));
+                memcpy(reinterpret_cast<uint32_t*>(dst), tmp, cols * sizeof(uint32_t));
             }
         };
         auto i = row_begin;
@@ -606,7 +606,7 @@ namespace BeanTensor::Math::LinearAlgebra {
      */
     void gemm_f16_rows_avx512f16c(const float16_t* a, const float16_t* b, float16_t* c,
                                   const size_t k, const size_t n, const size_t row_begin, const size_t row_end) {
-        const auto k16 = (k + 15) & ~size_t{15};
+        const auto k16 = k + 15 & ~size_t{15};
         std::vector<float32_t> panel_storage(4 * k16);
         /**
          * Widens one A row of fp16 into FP32 in 16-lane steps, so the inner loop broadcasts plain floats.
@@ -620,7 +620,7 @@ namespace BeanTensor::Math::LinearAlgebra {
         const auto load_panel = [](const float16_t* src, float32_t* dst, const size_t kk_max) {
             for (auto kk = size_t{0}; kk < kk_max; kk += 16) {
                 const auto rem = kk_max - kk;
-                const auto mask = static_cast<__mmask32>(rem >= 16 ? 0xFFFFu : ((uint32_t{1} << rem) - 1u));
+                const auto mask = rem >= 16 ? 0xFFFFu : (uint32_t{1} << rem) - 1u;
                 const auto h = _mm512_castsi512_si256(_mm512_maskz_loadu_epi16(mask, src + kk));
                 _mm512_storeu_ps(dst + kk, _mm512_cvtph_ps(h));
             }
@@ -769,11 +769,11 @@ namespace BeanTensor::Math::LinearAlgebra {
                                                     _mm256_cvtps_ph(_mm512_extractf32x8_ps(acc_hi, 1), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), 1);
             const auto zipped = _mm512_permutexvar_epi16(zip_store, _mm512_inserti64x4(_mm512_castsi256_si512(lo), hi, 1));
             if (cols >= 16) {
-                _mm512_storeu_si512(reinterpret_cast<__m512i*>(dst), zipped);
+                _mm512_storeu_si512(dst, zipped);
             } else {
                 alignas(64) uint16_t tmp[32];
-                _mm512_storeu_si512(reinterpret_cast<__m512i*>(tmp), zipped);
-                memcpy(static_cast<void*>(dst), tmp, cols * sizeof(uint32_t));
+                _mm512_storeu_si512(tmp, zipped);
+                memcpy(dst, tmp, cols * sizeof(uint32_t));
             }
         };
         auto i = row_begin;
@@ -846,7 +846,7 @@ namespace BeanTensor::Math::LinearAlgebra {
          */
         [[nodiscard]] __mmask64 col_mask_bytes(const size_t cols) noexcept {
             assert(cols <= 16 && "col_mask_bytes only supports 0..16");
-            return static_cast<__mmask64>((uint64_t{1} << cols) - uint64_t{1});
+            return (uint64_t{1} << cols) - uint64_t{1};
         }
 
         /**
@@ -874,7 +874,7 @@ namespace BeanTensor::Math::LinearAlgebra {
          * @note Input int8_t.
          */
         [[nodiscard]] __m512i widen8_to_s16(const int8_t* p, const __mmask64 mask) {
-            const auto raw = _mm512_maskz_loadu_epi8(mask, static_cast<const void*>(p));
+            const auto raw = _mm512_maskz_loadu_epi8(mask, p);
             return _mm512_cvtepi8_epi16(_mm512_castsi512_si256(raw));
         }
         /**
@@ -888,7 +888,7 @@ namespace BeanTensor::Math::LinearAlgebra {
          * @note Input uint8_t.
          */
         [[nodiscard]] __m512i widen8_to_s16(const uint8_t* p, const __mmask64 mask) {
-            const auto raw = _mm512_maskz_loadu_epi8(mask, static_cast<const void*>(p));
+            const auto raw = _mm512_maskz_loadu_epi8(mask, p);
             return _mm512_cvtepu8_epi16(_mm512_castsi512_si256(raw));
         }
 
@@ -906,7 +906,7 @@ namespace BeanTensor::Math::LinearAlgebra {
         void store_truncated(T* dst, const __m512i acc, const size_t cols) {
             assert(cols <= 16 && "store_truncated only supports 0..16");
             alignas(64) int32_t tmp[16];
-            _mm512_store_si512(reinterpret_cast<__m512i*>(tmp), acc);
+            _mm512_store_si512(tmp, acc);
             for (auto jj = size_t{0}; jj < cols; ++jj) {
                 dst[jj] = static_cast<T>(tmp[jj]);
             }
@@ -1395,7 +1395,7 @@ namespace BeanTensor::Math::LinearAlgebra {
                 const auto* a3 = a2 + k;
                 for (auto j = size_t{0}; j < n; j += 16) {
                     const auto remaining = n - j;
-                    const auto mask = static_cast<__mmask16>(remaining >= 16 ? 0xFFFFu : ((uint32_t{1} << remaining) - 1u));
+                    const auto mask = static_cast<__mmask16>(remaining >= 16 ? 0xFFFFu : (uint32_t{1} << remaining) - 1u);
                     auto acc0 = _mm512_setzero_si512();
                     auto acc1 = _mm512_setzero_si512();
                     auto acc2 = _mm512_setzero_si512();
@@ -1417,7 +1417,7 @@ namespace BeanTensor::Math::LinearAlgebra {
                 const auto* a0 = a + i * k;
                 for (auto j = size_t{0}; j < n; j += 16) {
                     const auto remaining = n - j;
-                    const auto mask = static_cast<__mmask16>(remaining >= 16 ? 0xFFFFu : ((uint32_t{1} << remaining) - 1u));
+                    const auto mask = static_cast<__mmask16>(remaining >= 16 ? 0xFFFFu : (uint32_t{1} << remaining) - 1u);
                     auto acc = _mm512_setzero_si512();
                     for (auto kk = size_t{0}; kk < k; ++kk) {
                         acc = _mm512_add_epi32(acc, _mm512_mullo_epi32(_mm512_set1_epi32(static_cast<int32_t>(a0[kk])),
@@ -1455,7 +1455,7 @@ namespace BeanTensor::Math::LinearAlgebra {
                 const auto* a3 = a2 + k;
                 for (auto j = size_t{0}; j < n; j += 8) {
                     const auto remaining = n - j;
-                    const auto mask = static_cast<__mmask8>(remaining >= 8 ? 0xFFu : ((uint32_t{1} << remaining) - 1u));
+                    const auto mask = static_cast<__mmask8>(remaining >= 8 ? 0xFFu : (uint32_t{1} << remaining) - 1u);
                     auto acc0 = _mm512_setzero_si512();
                     auto acc1 = _mm512_setzero_si512();
                     auto acc2 = _mm512_setzero_si512();
@@ -1477,7 +1477,7 @@ namespace BeanTensor::Math::LinearAlgebra {
                 const auto* a0 = a + i * k;
                 for (auto j = size_t{0}; j < n; j += 8) {
                     const auto remaining = n - j;
-                    const auto mask = static_cast<__mmask8>(remaining >= 8 ? 0xFFu : ((uint32_t{1} << remaining) - 1u));
+                    const auto mask = static_cast<__mmask8>(remaining >= 8 ? 0xFFu : (uint32_t{1} << remaining) - 1u);
                     auto acc = _mm512_setzero_si512();
                     for (auto kk = size_t{0}; kk < k; ++kk) {
                         acc = _mm512_add_epi64(acc, _mm512_mullo_epi64(_mm512_set1_epi64(static_cast<int64_t>(a0[kk])),
@@ -1649,7 +1649,7 @@ namespace BeanTensor::Math::LinearAlgebra {
          * @return The sign-extended hi nibble in [-8, 7].
          */
         [[nodiscard]] int16_t nib_hi_s16(const uint8_t v) noexcept {
-            const auto nib = static_cast<int32_t>(v >> 4);
+            const auto nib = v >> 4;
             return static_cast<int16_t>(nib >= 8 ? nib - 16 : nib);
         }
 
@@ -1677,7 +1677,7 @@ namespace BeanTensor::Math::LinearAlgebra {
          * @return The lo/hi s16 planes, one byte's nibbles per lane pair.
          */
         [[nodiscard]] S16NibblePair widen_nibbles_to_s16(const int4x2_t* p, const __mmask64 mask) {
-            const auto raw = _mm512_cvtepu8_epi16(_mm512_castsi512_si256(_mm512_maskz_loadu_epi8(mask, static_cast<const void*>(p))));
+            const auto raw = _mm512_cvtepu8_epi16(_mm512_castsi512_si256(_mm512_maskz_loadu_epi8(mask, p)));
             const auto nmask = _mm512_set1_epi16(int16_t{0x0F});
             const auto sbit = _mm512_set1_epi16(int16_t{0x08});
             return S16NibblePair{
@@ -1705,8 +1705,8 @@ namespace BeanTensor::Math::LinearAlgebra {
             assert(cols <= 16 && "store_packed_nibbles: cols must be <= 16");
             alignas(64) int32_t tmp_lo[16];
             alignas(64) int32_t tmp_hi[16];
-            _mm512_store_si512(reinterpret_cast<__m512i*>(tmp_lo), acc_lo);
-            _mm512_store_si512(reinterpret_cast<__m512i*>(tmp_hi), acc_hi);
+            _mm512_store_si512(tmp_lo, acc_lo);
+            _mm512_store_si512(tmp_hi, acc_hi);
             for (auto jj = size_t{0}; jj < cols; ++jj) {
                 const auto packed = static_cast<uint8_t>(
                     (static_cast<uint32_t>(tmp_lo[jj]) & 0x0Fu) |
@@ -1825,9 +1825,9 @@ namespace BeanTensor::Math::LinearAlgebra {
                         const auto a2v_hi = broadcast_s16_pair(nib_hi_s16(a2_b), int16_t{0});
                         const auto a3v_lo = broadcast_s16_pair(nib_lo_s16(a3_b), int16_t{0});
                         const auto a3v_hi = broadcast_s16_pair(nib_hi_s16(a3_b), int16_t{0});
-                        const auto bk = widen_nibbles_to_s16(b + k2 * n + j, mask1);
-                        const auto bpa_lo = _mm512_permutex2var_epi16(bk.lo, zip2, zero);
-                        const auto bpa_hi = _mm512_permutex2var_epi16(bk.hi, zip2, zero);
+                        const auto [bk_lo, bk_hi] = widen_nibbles_to_s16(b + k2 * n + j, mask1);
+                        const auto bpa_lo = _mm512_permutex2var_epi16(bk_lo, zip2, zero);
+                        const auto bpa_hi = _mm512_permutex2var_epi16(bk_hi, zip2, zero);
                         acc0a_lo = _mm512_dpwssd_epi32(acc0a_lo, a0v_lo, bpa_lo);
                         acc1a_lo = _mm512_dpwssd_epi32(acc1a_lo, a1v_lo, bpa_lo);
                         acc2a_lo = _mm512_dpwssd_epi32(acc2a_lo, a2v_lo, bpa_lo);
@@ -1837,9 +1837,9 @@ namespace BeanTensor::Math::LinearAlgebra {
                         acc2a_hi = _mm512_dpwssd_epi32(acc2a_hi, a2v_hi, bpa_hi);
                         acc3a_hi = _mm512_dpwssd_epi32(acc3a_hi, a3v_hi, bpa_hi);
                         if (cols2 != 0) {
-                            const auto ck = widen_nibbles_to_s16(b + k2 * n + j + 16, mask2);
-                            const auto bpb_lo = _mm512_permutex2var_epi16(ck.lo, zip2, zero);
-                            const auto bpb_hi = _mm512_permutex2var_epi16(ck.hi, zip2, zero);
+                            const auto [ck_lo, ck_hi] = widen_nibbles_to_s16(b + k2 * n + j + 16, mask2);
+                            const auto bpb_lo = _mm512_permutex2var_epi16(ck_lo, zip2, zero);
+                            const auto bpb_hi = _mm512_permutex2var_epi16(ck_hi, zip2, zero);
                             acc0b_lo = _mm512_dpwssd_epi32(acc0b_lo, a0v_lo, bpb_lo);
                             acc1b_lo = _mm512_dpwssd_epi32(acc1b_lo, a1v_lo, bpb_lo);
                             acc2b_lo = _mm512_dpwssd_epi32(acc2b_lo, a2v_lo, bpb_lo);

@@ -2,7 +2,7 @@
  * @file Hardware.h
  * @author GreenBean
  * @brief CPU feature set detection and cached runtime feature queries.
- * @version 0.1
+ * @version 0.1.1
  * @date 2026-10-18
  */
 #pragma once
@@ -46,7 +46,7 @@ struct alignas(8) CPUFeatureSets {
      * @note You probably shouldn't call this - you will desync your CPUFeatureSets instance. Use has_feature.
      */
     void set_feature(const CPUFeatureSetTypes n) noexcept {
-        features |=  (1u << n);
+        features |= 1u << n;
     }
 
     /**

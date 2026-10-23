@@ -13,14 +13,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <future>
-#include <stdexcept>
 #include <vector>
 
 #include "Helpers/CPUThreading.h"
 #include "Helpers/Errors.h"
 #include "Helpers/Hardware.h"
-#include "Intrinsics/AVX2/DTypeConversions.h"
-#include "Intrinsics/AVX512/DTypeConversions.h"
 #include "Intrinsics/ConversionMethods.h"
 #include "Intrinsics/Native/DTypeConversions.h"
 #include "Intrinsics/Shared/SharedIntrinsics.h"
@@ -39,7 +36,7 @@ namespace BeanTensor::Intrinsics::detail {
     template<typename T> struct lane_of { using type = T; };
     template<> struct lane_of<float16x2_t> { using type = float16_t; };
     template<> struct lane_of<bfloat16x2_t> { using type = bfloat16_t; };
-    template<typename T> using lane_of_t = typename lane_of<T>::type;
+    template<typename T> using lane_of_t = lane_of<T>::type;
 
     /**
      * Extract the low signed 4-bit lane (bits [3:0]) of an Int4x2 byte,
@@ -191,7 +188,7 @@ namespace BeanTensor::Intrinsics::detail {
      * @return Value converted to Dst.
      */
     template<typename Src, typename Dst>
-    [[nodiscard]] inline Dst element_convert(const Src& v, bool& flag, const ConversionClampMethod method) {
+    [[nodiscard]] Dst element_convert(const Src& v, bool& flag, const ConversionClampMethod method) {
         if constexpr (std::is_same_v<Src, Dst>) {
             return v;
         } else if constexpr (std::is_same_v<Src, int4x2_t>) {
@@ -209,7 +206,7 @@ namespace BeanTensor::Intrinsics::detail {
             if constexpr (std::is_same_v<Src, float16x2_t> || std::is_same_v<Src, bfloat16x2_t>) {
                 // Packed 16-bit -> Int4x2: convert both lanes independently.
                 using H = lane_of_t<Src>;
-                const std::uint32_t bits = bit_cast_memcpy<std::uint32_t>(v);
+                const auto bits = bit_cast_memcpy<std::uint32_t>(v);
                 const H lo = bit_cast_memcpy<H>(static_cast<std::uint16_t>(bits & 0xFFFF));
                 const H hi = bit_cast_memcpy<H>(static_cast<std::uint16_t>(bits >> 16));
                 return pack_int4x2(
@@ -228,13 +225,13 @@ namespace BeanTensor::Intrinsics::detail {
             return bit_cast_memcpy<Dst>(static_cast<std::uint32_t>(bits) | (static_cast<std::uint32_t>(bits) << 16));
         } else if constexpr (DataTypes::requires_unpack_v<Src> && !DataTypes::requires_unpack_v<Dst>) {
             using H = lane_of_t<Src>;
-            const std::uint32_t bits = bit_cast_memcpy<std::uint32_t>(v);
+            const auto bits = bit_cast_memcpy<std::uint32_t>(v);
             const H lo = bit_cast_memcpy<H>(static_cast<std::uint16_t>(bits & 0xFFFF));
             return scalar_convert<H, Dst>(lo, flag, method);
         } else {
             using HS = lane_of_t<Src>;
             using HD = lane_of_t<Dst>;
-            const std::uint32_t bits = bit_cast_memcpy<std::uint32_t>(v);
+            const auto bits = bit_cast_memcpy<std::uint32_t>(v);
             const HS lo = bit_cast_memcpy<HS>(static_cast<std::uint16_t>(bits & 0xFFFF));
             const HS hi = bit_cast_memcpy<HS>(static_cast<std::uint16_t>(bits >> 16));
             const auto lo_c = static_cast<std::uint16_t>(bit_cast_memcpy<std::uint16_t>(scalar_convert<HS, HD>(lo, flag, method)));

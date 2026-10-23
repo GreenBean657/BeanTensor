@@ -7,8 +7,6 @@
  */
 #pragma once
 
-#include "Tensor/DTypes.h"
-
 namespace BeanTensor::Tensors {
     class Tensor;
     namespace detail {
@@ -17,13 +15,13 @@ namespace BeanTensor::Tensors {
          * Queues the CPU GEMM onto the thread pool; errors materialize at sync().
          * @brief CPU backend entry point for matmul.
          */
-        void matmul_cpu(const Tensor&, const Tensor&, Tensor&);
+        void matmul_cpu(const Tensor&, const Tensor&, const Tensor&);
 
         /**
          * Queues the GPU GEMM onto the thread pool; errors materialize at sync().
          * @brief GPU backend entry point for matmul (CUDA or HIP build).
          */
-        void matmul_gpu(const Tensor&, const Tensor&, Tensor&);
+        void matmul_gpu(const Tensor&, const Tensor&, const Tensor&);
     }
 }
 

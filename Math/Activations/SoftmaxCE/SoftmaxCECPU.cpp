@@ -4,7 +4,7 @@
  * @brief CPU backend for softmax_ce.
  * Hosts the Tensor::softmax_ce method definition (mirrors how Tensor::matmul
  * lives in MatmulCPU.cpp).
- * @version 0.1
+ * @version 0.1.1
  * @date 2026-10-20
  */
 #include <algorithm>
@@ -17,6 +17,7 @@
 
 #include "Math/Activations/ActivationsShared.h"
 #include "Math/Activations/SoftmaxCE/SoftmaxCE.h"
+#include "Math/Autograd/SoftmaxCEG/SoftmaxCEG.h"
 #include "Tensor/Tensor.h"
 
 #include "Helpers/CPUThreading.h"
@@ -62,7 +63,7 @@ namespace BeanTensor::Tensors::detail {
             if constexpr (std::is_same_v<T, float64_t>) {
                 return row[j];
             } else if constexpr (std::is_same_v<T, int4x2_t>) {
-                return static_cast<float64_t>((j & 1) != 0 ? int4_hi(row[j >> 1]) : int4_lo(row[j >> 1]));
+                return (j & 1) != 0 ? int4_hi(row[j >> 1]) : int4_lo(row[j >> 1]);
             } else {
                 return static_cast<float64_t>(row[j]);
             }
@@ -126,7 +127,9 @@ namespace BeanTensor::Tensors::detail {
             if constexpr (std::is_same_v<I, int4x2_t>) {
                 t = int4_lo(targets[r]);
             } else {
-                t = static_cast<int64_t>(targets[r]);
+                // Sign-extending load through int16_t; the stored byte is a
+                // signed index, so negative values must stay negative.
+                t = static_cast<int64_t>(static_cast<int16_t>(targets[r]));
             }
             if (t < 0 || static_cast<uint64_t>(t) >= cols) {
                 throw ErrorHandling::IndexOutOfRange();
@@ -157,8 +160,8 @@ namespace BeanTensor::Tensors::detail {
             std::vector<std::shared_future<void>> futures;
             const auto chunk = (rows + t_count - 1) / t_count;
             auto slot = size_t{0};
-            for (auto t = size_t{0}; t < t_count; ++t) {
-                const auto begin = t * chunk;
+            for (auto tid = size_t{0}; tid < t_count; ++tid) {
+                const auto begin = tid * chunk;
                 if (begin >= rows) {
                     break;
                 }
@@ -260,7 +263,7 @@ namespace BeanTensor::Tensors::detail {
                 }
                 case DType::Int4x2: {
                     auto v = mean;
-                    if (std::isnan(v)) {
+                    if (__builtin_isnan(v)) {
                         v = 0.0;
                     }
                     if (v <= -8.0) {
@@ -281,7 +284,7 @@ namespace BeanTensor::Tensors::detail {
                      */
                     auto store_int = [&]<typename I>(I* p) {
                         auto v = mean;
-                        if (std::isnan(v)) {
+                        if (__builtin_isnan(v)) {
                             v = 0.0;
                         }
                         const auto lo = static_cast<float64_t>(std::numeric_limits<I>::lowest());
@@ -331,7 +334,7 @@ namespace BeanTensor::Tensors::detail {
         const auto tgt_dtype = targets.dtype;
         const auto* const tgt_data = targets.data;
         const auto tgt_offset = targets.offset;
-        std::vector<float64_t> partials(IncludedCPUFeatures().threads, 0.0);
+        std::vector partials(IncludedCPUFeatures().threads, 0.0);
         switch (t.dtype) {
             case DType::Float32: {
                 const auto* logits = static_cast<const float32_t*>(t.data) + t.offset;
@@ -452,7 +455,7 @@ namespace BeanTensor::Tensors {
         // Targets are class indices and never receive a gradient: only the
         // logits decide whether the output joins the graph.
         if (this->requires_grad) {
-            out.wire_node(detail::softmax_ce_g_node, *this, &targets);
+            out.wire_node(detail::softmax_ce_g_bridge, *this, &targets);
         }
         return out;
     }

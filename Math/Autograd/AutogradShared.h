@@ -11,7 +11,6 @@
 #pragma once
 
 #include <algorithm>
-#include <cstdint>
 #include <future>
 #include <type_traits>
 #include <vector>
@@ -72,7 +71,7 @@ namespace BeanTensor::Tensors::detail::autograd_shared {
      * Resolves to packed_lane<P>::type, so it only compiles for float16x2_t and bfloat16x2_t.
      * @brief Alias for the lane type of packed dtype P.
      */
-    template<typename P> using packed_lane_t = typename packed_lane<P>::type;
+    template<typename P> using packed_lane_t = packed_lane<P>::type;
 
     /**
      * Reinterprets the low 16 bits through memcpy, never a pointer cast.
@@ -141,7 +140,7 @@ namespace BeanTensor::Tensors::detail::autograd_shared {
      * @return High nibble in [-8, 7].
      */
     [[nodiscard]] inline int32_t int4_hi(const int4x2_t v) {
-        const auto n = static_cast<int32_t>(Intrinsics::detail::bit_cast_memcpy<uint8_t>(v) >> 4);
+        const auto n = Intrinsics::detail::bit_cast_memcpy<uint8_t>(v) >> 4;
         return n >= 8 ? n - 16 : n;
     }
 

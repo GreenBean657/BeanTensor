@@ -11,7 +11,6 @@
  */
 #if defined(USE_CUDA)
 #include <cstdint>
-#include <limits>
 #include <type_traits>
 
 #include <cuda_fp16.h>
@@ -29,7 +28,7 @@ namespace BeanTensor::Tensors::detail {
     namespace {
         /**
          * Elementwise w[i] += d[i]. Floats single-rounding add in storage width;
-         * halfs widen to fp32, add, narrow RNE; packed dtypes per lane; integers
+         * fp16 widen to fp32, add, narrow RNE; packed dtypes per lane; integers
          * wrap through the unsigned twin; int4x2 wraps per nibble. Matches the
          * CPU grad_acc kernels. Launched as grid_for(numel) blocks of BT_GPU_THREADS
          * threads, grid-stride over numel.
@@ -96,7 +95,7 @@ namespace BeanTensor::Tensors::detail {
      * @throws ErrorHandling::DirectFunctionCallOnWrongDataSource if g or d is not on the GPU.
      * @throws ErrorHandling::NotImplemented (from the worker, at sync) for an unsupported dtype.
      */
-    __host__ void grad_acc_gpu(Tensor& g, const Tensor& d) {
+    __host__ void grad_acc_gpu(const Tensor& g, const Tensor& d) {
         if (g.device != Device::GPU || d.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(g.device));
         }

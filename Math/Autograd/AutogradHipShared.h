@@ -14,7 +14,6 @@
 #pragma once
 
 #if defined(USE_HIP)
-#include <cstddef>
 #include <cstdint>
 
 #include <hip/hip_runtime.h>
@@ -42,7 +41,7 @@ namespace BeanTensor::Tensors::detail::autograd_gpu {
      */
     [[nodiscard]] inline __host__ size_t grid_for(const size_t numel) {
         const auto blocks = (numel + BT_GPU_THREADS - 1) / BT_GPU_THREADS;
-        return blocks < 1 ? 1 : (blocks > BT_GPU_MAX_BLOCKS ? BT_GPU_MAX_BLOCKS : blocks);
+        return blocks < 1 ? 1 : blocks > BT_GPU_MAX_BLOCKS ? BT_GPU_MAX_BLOCKS : blocks;
     }
 
     /**
@@ -82,7 +81,7 @@ namespace BeanTensor::Tensors::detail::autograd_gpu {
      * @return High nibble in [-8, 7].
      */
     __device__ __forceinline__ int32_t dev_int4_hi(const int4x2_t v) {
-        const auto n = static_cast<int32_t>(static_cast<uint8_t>(v) >> 4);
+        const auto n = static_cast<uint8_t>(v) >> 4;
         return n >= 8 ? n - 16 : n;
     }
 

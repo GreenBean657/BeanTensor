@@ -12,7 +12,6 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
 
 namespace BeanTensor::Tensors::detail::compare_gpu {
     /**
@@ -33,6 +32,6 @@ namespace BeanTensor::Tensors::detail::compare_gpu {
      */
     [[nodiscard]] inline __host__ size_t grid_for(const size_t numel) {
         const auto blocks = (numel + BT_GPU_THREADS - 1) / BT_GPU_THREADS;
-        return blocks < 1 ? 1 : (blocks > BT_GPU_MAX_BLOCKS ? BT_GPU_MAX_BLOCKS : blocks);
+        return blocks < 1 ? 1 : blocks > BT_GPU_MAX_BLOCKS ? BT_GPU_MAX_BLOCKS : blocks;
     }
 }

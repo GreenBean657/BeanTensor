@@ -2,13 +2,11 @@
  * @file Tensor.cpp
  * @author GreenBean
  * @brief Tensor definitions: allocation, fills, conversion, transfer, printing and cloning.
- * @version 0.2
+ * @version 0.2.1
  * @date 2026-10-18
  */
 #include "Tensor.h"
 
-#include <array>
-#include <bit>
 #include <cstring>
 #include <random>
 #include <sstream>
@@ -89,79 +87,6 @@ namespace BeanTensor::Tensors::detail {
     }
 
     /**
-     * Odometer walk over at most BT_TENSOR_MAX_DIMS coordinates; the
-     * destination packs contiguously in row-major order. Used when a view
-     * takes its own copy (parent death in notify_child, hard clone).
-     * @brief Copy a (possibly strided) view's elements into a fresh contiguous buffer (CPU).
-     * @param src_base Buffer base the view's offset/strides index into.
-     * @param dst Fresh contiguous destination buffer.
-     * @param shape View shape.
-     * @param strides View element strides.
-     * @param ndim View rank.
-     * @param src_offset View element offset into src_base.
-     * @param numel View element count.
-     * @param elem Bytes per element.
-     */
-    inline void copy_view_cpu(const void* src_base, void* dst, const size_t* shape, const size_t* strides, const size_t ndim, const size_t src_offset, const size_t numel, const size_t elem) {
-        const auto* s = static_cast<const uint8_t*>(src_base);
-        auto* d = static_cast<uint8_t*>(dst);
-        std::array<size_t, BT_TENSOR_MAX_DIMS> coords{};
-        for (auto flat = size_t{0}; flat < numel; ++flat) {
-            auto off = src_offset;
-            for (auto dim = size_t{0}; dim < ndim; ++dim) {
-                off += coords[dim] * strides[dim];
-            }
-            memcpy(d + flat * elem, s + off * elem, elem);
-            for (auto dim = ndim; dim-- > 0;) {
-                if (++coords[dim] < shape[dim]) {
-                    break;
-                }
-                coords[dim] = 0;
-            }
-        }
-    }
-
-#if defined(USE_HIP) || defined(USE_CUDA)
-    /**
-     * Per-element device-to-device copies (correctness-first; strided views
-     * are rare and this path only runs on parent death in notify_child or a
-     * hard clone of a view).
-     * @brief Copy a (possibly strided) view's elements into a fresh contiguous buffer (GPU).
-     * @param src_base Buffer base the view's offset/strides index into.
-     * @param dst Fresh contiguous destination buffer.
-     * @param shape View shape.
-     * @param strides View element strides.
-     * @param ndim View rank.
-     * @param src_offset View element offset into src_base.
-     * @param numel View element count.
-     * @param elem Bytes per element.
-     */
-    inline void copy_view_gpu(const void* src_base, void* dst, const size_t* shape, const size_t* strides, const size_t ndim, const size_t src_offset, const size_t numel, const size_t elem) {
-        const auto* s = static_cast<const uint8_t*>(src_base);
-        auto* d = static_cast<uint8_t*>(dst);
-        std::array<size_t, BT_TENSOR_MAX_DIMS> coords{};
-        for (auto flat = size_t{0}; flat < numel; ++flat) {
-            auto off = src_offset;
-            for (auto dim = size_t{0}; dim < ndim; ++dim) {
-                off += coords[dim] * strides[dim];
-            }
-#if defined(USE_HIP)
-            HIP_CHECK_ERROR(hipMemcpy(d + flat * elem, s + off * elem, elem, hipMemcpyDeviceToDevice));
-#else
-            CUDA_CHECK_ERROR(cudaMemcpy(d + flat * elem, s + off * elem, elem, cudaMemcpyDeviceToDevice));
-#endif
-            for (auto dim = ndim; dim-- > 0;) {
-                if (++coords[dim] < shape[dim]) {
-                    break;
-                }
-                coords[dim] = 0;
-            }
-        }
-    }
-#endif
-
-
-    /**
      * TODO - Write documentation.
      * @tparam T
      * @param data
@@ -169,7 +94,7 @@ namespace BeanTensor::Tensors::detail {
      * @param exec
      */
     template<typename T>
-    static void fill_fixed_impli(void* data, const size_t numel, const Tensors::Tensor& exec) {
+    static void fill_fixed_impli(void* data, const size_t numel, const Tensor& exec) {
         auto& threadMgr = Threading::GetCPUThreadPool();
         const size_t t_count = IncludedCPUFeatures().threads;
 
@@ -224,7 +149,7 @@ namespace BeanTensor::Tensors::detail {
      * @param exec
      */
     template<typename T>
-    static void fill_random_impl(void* data, const size_t numel, const size_t seed, const float64_t min, const float64_t max, const Tensors::Tensor& exec) {
+    static void fill_random_impl(void* data, const size_t numel, const size_t seed, const float64_t min, const float64_t max, const Tensor& exec) {
         auto& threadMgr = Threading::GetCPUThreadPool();
         const size_t t_count = IncludedCPUFeatures().threads;
         auto* ptr = static_cast<T*>(data);
@@ -257,29 +182,29 @@ namespace BeanTensor::Tensors::detail {
             thread_local std::mt19937 rng;
             rng.seed(l_seed);
             if constexpr (std::is_same_v<T, float16_t>) {
-                std::uniform_real_distribution<float64_t> dist(t_min, t_max);
+                std::uniform_real_distribution dist(t_min, t_max);
                 for (size_t i = t_start; i < t_end; ++i)
                     ptr[i] = Intrinsics::detail::unaccel_fp32_to_fp16_untracked(static_cast<float32_t>(dist(rng)));
             } else if constexpr (std::is_same_v<T, bfloat16_t>) {
-                std::uniform_real_distribution<float64_t> dist(t_min, t_max);
+                std::uniform_real_distribution dist(t_min, t_max);
                 for (size_t i = t_start; i < t_end; ++i)
                     ptr[i] = Intrinsics::detail::unaccel_fp32_to_bf16_untracked(static_cast<float32_t>(dist(rng)));
             } else if constexpr (std::is_same_v<T, float16x2_t>) {
-                std::uniform_real_distribution<float64_t> dist(t_min, t_max);
+                std::uniform_real_distribution dist(t_min, t_max);
                 for (size_t i = t_start; i < t_end; ++i) {
                     const auto lo = Intrinsics::detail::bit_cast_memcpy<uint16_t>(Intrinsics::detail::unaccel_fp32_to_fp16_untracked(static_cast<float32_t>(dist(rng))));
                     const auto hi = Intrinsics::detail::bit_cast_memcpy<uint16_t>(Intrinsics::detail::unaccel_fp32_to_fp16_untracked(static_cast<float32_t>(dist(rng))));
                     ptr[i] = Intrinsics::detail::bit_cast_memcpy<float16x2_t>(static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16));
                 }
             } else if constexpr (std::is_same_v<T, bfloat16x2_t>) {
-                std::uniform_real_distribution<float64_t> dist(t_min, t_max);
+                std::uniform_real_distribution dist(t_min, t_max);
                 for (size_t i = t_start; i < t_end; ++i) {
                     const auto lo = Intrinsics::detail::bit_cast_memcpy<uint16_t>(Intrinsics::detail::unaccel_fp32_to_bf16_untracked(static_cast<float32_t>(dist(rng))));
                     const auto hi = Intrinsics::detail::bit_cast_memcpy<uint16_t>(Intrinsics::detail::unaccel_fp32_to_bf16_untracked(static_cast<float32_t>(dist(rng))));
                     ptr[i] = Intrinsics::detail::bit_cast_memcpy<bfloat16x2_t>(static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16));
                 }
             } else if constexpr (std::is_same_v<T, int4x2_t>) {
-                std::uniform_int_distribution<int64_t> dist(static_cast<int64_t>(t_min), static_cast<int64_t>(t_max));
+                std::uniform_int_distribution dist(static_cast<int64_t>(t_min), static_cast<int64_t>(t_max));
                 for (size_t i = t_start; i < t_end; ++i) {
                     const auto lo = static_cast<uint8_t>(static_cast<uint8_t>(static_cast<int8_t>(dist(rng))) & 0x0Fu);
                     const auto hi = static_cast<uint8_t>(static_cast<uint8_t>(static_cast<int8_t>(dist(rng))) & 0x0Fu);
@@ -287,20 +212,20 @@ namespace BeanTensor::Tensors::detail {
                 }
             } else if constexpr (std::is_integral_v<T>) {
                 if constexpr(std::is_unsigned_v<T>) {
-                    std::uniform_int_distribution<uint64_t> dist(
+                    std::uniform_int_distribution dist(
                         static_cast<uint64_t>(t_min),
                         static_cast<uint64_t>(t_max));
                     for (size_t i = t_start; i < t_end; ++i)
                         ptr[i] = static_cast<T>(dist(rng));
                 } else {
-                    std::uniform_int_distribution<int64_t> dist(
+                    std::uniform_int_distribution dist(
                         static_cast<int64_t>(t_min),
                         static_cast<int64_t>(t_max));
                     for (size_t i = t_start; i < t_end; ++i)
                         ptr[i] = static_cast<T>(dist(rng));
                 }
             } else {
-                std::uniform_real_distribution<float64_t> dist(t_min, t_max);
+                std::uniform_real_distribution dist(t_min, t_max);
                 for (size_t i = t_start; i < t_end; ++i)
                     ptr[i] = static_cast<T>(dist(rng));
             }
@@ -439,7 +364,7 @@ namespace BeanTensor::Tensors {
         sync();
         std::ostringstream os;
 
-        using PrintFn = void(*)(std::ostringstream&, const void*, const size_t*, const size_t*, const size_t, const size_t, const size_t);
+        using PrintFn = void(*)(std::ostringstream&, const void*, const size_t*, const size_t*, size_t, size_t, size_t);
         using DType = DataTypes::DType;
         static const std::unordered_map<DType, PrintFn> print_fns = {
             {DType::Int8,     detail::print_recursive<int8_t>},
@@ -642,7 +567,6 @@ namespace BeanTensor::Tensors {
     void Tensor::read_element(const size_t elem_offset, void* dst, const size_t bytes) {
         if (this->device == Device::CPU) {
             memcpy(dst, static_cast<uint8_t*>(this->data) + elem_offset * bytes, bytes);
-            return;
         } else if (this->device == Device::GPU) {
 #if defined(USE_HIP)
             HIP_CHECK_ERROR(hipMemcpy(dst, static_cast<uint8_t*>(this->data) + elem_offset * bytes, bytes, hipMemcpyDeviceToHost));
@@ -665,7 +589,6 @@ namespace BeanTensor::Tensors {
     void Tensor::write_element(const size_t elem_offset, const void* src, const size_t bytes) {
         if (this->device == Device::CPU) {
             memcpy(static_cast<uint8_t*>(this->data) + elem_offset * bytes, src, bytes);
-            return;
         } else if (this->device == Device::GPU) {
 #if defined(USE_HIP)
             HIP_CHECK_ERROR(hipMemcpy(static_cast<uint8_t*>(this->data) + elem_offset * bytes, src, bytes, hipMemcpyHostToDevice));
@@ -688,7 +611,7 @@ namespace BeanTensor::Tensors {
     void Tensor::random(const float64_t &min, const float64_t &max, const int64_t seed) {
         sync();
         if (this->device == Device::CPU) {
-            using FillFn = void(*)(void*, const size_t, const size_t, const float64_t, const float64_t, const Tensor&);
+            using FillFn = void(*)(void*, size_t, size_t, float64_t, float64_t, const Tensor&);
             using DType = DataTypes::DType;
 
             static const std::unordered_map<DType, FillFn> fill_fns = {
@@ -726,7 +649,7 @@ namespace BeanTensor::Tensors {
     void Tensor::set_one() {
         sync();
         if (this->device == Device::CPU) {
-            using FillFn = void(*)(void*, const size_t, const Tensor&);
+            using FillFn = void(*)(void*, size_t, const Tensor&);
             using DType = DataTypes::DType;
 
             static const std::unordered_map<DType, FillFn> fill_fns = {
@@ -782,17 +705,17 @@ namespace BeanTensor::Tensors {
             this->shape[i] = new_shape[i];
             this->numel *= new_shape[i];
         }
-        this->nbytes = this->numel * (DataTypes::dtype_bytes(dtype));
+        this->nbytes = this->numel * DataTypes::dtype_bytes(dtype);
         compute_strides();
 
-        if (device == BeanTensor::Tensors::Device::CPU) {
+        if (device == Device::CPU) {
             // aligned_alloc(64) instead of malloc — guarantees 64-byte alignment
             // enabling NT stores in conversion functions without runtime branching
             this->data = std::aligned_alloc(64, this->nbytes);
             if (this->data == nullptr) {
                 throw ErrorHandling::OutOfMemory();
             }
-        } else if (device == BeanTensor::Tensors::Device::GPU) {
+        } else if (device == Device::GPU) {
 #if defined(USE_CUDA)
             CUDA_CHECK_ERROR(cudaMalloc(&this->data, this->nbytes));
 #elif defined(USE_HIP)

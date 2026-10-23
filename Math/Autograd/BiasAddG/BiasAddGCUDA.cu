@@ -12,7 +12,6 @@
  */
 #if defined(USE_CUDA)
 #include <cstdint>
-#include <limits>
 #include <type_traits>
 
 #include <cuda_fp16.h>
@@ -173,7 +172,7 @@ namespace BeanTensor::Tensors::detail {
                 return;
             }
             auto chunks = (rows + BT_GPU_COLSUM_ROWS_PER_CHUNK - 1) / BT_GPU_COLSUM_ROWS_PER_CHUNK;
-            chunks = chunks < 1 ? 1 : (chunks > BT_GPU_COLSUM_MAX_CHUNKS ? BT_GPU_COLSUM_MAX_CHUNKS : chunks);
+            chunks = chunks < 1 ? 1 : chunks > BT_GPU_COLSUM_MAX_CHUNKS ? BT_GPU_COLSUM_MAX_CHUNKS : chunks;
             const auto rows_per_chunk = (rows + chunks - 1) / chunks;
             Acc* partials = nullptr;
             CUDA_CHECK_ERROR(cudaMalloc(&partials, chunks * cols_eff * sizeof(Acc)));
@@ -196,7 +195,7 @@ namespace BeanTensor::Tensors::detail {
      * @throws ErrorHandling::DirectFunctionCallOnWrongDataSource if dy or dbias is not on the GPU.
      * @throws ErrorHandling::NotImplemented (from the worker, at sync) for an unsupported dtype.
      */
-    __host__ void bias_add_g_gpu(const Tensor& dy, Tensor& dbias) {
+    __host__ void bias_add_g_gpu(const Tensor& dy, const Tensor& dbias) {
         if (dy.device != Device::GPU || dbias.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(dy.device));
         }

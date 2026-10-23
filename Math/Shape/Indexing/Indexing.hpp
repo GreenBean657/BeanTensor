@@ -2,7 +2,7 @@
  * @file Indexing.hpp
  * @author GreenBean
  * @brief CPU only build fall back for the indexing ops - throws and does nothing else.
- * @version 0.1
+ * @version 0.2
  * @date 2026-10-22
  */
 #pragma once
@@ -21,19 +21,19 @@ namespace BeanTensor::Tensors {
         /**
          * @brief CPU-only build stub for GPU index_select. Always throws.
          */
-        inline void index_select_gpu(const Tensor&, const Tensor&, Tensor&, size_t) {
+        inline void index_select_gpu(const Tensor&, const Tensor&, const Tensor&, size_t) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
         /**
          * @brief CPU-only build stub for GPU gather. Always throws.
          */
-        inline void gather_gpu(const Tensor&, const Tensor&, Tensor&, size_t) {
+        inline void gather_gpu(const Tensor&, const Tensor&, const Tensor&, size_t) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
         /**
          * @brief CPU-only build stub for GPU cat. Always throws.
          */
-        inline void cat_gpu(const std::vector<Tensor>&, Tensor&, size_t) {
+        inline void cat_gpu(const std::vector<Tensor>&, const Tensor&, size_t) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
     }

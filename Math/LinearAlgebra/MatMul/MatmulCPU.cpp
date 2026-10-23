@@ -6,7 +6,6 @@
  * @date 2026-10-18
  */
 #include <algorithm>
-#include <cstdint>
 #include <future>
 #include <type_traits>
 #include <vector>
@@ -97,7 +96,7 @@ namespace BeanTensor::Tensors::detail {
         template<typename P> struct packed_lane;
         template<> struct packed_lane<float16x2_t> { using type = float16_t; };
         template<> struct packed_lane<bfloat16x2_t> { using type = bfloat16_t; };
-        template<typename P> using packed_lane_t = typename packed_lane<P>::type;
+        template<typename P> using packed_lane_t = packed_lane<P>::type;
 
         /**
          * Reads the lane through its bit pattern, never through arithmetic.
@@ -264,7 +263,7 @@ namespace BeanTensor::Tensors::detail {
          * fp32/fp64 dispatch AVX512F -> AVX2+FMA -> scalar. fp16/bf16 dispatch to the VDPBF16PS / F16C-widened AVX512 kernels
          * (packed x2 included) where supported, otherwise to their scalar conversion-pathway kernels.
          * @brief Runtime SIMD dispatch for GEMM row kernels.
-         * @param T Element type.
+         * @tparam T Element type.
          * @return Function pointer to the fastest legal row kernel for this CPU.
          */
         template<typename T>
@@ -457,7 +456,7 @@ namespace BeanTensor::Tensors::detail {
      * @param b Right operand, k x n or batch x k x n.
      * @param out Preallocated output, m x n or batch x m x n.
      */
-    void matmul_cpu(const Tensor& a, const Tensor& b, Tensor& out) {
+    void matmul_cpu(const Tensor& a, const Tensor& b, const Tensor& out) {
         if (a.device != Device::CPU || b.device != Device::CPU || out.device != Device::CPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("CPU", stringify_device_source(a.device));
         }
@@ -591,8 +590,8 @@ namespace BeanTensor::Tensors {
         sync();
         other.sync();
         const auto out_shape = this->ndim == 3
-            ? std::vector<size_t>{this->shape[0], this->shape[1], other.shape[2]}
-            : std::vector<size_t>{this->shape[0], other.shape[1]};
+            ? std::vector{this->shape[0], this->shape[1], other.shape[2]}
+            : std::vector{this->shape[0], other.shape[1]};
         auto out = Tensor(out_shape, this->dtype, this->device, false);
         if (this->device == Device::CPU) {
             detail::matmul_cpu(*this, other, out);

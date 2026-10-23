@@ -55,13 +55,13 @@ namespace BeanTensor::Tensors::detail::indexing_shared {
                 throw ErrorHandling::IndexOutOfRange();
             }
         }
-        if (
-            const auto u = static_cast<uint64_t>(v);
-            u >= extent
-        ) {
+        // v >= 0 on the signed path (negatives threw above), so the unsigned
+        // twin preserves the value on the way to the uint64 comparison.
+        const auto u = static_cast<uint64_t>(static_cast<std::make_unsigned_t<T>>(v));
+        if (u >= extent) {
             throw ErrorHandling::IndexOutOfRange();
         }
-        return static_cast<size_t>(static_cast<uint64_t>(v));
+        return u;
     }
 
     /**

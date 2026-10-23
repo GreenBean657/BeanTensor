@@ -18,7 +18,7 @@ namespace BeanTensor::Tensors {
         /**
          * @brief CPU-only build stub for the GPU mean reduction. Always throws.
          */
-        inline void mean_gpu(const Tensor&, Tensor&) {
+        inline void mean_gpu(const Tensor&, const Tensor&) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
     }

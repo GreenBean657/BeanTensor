@@ -42,7 +42,7 @@ namespace BeanTensor::Tensors::detail {
             const size_t tid = threadIdx.x + blockIdx.x * blockDim.x;
             const size_t stride = blockDim.x * gridDim.x;
             for (size_t i = tid; i < numel; i += stride) {
-                if constexpr ((std::is_same_v<T, float32_t> || std::is_same_v<T, float64_t>) || std::is_signed_v<T>) {
+                if constexpr (std::is_same_v<T, float32_t> || std::is_same_v<T, float64_t> || std::is_signed_v<T>) {
                     out[i] = in[i] < T{0} ? T{0} : in[i];
                 } else if constexpr (std::is_same_v<T, float16_t>) {
                     const auto wide = __half2float(in[i]);

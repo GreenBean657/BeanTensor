@@ -58,8 +58,10 @@ namespace BeanTensor::Intrinsics::detail {
         //Check if NaN
         const uint32_t mantissa_mask = to_bits & 0x7FFFFF;
         const uint32_t exponent_mask = to_bits & 0x7F800000;
-        const bool exp_met = exponent_mask == 0x7F800000;
-        if (exp_met) {
+        if (
+            const bool exp_met = exponent_mask == 0x7F800000;
+            exp_met
+        ) {
             //NaN && INF: NaN flags under any non-PERMISSIVE method, Inf under STRICT only.
             if (mantissa_mask != 0) {
                 if (method != ConversionClampMethod::PERMISSIVE) flag_met = true;
@@ -109,7 +111,7 @@ namespace BeanTensor::Intrinsics::detail {
      */
     [[nodiscard]] inline float32_t unaccel_fp16_to_fp32_tracked(const float16_t& val, bool& flag_met, const ConversionClampMethod method = ConversionClampMethod::PERMISSIVE) {
         const auto to_bits = bit_cast_memcpy<std::uint16_t>(val);
-        std::uint32_t converted = (static_cast<std::uint32_t>(to_bits & 0x8000) << 16); // Move sign to position 31
+        std::uint32_t converted = static_cast<std::uint32_t>(to_bits & 0x8000) << 16; // Move sign to position 31
         const uint16_t mantissa_mask = to_bits & 0x03FF;
         const uint16_t exponent_mask = to_bits & 0x7C00;
         const bool exp_met = exponent_mask == 0x7C00;
@@ -183,13 +185,13 @@ namespace BeanTensor::Intrinsics::detail {
         const uint32_t mantissa_mask = to_bits & 0x007FFFFF;
         const uint32_t exponent_mask = to_bits & 0x7F800000;
         const bool exp_met = exponent_mask == 0x7F800000;
-        converted |= ((to_bits & 0x80000000) >> 16);
+        converted |= (to_bits & 0x80000000) >> 16;
 
         if (mantissa_mask != 0 && exp_met) {
             // NaN - set FP16 quiet bit so payload never truncates to zero (which would yield Inf).
             converted |= 0x7C00;
             converted |= 0x0200;
-            converted |= (mantissa_mask >> 13);
+            converted |= mantissa_mask >> 13;
             if (method != ConversionClampMethod::PERMISSIVE) flag_met = true;
             return bit_cast_memcpy<float16_t>(converted);
         }

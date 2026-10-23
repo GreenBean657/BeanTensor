@@ -7,7 +7,7 @@
  * behaviorally identical. The ops are pure byte movement: no kernels, just
  * device-to-device slab/element copies; index tensors are staged to the host
  * so bounds checks run where they can throw.
- * @version 0.1
+ * @version 0.2
  * @date 2026-10-22
  */
 #if defined(USE_HIP)
@@ -34,7 +34,7 @@ namespace BeanTensor::Tensors::detail {
      * @param out Fresh output tensor, t's shape with shape[axis] = idx.numel.
      * @param axis Axis selected along.
      */
-    __host__ void index_select_gpu(const Tensor& t, const Tensor& idx, Tensor& out, const size_t axis) {
+    __host__ void index_select_gpu(const Tensor& t, const Tensor& idx, const Tensor& out, const size_t axis) {
         if (t.device != Device::GPU || idx.device != Device::GPU || out.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(t.device));
         }
@@ -75,7 +75,7 @@ namespace BeanTensor::Tensors::detail {
             using DType = DataTypes::DType;
             switch (idx_dtype) {
                 case DType::Int8: run(reinterpret_cast<const int8_t*>(staged.data())); break;
-                case DType::UInt8: run(reinterpret_cast<const uint8_t*>(staged.data())); break;
+                case DType::UInt8: run(staged.data()); break;
                 case DType::Int16: run(reinterpret_cast<const int16_t*>(staged.data())); break;
                 case DType::UInt16: run(reinterpret_cast<const uint16_t*>(staged.data())); break;
                 case DType::Int32: run(reinterpret_cast<const int32_t*>(staged.data())); break;
@@ -100,7 +100,7 @@ namespace BeanTensor::Tensors::detail {
      * @param out Fresh output tensor with idx's shape and t's dtype.
      * @param axis Axis gathered along.
      */
-    __host__ void gather_gpu(const Tensor& t, const Tensor& idx, Tensor& out, const size_t axis) {
+    __host__ void gather_gpu(const Tensor& t, const Tensor& idx, const Tensor& out, const size_t axis) {
         if (t.device != Device::GPU || idx.device != Device::GPU || out.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(t.device));
         }
@@ -115,8 +115,8 @@ namespace BeanTensor::Tensors::detail {
         const auto extent = t.shape[axis];
         const auto ndim = t.ndim;
         const auto numel = out.numel;
-        auto t_dims = std::vector<size_t>(t.dims, t.dims + BT_TENSOR_MAX_DIMS);
-        auto out_dims = std::vector<size_t>(out.dims, out.dims + BT_TENSOR_MAX_DIMS);
+        auto t_dims = std::vector(t.dims, t.dims + BT_TENSOR_MAX_DIMS);
+        const auto out_dims = std::vector(out.dims, out.dims + BT_TENSOR_MAX_DIMS);
         /**
          * Same staging contract as index_select's worker; every output element
          * is one D2D copy (correctness-first: gather has no slab structure).
@@ -144,7 +144,7 @@ namespace BeanTensor::Tensors::detail {
             using DType = DataTypes::DType;
             switch (idx_dtype) {
                 case DType::Int8: run(reinterpret_cast<const int8_t*>(staged.data())); break;
-                case DType::UInt8: run(reinterpret_cast<const uint8_t*>(staged.data())); break;
+                case DType::UInt8: run(staged.data()); break;
                 case DType::Int16: run(reinterpret_cast<const int16_t*>(staged.data())); break;
                 case DType::UInt16: run(reinterpret_cast<const uint16_t*>(staged.data())); break;
                 case DType::Int32: run(reinterpret_cast<const int32_t*>(staged.data())); break;
@@ -168,7 +168,7 @@ namespace BeanTensor::Tensors::detail {
      * @param out Fresh output tensor, summed extent along axis.
      * @param axis Axis concatenated along.
      */
-    __host__ void cat_gpu(const std::vector<Tensor>& tensors, Tensor& out, const size_t axis) {
+    __host__ void cat_gpu(const std::vector<Tensor>& tensors, const Tensor& out, const size_t axis) {
         for (const auto& t : tensors) {
             if (t.device != Device::GPU || out.device != Device::GPU) {
                 throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(t.device));

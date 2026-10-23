@@ -55,7 +55,7 @@ namespace BeanTensor::Tensors::detail::elementwise_shared {
      * @return The scalar as T under the PERMISSIVE conversion contract.
      */
     template<typename T>
-    [[nodiscard]] inline T narrow_scalar(const float64_t v) {
+    [[nodiscard]] T narrow_scalar(const float64_t v) {
         if constexpr (std::is_same_v<T, float32_t>) {
             return static_cast<float32_t>(v);
         } else if constexpr (std::is_same_v<T, float64_t>) {
@@ -68,23 +68,25 @@ namespace BeanTensor::Tensors::detail::elementwise_shared {
             const auto bits = Intrinsics::detail::bit_cast_memcpy<uint16_t>(lane);
             return linearalgebra_shared::pack_lanes<T>(bits, bits);
         } else if constexpr (std::is_same_v<T, int4x2_t>) {
-            if (std::isnan(v)) {
+            if (__builtin_isnan(v)) {
                 return linearalgebra_shared::pack_int4(0, 0);
             }
             const auto t = std::trunc(v);
-            const auto clamped = t > 7.0 ? int32_t{7} : (t < -8.0 ? int32_t{-8} : static_cast<int32_t>(t));
+            const auto clamped = t > 7.0 ? int32_t{7} : t < -8.0 ? int32_t{-8} : static_cast<int32_t>(t);
             return linearalgebra_shared::pack_int4(clamped, clamped);
         } else {
             static_assert(std::is_integral_v<T>);
-            if (std::isnan(v)) {
+            if (__builtin_isnan(v)) {
                 return T{0};
             }
             const auto t = std::trunc(v);
             constexpr auto lo = static_cast<float64_t>(std::numeric_limits<T>::lowest());
-            constexpr auto hi = static_cast<float64_t>(std::numeric_limits<T>::max());
             // hi for uint64/int64 rounds UP in fp64 (2^64 / 2^63), so t >= hi
             // catches every out-of-range value before the UB cast.
-            if (t >= hi) {
+            if (
+                constexpr auto hi = static_cast<float64_t>(std::numeric_limits<T>::max());
+                t >= hi
+                ) {
                 return std::numeric_limits<T>::max();
             }
             if (t <= lo) {

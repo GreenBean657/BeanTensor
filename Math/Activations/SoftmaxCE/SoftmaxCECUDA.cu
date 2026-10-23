@@ -6,7 +6,7 @@
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same fp32/fp64 compute widths, same RNE narrowing,
  * same NaN propagation.
- * @version 0.1
+ * @version 0.1.1
  * @date 2026-10-20
  */
 #if defined(USE_CUDA)
@@ -331,7 +331,7 @@ namespace BeanTensor::Tensors::detail {
      * @param out Single-element output tensor in the logits dtype.
      * @note Throws DirectFunctionCallOnWrongDataSource when any tensor is not on the GPU.
      */
-    __host__ void softmax_ce_gpu(const Tensor& t, const Tensor& targets, Tensor& out) {
+    __host__ void softmax_ce_gpu(const Tensor& t, const Tensor& targets, const Tensor& out) {
         if (t.device != Device::GPU || targets.device != Device::GPU || out.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(t.device));
         }

@@ -45,7 +45,7 @@ namespace BeanTensor::Tensors::detail::compare_shared {
     template<typename P> struct packed_lane;
     template<> struct packed_lane<float16x2_t> { using type = float16_t; };
     template<> struct packed_lane<bfloat16x2_t> { using type = bfloat16_t; };
-    template<typename P> using packed_lane_t = typename packed_lane<P>::type;
+    template<typename P> using packed_lane_t = packed_lane<P>::type;
 
     /**
      * Reads bits[15:0] of the packed 32-bit unit.
@@ -78,7 +78,7 @@ namespace BeanTensor::Tensors::detail::compare_shared {
      * @return T/F - the keys are equal.
      */
     [[nodiscard]] inline bool float_eq(const float64_t a, const float64_t b) {
-        return !(a < b) && !(b < a) && !std::isnan(a) && !std::isnan(b);
+        return !(a < b) && !(b < a) && !__builtin_isnan(a) && !__builtin_isnan(b);
     }
 
     // --------------------------- launchers ---------------------------

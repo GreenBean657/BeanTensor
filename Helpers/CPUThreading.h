@@ -62,7 +62,7 @@ namespace BeanTensor::Threading {
                         while (true) {
                             std::function<void()> task;
                             {
-                                std::unique_lock<std::mutex> lock(this->queue_mutex);
+                                std::unique_lock lock(this->queue_mutex);
                                 this->queue_cv.wait(lock, [this] {
                                     return this->stop.load() || !this->tasks.empty();
                                 });
@@ -78,7 +78,7 @@ namespace BeanTensor::Threading {
                             // drained, wake wait_all() waiters. Skip the notify_all
                             // otherwise to avoid a thundering herd per task.
                             if (--active_tasks == 0) {
-                                std::unique_lock<std::mutex> lock(this->queue_mutex);
+                                std::unique_lock lock(this->queue_mutex);
                                 if (this->tasks.empty()) {
                                     this->queue_cv.notify_all();
                                 }
@@ -95,7 +95,7 @@ namespace BeanTensor::Threading {
          */
         ~ThreadPool() {
                 {
-                    std::unique_lock<std::mutex> lock(this->queue_mutex);
+                    std::unique_lock lock(this->queue_mutex);
                     this->stop = true;
                 }
                 queue_cv.notify_all();
@@ -112,7 +112,7 @@ namespace BeanTensor::Threading {
          * @return size_t - Number of tasks in the queue.
          */
         size_t queue_size() const {
-                std::unique_lock<std::mutex> lock(this->queue_mutex);
+                std::unique_lock lock(this->queue_mutex);
                 return this->tasks.size();
             }
 
@@ -121,7 +121,7 @@ namespace BeanTensor::Threading {
          * @brief Wait for all threads.
          */
         [[maybe_unused]] void wait_all() {
-                std::unique_lock<std::mutex> lock(this->queue_mutex);
+                std::unique_lock lock(this->queue_mutex);
                 this->queue_cv.wait(lock, [this] {
                     return tasks.empty() && active_tasks == 0;
                 });
@@ -141,7 +141,7 @@ namespace BeanTensor::Threading {
                 auto task = std::make_shared<std::packaged_task<void()>>(std::forward<Function>(executableFunction));
                 std::future<void> future = task->get_future();
                 {
-                    std::unique_lock<std::mutex> lock(this->queue_mutex);
+                    std::unique_lock lock(this->queue_mutex);
                     if (this->stop.load()) {
                         throw std::runtime_error("ThreadPool::submit on stopped pool");
                     }

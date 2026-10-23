@@ -59,7 +59,7 @@ namespace BeanTensor::Tensors::detail::reductions_shared {
     template<typename P> struct packed_lane;
     template<> struct packed_lane<float16x2_t> { using type = float16_t; };
     template<> struct packed_lane<bfloat16x2_t> { using type = bfloat16_t; };
-    template<typename P> using packed_lane_t = typename packed_lane<P>::type;
+    template<typename P> using packed_lane_t = packed_lane<P>::type;
 
     /**
      * Reads bits[15:0] of the packed 32-bit unit.
@@ -148,8 +148,8 @@ namespace BeanTensor::Tensors::detail::reductions_shared {
         std::vector<std::shared_future<void>> futures;
         const auto chunk = (numel + t_count - 1) / t_count;
         auto slot = size_t{0};
-        for (auto t = size_t{0}; t < t_count; ++t) {
-            const auto begin = t * chunk;
+        for (auto tid = size_t{0}; tid < t_count; ++tid) {
+            const auto begin = tid * chunk;
             if (begin >= numel) {
                 break;
             }

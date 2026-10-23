@@ -6,12 +6,11 @@
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same fp32/fp64 compute widths, same RNE narrowing,
  * same uint64 wrap integer sums.
- * @version 0.1
+ * @version 0.2
  * @date 2026-10-20
  */
 #if defined(USE_HIP)
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <type_traits>
 
@@ -64,7 +63,7 @@ namespace BeanTensor::Tensors::detail {
          * @param v Packed element.
          * @return Accumulator pair {lo, hi}.
          */
-        __device__ __forceinline__ float2 widen_acc(const bfloat16x2_t v) {
+        __device__ __forceinline__ float2 widen_acc(const bfloat16x2_t& v) {
             return make_float2(__bfloat162float(__low2bfloat16(v)), __bfloat162float(__high2bfloat16(v)));
         }
         /**
@@ -75,7 +74,7 @@ namespace BeanTensor::Tensors::detail {
          */
         __device__ __forceinline__ uint2 widen_acc(const int4x2_t v) {
             const auto bits = __builtin_bit_cast(uint8_t, v);
-            return make_uint2(static_cast<uint32_t>(bits & 0x0Fu), static_cast<uint32_t>(bits >> 4));
+            return make_uint2(bits & 0x0Fu, bits >> 4);
         }
         /**
          * Modular accumulate keeps every backend/chunking bit-identical.
@@ -255,7 +254,7 @@ namespace BeanTensor::Tensors::detail {
      * @param t Input tensor.
      * @param out Single element output tensor, same dtype as t.
      */
-    __host__ void sum_gpu(const Tensor& t, Tensor& out) {
+    __host__ void sum_gpu(const Tensor& t, const Tensor& out) {
         if (t.device != Device::GPU || out.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(t.device));
         }

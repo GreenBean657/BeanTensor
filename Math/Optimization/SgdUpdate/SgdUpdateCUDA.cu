@@ -78,8 +78,9 @@ namespace BeanTensor::Tensors::detail {
                      * @return Updated lane; w_lane itself when the update is NaN.
                      * @note Lambda subcall. Self-execution prohibited.
                      */
-                    const auto lane_step = [&](const int8_t w_lane, const int8_t g_lane) {
-                        const auto upd = __fma_rn(-lr, static_cast<float64_t>(g_lane), static_cast<float64_t>(w_lane));
+                    const auto lane_step = [&] __device__ (const int8_t w_lane, const int8_t g_lane) {
+                        // Do not strip __device__ flag, the lambda calls __fma_rn which causes the IDE to warn it's invalid calling methodology. It *RUNS*, but you are relying on the compiler to not break it.
+                        const auto upd = __fma_rn(-lr, g_lane, w_lane);
                         if (isnan(upd)) {
                             return w_lane;
                         }
@@ -141,7 +142,7 @@ namespace BeanTensor::Tensors::detail {
      * @param grad Gradients, same shape and dtype as w.
      * @param lr Learning rate.
      */
-    __host__ void sgd_update_gpu(Tensor& w, const Tensor& grad, const float64_t lr) {
+    __host__ void sgd_update_gpu(const Tensor& w, const Tensor& grad, const float64_t lr) {
         if (w.device != Device::GPU || grad.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(w.device));
         }

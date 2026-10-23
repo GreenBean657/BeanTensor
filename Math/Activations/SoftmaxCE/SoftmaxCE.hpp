@@ -2,7 +2,7 @@
  * @file SoftmaxCE.hpp
  * @author GreenBean
  * @brief CPU only build fall back for softmax_ce - throws and does nothing else.
- * @version 0.1
+ * @version 0.1.1
  * @date 2026-10-20
  */
 #pragma once
@@ -19,7 +19,7 @@ namespace BeanTensor::Tensors {
          * @brief CPU-only build stub for GPU softmax_ce.
          * @note Always throws ErrorHandling::GPUTaskOnCPUBuild.
          */
-        inline void softmax_ce_gpu(const Tensor&, const Tensor&, Tensor&) {
+        inline void softmax_ce_gpu(const Tensor&, const Tensor&, const Tensor&) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
     }

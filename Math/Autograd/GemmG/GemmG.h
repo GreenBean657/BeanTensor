@@ -8,8 +8,6 @@
  */
 #pragma once
 
-#include <cstddef>
-
 #include "Tensor/DTypes.h"
 
 namespace BeanTensor::Tensors {

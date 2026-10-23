@@ -6,7 +6,7 @@
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same fp32/fp64 compute widths, same RNE narrowing,
  * same fp64 integer accumulation with truncate-toward-zero + clamp narrowing.
- * @version 0.1
+ * @version 0.2
  * @date 2026-10-22
  */
 #if defined(USE_HIP)
@@ -63,7 +63,7 @@ namespace BeanTensor::Tensors::detail {
          * @param v Packed element.
          * @return Accumulator pair {lo, hi}.
          */
-        __device__ __forceinline__ float2 mean_widen(const bfloat16x2_t v) {
+        __device__ __forceinline__ float2 mean_widen(const bfloat16x2_t& v) {
             return make_float2(__bfloat162float(__low2bfloat16(v)), __bfloat162float(__high2bfloat16(v)));
         }
         /**
@@ -74,7 +74,7 @@ namespace BeanTensor::Tensors::detail {
          * @return Accumulator pair {lo, hi} of signed lane values.
          */
         __device__ __forceinline__ float2 mean_widen(const int4x2_t v) {
-            return make_float2(static_cast<float32_t>(dev_i4_lo(v)), static_cast<float32_t>(dev_i4_hi(v)));
+            return make_float2(dev_i4_lo(v), dev_i4_hi(v));
         }
         /**
          * The mean accumulates integers in fp64 (no modular wrap, unlike sum). Values past 2^53
@@ -277,7 +277,7 @@ namespace BeanTensor::Tensors::detail {
      * @param t Input tensor.
      * @param out Single element output tensor, same dtype as t.
      */
-    __host__ void mean_gpu(const Tensor& t, Tensor& out) {
+    __host__ void mean_gpu(const Tensor& t, const Tensor& out) {
         if (t.device != Device::GPU || out.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(t.device));
         }

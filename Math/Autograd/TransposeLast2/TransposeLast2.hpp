@@ -17,7 +17,7 @@ namespace BeanTensor::Tensors {
         /**
          * @brief CPU-only build stub for the GPU last-two-dims transpose backend: throws ErrorHandling::GPUTaskOnCPUBuild, since no GPU backend exists to link against.
          */
-        inline void transpose_last2_gpu(const Tensor&, Tensor&) {
+        inline void transpose_last2_gpu(const Tensor&, const Tensor&) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
     }

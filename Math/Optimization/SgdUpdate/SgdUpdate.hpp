@@ -18,7 +18,7 @@ namespace BeanTensor::Tensors {
         /**
          * @brief CPU-only build stub for the GPU SGD step. Always throws.
          */
-        inline void sgd_update_gpu(Tensor&, const Tensor&, float64_t) {
+        inline void sgd_update_gpu(const Tensor&, const Tensor&, float64_t) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
     }

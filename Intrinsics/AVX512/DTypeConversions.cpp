@@ -38,10 +38,10 @@ namespace BeanTensor::Intrinsics::detail {
         if (!supported) throw ErrorHandling::CPUIllegalInstruction("AVX512BF16");
 
         const size_t t = IncludedCPUFeatures().threads;
-        const auto* src_f = static_cast<const float32_t*>(src);
+        const auto* src_f = src;
 
         // Runtime 64-byte alignment check — enables NT stores which bypass cache
-        const bool aligned = (reinterpret_cast<uintptr_t>(dst) % 64) == 0;
+        const bool aligned = reinterpret_cast<uintptr_t>(dst) % 64 == 0;
 
         auto compute = [src_f, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
             bool local_flag = false;
@@ -138,7 +138,7 @@ namespace BeanTensor::Intrinsics::detail {
         const size_t t = IncludedCPUFeatures().threads;
 
         // Runtime 64-byte alignment check for NT stores
-        const bool aligned = (reinterpret_cast<uintptr_t>(dst) % 64) == 0;
+        const bool aligned = reinterpret_cast<uintptr_t>(dst) % 64 == 0;
 
         auto compute = [src, dst, aligned](const size_t start, const size_t end_l) {
             std::size_t i = start;
@@ -241,7 +241,7 @@ namespace BeanTensor::Intrinsics::detail {
 
         const size_t t = IncludedCPUFeatures().threads;
 
-        const bool aligned = (reinterpret_cast<uintptr_t>(dst) % 64) == 0;
+        const bool aligned = reinterpret_cast<uintptr_t>(dst) % 64 == 0;
 
         auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
             bool local_flag = false;
@@ -361,7 +361,7 @@ namespace BeanTensor::Intrinsics::detail {
 
         const size_t t = IncludedCPUFeatures().threads;
 
-        const bool aligned = (reinterpret_cast<uintptr_t>(dst) % 64) == 0;
+        const bool aligned = reinterpret_cast<uintptr_t>(dst) % 64 == 0;
 
         auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
             bool local_flag = false;
@@ -372,8 +372,12 @@ namespace BeanTensor::Intrinsics::detail {
                 if (method == ConversionClampMethod::STRICT) {
                     // NaN/Inf inputs flag under STRICT.
                     const __m256i exp = _mm256_and_si256(h, _mm256_set1_epi16(0x7C00));
-                    const __m256i special = _mm256_cmpeq_epi16(exp, _mm256_set1_epi16(0x7C00));
-                    if (_mm256_movemask_epi8(special) != 0) local_flag = true;
+                    if (
+                        const __m256i special = _mm256_cmpeq_epi16(exp, _mm256_set1_epi16(0x7C00));
+                        _mm256_movemask_epi8(special) != 0
+                    ) {
+                        local_flag = true;
+                    }
                 } else if (method != ConversionClampMethod::PERMISSIVE) {
                     // ALLOW_INF: NaN flags, Inf does not — matches the scalar path.
                     const __m256i exp = _mm256_and_si256(h, _mm256_set1_epi16(0x7C00));
@@ -453,7 +457,7 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto aligned = (reinterpret_cast<uintptr_t>(dst) % 64) == 0;
+        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 64 == 0;
 
         auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
@@ -551,7 +555,7 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto aligned = (reinterpret_cast<uintptr_t>(dst) % 32) == 0;
+        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 32 == 0;
 
         auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
@@ -651,13 +655,13 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto aligned = (reinterpret_cast<uintptr_t>(dst) % 64) == 0;
+        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 64 == 0;
 
         auto compute = [src, dst, aligned](const size_t start, const size_t end_l) {
             auto i = start;
 
             for (; i + 16 <= end_l; i += 16) {
-                const auto v = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(src + i));
+                const auto v = _mm512_loadu_si512(src + i);
                 const auto f = _mm512_cvtepi32_ps(v);
                 if (aligned) {
                     _mm512_stream_ps(dst + i, f);
@@ -720,7 +724,7 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto aligned = (reinterpret_cast<uintptr_t>(dst) % 64) == 0;
+        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 64 == 0;
 
         auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
@@ -752,7 +756,7 @@ namespace BeanTensor::Intrinsics::detail {
                 if (aligned) {
                     _mm512_stream_si512(reinterpret_cast<__m512i*>(dst + i), r);
                 } else {
-                    _mm512_storeu_si512(reinterpret_cast<__m512i*>(dst + i), r);
+                    _mm512_storeu_si512(dst + i, r);
                 }
             }
 
@@ -808,13 +812,13 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto aligned = (reinterpret_cast<uintptr_t>(dst) % 64) == 0;
+        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 64 == 0;
 
         auto compute = [src, dst, aligned](const size_t start, const size_t end_l) {
             auto i = start;
 
             for (; i + 16 <= end_l; i += 16) {
-                const auto v = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(src + i));
+                const auto v = _mm512_loadu_si512(src + i);
                 const auto f = _mm512_cvtepu32_ps(v);
                 if (aligned) {
                     _mm512_stream_ps(dst + i, f);
@@ -876,7 +880,7 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto aligned = (reinterpret_cast<uintptr_t>(dst) % 64) == 0;
+        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 64 == 0;
 
         auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
@@ -906,7 +910,7 @@ namespace BeanTensor::Intrinsics::detail {
                 if (aligned) {
                     _mm512_stream_si512(reinterpret_cast<__m512i*>(dst + i), r);
                 } else {
-                    _mm512_storeu_si512(reinterpret_cast<__m512i*>(dst + i), r);
+                    _mm512_storeu_si512(dst + i, r);
                 }
             }
 
@@ -1001,13 +1005,13 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto aligned = (reinterpret_cast<uintptr_t>(dst) % 64) == 0;
+        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 64 == 0;
 
         auto compute = [src, dst, aligned](const size_t start, const size_t end_l) {
             auto i = start;
 
             for (; i + 8 <= end_l; i += 8) {
-                const auto v = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(src + i));
+                const auto v = _mm512_loadu_si512(src + i);
                 const auto d = _mm512_cvtepi64_pd(v);
                 if (aligned) {
                     _mm512_stream_pd(dst + i, d);
@@ -1069,7 +1073,7 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto aligned = (reinterpret_cast<uintptr_t>(dst) % 64) == 0;
+        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 64 == 0;
 
         auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
@@ -1099,7 +1103,7 @@ namespace BeanTensor::Intrinsics::detail {
                 if (aligned) {
                     _mm512_stream_si512(reinterpret_cast<__m512i*>(dst + i), r);
                 } else {
-                    _mm512_storeu_si512(reinterpret_cast<__m512i*>(dst + i), r);
+                    _mm512_storeu_si512(dst + i, r);
                 }
             }
 

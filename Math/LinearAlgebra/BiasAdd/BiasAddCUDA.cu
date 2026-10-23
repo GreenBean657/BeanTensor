@@ -11,7 +11,6 @@
  */
 #if defined(USE_CUDA)
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <type_traits>
 
@@ -103,7 +102,7 @@ namespace BeanTensor::Tensors::detail {
      * @param out Output tensor, same shape and dtype as t.
      * @note Throws DirectFunctionCallOnWrongDataSource when any tensor is not on the GPU.
      */
-    __host__ void bias_add_gpu(const Tensor& t, const Tensor& bias, Tensor& out) {
+    __host__ void bias_add_gpu(const Tensor& t, const Tensor& bias, const Tensor& out) {
         if (t.device != Device::GPU || bias.device != Device::GPU || out.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(t.device));
         }

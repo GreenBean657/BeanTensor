@@ -9,7 +9,6 @@
 #include "DTypeConversions.h"
 
 #include <bit>
-#include <cmath>
 #include <cstring>
 #include <immintrin.h>
 #include <limits>
@@ -41,10 +40,10 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto* src_f = static_cast<const float32_t*>(src);
+        const auto* src_f = src;
 
         // Runtime 32-byte alignment check — enables NT stores which bypass cache
-        const auto aligned = (reinterpret_cast<uintptr_t>(dst) % 32) == 0;
+        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 32 == 0;
 
         auto compute = [src_f, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
@@ -174,7 +173,7 @@ namespace BeanTensor::Intrinsics::detail {
         const auto t = IncludedCPUFeatures().threads;
 
         // Runtime 32-byte alignment check for NT stores
-        const auto aligned = (reinterpret_cast<uintptr_t>(dst) % 32) == 0;
+        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 32 == 0;
 
         auto compute = [src, dst, aligned](const size_t start, const size_t end_l) {
             auto i = start;
@@ -263,7 +262,7 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto aligned = (reinterpret_cast<uintptr_t>(dst) % 32) == 0;
+        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 32 == 0;
 
         auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
@@ -360,7 +359,7 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto aligned = (reinterpret_cast<uintptr_t>(dst) % 16) == 0;
+        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 16 == 0;
 
         auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
@@ -460,7 +459,7 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto aligned = (reinterpret_cast<uintptr_t>(dst) % 32) == 0;
+        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 32 == 0;
 
         auto compute = [src, dst, aligned](const size_t start, const size_t end_l) {
             auto i = start;
@@ -529,7 +528,7 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto aligned = (reinterpret_cast<uintptr_t>(dst) % 32) == 0;
+        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 32 == 0;
 
         auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
@@ -660,7 +659,7 @@ namespace BeanTensor::Intrinsics::detail {
 
         const auto t = IncludedCPUFeatures().threads;
 
-        const auto aligned = (reinterpret_cast<uintptr_t>(dst) % 32) == 0;
+        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 32 == 0;
 
         auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
@@ -774,7 +773,7 @@ namespace BeanTensor::Intrinsics::detail {
 
         const auto t = IncludedCPUFeatures().threads;
 
-        const auto aligned = (reinterpret_cast<uintptr_t>(dst) % 32) == 0;
+        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 32 == 0;
 
         auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
@@ -785,8 +784,10 @@ namespace BeanTensor::Intrinsics::detail {
                 if (method == ConversionClampMethod::STRICT) {
                     // NaN/Inf inputs flag under STRICT.
                     const auto exp = _mm_and_si128(h, _mm_set1_epi16(0x7C00));
-                    const auto special = _mm_cmpeq_epi16(exp, _mm_set1_epi16(0x7C00));
-                    if (_mm_movemask_epi8(special) != 0) {
+                    if (
+                        const auto special = _mm_cmpeq_epi16(exp, _mm_set1_epi16(0x7C00));
+                        _mm_movemask_epi8(special) != 0
+                    ) {
                         local_flag = true;
                     }
                 } else if (method != ConversionClampMethod::PERMISSIVE) {

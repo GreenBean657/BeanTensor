@@ -184,7 +184,7 @@ namespace BeanTensor::Math::LinearAlgebra {
          * VPMADDWD k-pair layout produced by the unpacklo/hi interleave below.
          * @brief Broadcast two s16 k-slices of one A row to all lanes.
          */
-        inline __m256i broadcast_s16_pair(const int16_t lo, const int16_t hi) {
+        __m256i broadcast_s16_pair(const int16_t lo, const int16_t hi) {
             const auto packed = static_cast<uint32_t>(static_cast<uint16_t>(lo)) |
                                 (static_cast<uint32_t>(static_cast<uint16_t>(hi)) << 16);
             return _mm256_set1_epi32(static_cast<int32_t>(packed));
@@ -196,7 +196,7 @@ namespace BeanTensor::Math::LinearAlgebra {
          * @brief Load + widen 16 B elements to s16.
          */
         template<typename T>
-        inline __m256i widen8_to_s16(const T* p) {
+        __m256i widen8_to_s16(const T* p) {
             const auto raw = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
             if constexpr (std::is_signed_v<T>) {
                 return _mm256_cvtepi8_epi16(raw);
@@ -210,7 +210,7 @@ namespace BeanTensor::Math::LinearAlgebra {
          * nibble (bits [7:4]) to s16. Exact for 4-bit two's complement.
          * @brief Scalar nibble extract + sign-extend to int16_t.
          */
-        [[nodiscard]] inline int16_t nib_lo_s16(const uint8_t v) {
+        [[nodiscard]] int16_t nib_lo_s16(const uint8_t v) {
             const auto nib = static_cast<int32_t>(v & 0x0Fu);
             return static_cast<int16_t>(nib >= 8 ? nib - 16 : nib);
         }
@@ -222,8 +222,8 @@ namespace BeanTensor::Math::LinearAlgebra {
          * @param v The packed byte.
          * @return The sign-extended hi nibble in [-8, 7].
          */
-        [[nodiscard]] inline int16_t nib_hi_s16(const uint8_t v) {
-            const auto nib = static_cast<int32_t>(v >> 4);
+        [[nodiscard]] int16_t nib_hi_s16(const uint8_t v) {
+            const auto nib = v >> 4;
             return static_cast<int16_t>(nib >= 8 ? nib - 16 : nib);
         }
 
@@ -244,7 +244,7 @@ namespace BeanTensor::Math::LinearAlgebra {
          * 4-bit two's-complement nibble.
          * @brief Load 16 packed bytes, widen lo/hi nibble lanes to s16.
          */
-        [[nodiscard]] inline S16NibblePair widen_nibbles_to_s16(const int4x2_t* p) {
+        [[nodiscard]] S16NibblePair widen_nibbles_to_s16(const int4x2_t* p) {
             const auto raw = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
             const auto nmask = _mm_set1_epi32(0x0F0F0F0F);
             const auto sbit = _mm_set1_epi32(0x08080808);
@@ -318,12 +318,12 @@ namespace BeanTensor::Math::LinearAlgebra {
             }
             for (auto kk = size_t{0}; kk < k; kk += 2) {
                 const auto bw0 = widen8_to_s16(b + kk * n + j);
-                const auto bw1 = (kk + 1 < k) ? widen8_to_s16(b + (kk + 1) * n + j) : _mm256_setzero_si256();
+                const auto bw1 = kk + 1 < k ? widen8_to_s16(b + (kk + 1) * n + j) : _mm256_setzero_si256();
                 const auto bp_lo = _mm256_unpacklo_epi16(bw0, bw1);
                 const auto bp_hi = _mm256_unpackhi_epi16(bw0, bw1);
                 for (auto r = size_t{0}; r < ROWS; ++r) {
                     const auto* ar = a + (i + r) * k;
-                    const auto a_hi = (kk + 1 < k) ? static_cast<int16_t>(ar[kk + 1]) : int16_t{0};
+                    const auto a_hi = kk + 1 < k ? static_cast<int16_t>(ar[kk + 1]) : int16_t{0};
                     const auto av = broadcast_s16_pair(static_cast<int16_t>(ar[kk]), a_hi);
                     acc_lo[r] = _mm256_add_epi32(acc_lo[r], _mm256_madd_epi16(av, bp_lo));
                     acc_hi[r] = _mm256_add_epi32(acc_hi[r], _mm256_madd_epi16(av, bp_hi));
@@ -360,14 +360,14 @@ namespace BeanTensor::Math::LinearAlgebra {
             }
             for (auto kk = size_t{0}; kk < k; kk += 2) {
                 const auto bw0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b + kk * n + j));
-                const auto bw1 = (kk + 1 < k)
+                const auto bw1 = kk + 1 < k
                                      ? _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b + (kk + 1) * n + j))
                                      : _mm256_setzero_si256();
                 const auto bp_lo = _mm256_unpacklo_epi16(bw0, bw1);
                 const auto bp_hi = _mm256_unpackhi_epi16(bw0, bw1);
                 for (auto r = size_t{0}; r < ROWS; ++r) {
                     const auto* ar = a + (i + r) * k;
-                    const auto a_hi = (kk + 1 < k) ? ar[kk + 1] : int16_t{0};
+                    const auto a_hi = kk + 1 < k ? ar[kk + 1] : int16_t{0};
                     const auto av = broadcast_s16_pair(ar[kk], a_hi);
                     acc_lo[r] = _mm256_add_epi32(acc_lo[r], _mm256_madd_epi16(av, bp_lo));
                     acc_hi[r] = _mm256_add_epi32(acc_hi[r], _mm256_madd_epi16(av, bp_hi));
@@ -414,7 +414,7 @@ namespace BeanTensor::Math::LinearAlgebra {
             for (auto kk = size_t{0}; kk < k; kk += 2) {
                 const auto bw0 = _mm256_xor_si256(
                     _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b + kk * n + j)), flip);
-                const auto bw1 = (kk + 1 < k)
+                const auto bw1 = kk + 1 < k
                                      ? _mm256_xor_si256(
                                            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b + (kk + 1) * n + j)), flip)
                                      : _mm256_setzero_si256();
@@ -425,7 +425,7 @@ namespace BeanTensor::Math::LinearAlgebra {
                 for (auto r = size_t{0}; r < ROWS; ++r) {
                     const auto* ar = a + (i + r) * k;
                     const auto a_lo = static_cast<int16_t>(static_cast<uint16_t>(ar[kk] ^ uint16_t{0x8000}));
-                    const auto a_hi = (kk + 1 < k)
+                    const auto a_hi = kk + 1 < k
                                           ? static_cast<int16_t>(static_cast<uint16_t>(ar[kk + 1] ^ uint16_t{0x8000}))
                                           : int16_t{0};
                     asum[r] += static_cast<uint32_t>(static_cast<int32_t>(a_lo)) +
@@ -489,7 +489,7 @@ namespace BeanTensor::Math::LinearAlgebra {
         template<typename T, size_t ROWS>
         void gemm_block_w64(const T* a, const T* b, T* c, const size_t k, const size_t n,
                             const size_t i, const size_t j) {
-            const auto mask_lo = _mm256_set1_epi64x(static_cast<int64_t>(uint64_t{0xFFFFFFFF}));
+            const auto mask_lo = _mm256_set1_epi64x(uint64_t{0xFFFFFFFF});
             __m256i acc[ROWS];
             for (auto r = size_t{0}; r < ROWS; ++r) {
                 acc[r] = _mm256_setzero_si256();
@@ -535,16 +535,16 @@ namespace BeanTensor::Math::LinearAlgebra {
                 }
             }
             for (auto kk = size_t{0}; kk < k; kk += 2) {
-                const auto bw0 = widen_nibbles_to_s16(b + kk * n + j);
-                const auto bw1 = (kk + 1 < k) ? widen_nibbles_to_s16(b + (kk + 1) * n + j) : S16NibblePair{};
+                const auto [bw0_lo, bw0_hi] = widen_nibbles_to_s16(b + kk * n + j);
+                const auto [bw1_lo, bw1_hi] = kk + 1 < k ? widen_nibbles_to_s16(b + (kk + 1) * n + j) : S16NibblePair{};
                 const __m256i bp[2][2] = {
-                    {_mm256_unpacklo_epi16(bw0.lo, bw1.lo), _mm256_unpackhi_epi16(bw0.lo, bw1.lo)},
-                    {_mm256_unpacklo_epi16(bw0.hi, bw1.hi), _mm256_unpackhi_epi16(bw0.hi, bw1.hi)},
+                    {_mm256_unpacklo_epi16(bw0_lo, bw1_lo), _mm256_unpackhi_epi16(bw0_lo, bw1_lo)},
+                    {_mm256_unpacklo_epi16(bw0_hi, bw1_hi), _mm256_unpackhi_epi16(bw0_hi, bw1_hi)},
                 };
                 for (auto r = size_t{0}; r < ROWS; ++r) {
                     const auto* ar = a + (i + r) * k;
                     const auto ab0 = static_cast<uint8_t>(ar[kk]);
-                    const auto ab1 = (kk + 1 < k) ? static_cast<uint8_t>(ar[kk + 1]) : uint8_t{0};
+                    const auto ab1 = kk + 1 < k ? static_cast<uint8_t>(ar[kk + 1]) : uint8_t{0};
                     const __m256i av[2] = {
                         broadcast_s16_pair(nib_lo_s16(ab0), nib_lo_s16(ab1)),
                         broadcast_s16_pair(nib_hi_s16(ab0), nib_hi_s16(ab1)),

@@ -26,7 +26,7 @@ namespace BeanTensor::Tensors {
         /**
          * @brief CPU-only build stub for the GPU axis argmax. Always throws.
          */
-        inline void argmax_axis_gpu(const Tensor&, Tensor&, size_t) {
+        inline void argmax_axis_gpu(const Tensor&, const Tensor&, size_t) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
     }

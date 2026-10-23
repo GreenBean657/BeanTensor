@@ -27,7 +27,7 @@ namespace BeanTensor::Tensors::detail {
      * @param out Destination tensor with the last two dimensions swapped (written).
      * @throws ErrorHandling::DirectFunctionCallOnWrongDataSource if either tensor is not on the CPU.
      */
-    void transpose_last2_cpu(const Tensor& t, Tensor& out) {
+    void transpose_last2_cpu(const Tensor& t, const Tensor& out) {
         if (t.device != Device::CPU || out.device != Device::CPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("CPU", stringify_device_source(t.device));
         }

@@ -6,12 +6,11 @@
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same fp32/fp64 compute widths, same RNE narrowing,
  * same uint64 wrap integer sums.
- * @version 0.1
+ * @version 0.2
  * @date 2026-10-20
  */
 #if defined(USE_CUDA)
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <type_traits>
 
@@ -57,7 +56,7 @@ namespace BeanTensor::Tensors::detail {
          * @param v Packed element.
          * @return Accumulator pair {lo, hi}.
          */
-        __device__ __forceinline__ float2 widen_acc(const float16x2_t v) {
+        __device__ __forceinline__ float2 widen_acc(const float16x2_t& v) {
             return make_float2(__half2float(__low2half(v)), __half2float(__high2half(v)));
         }
         /**
@@ -65,7 +64,7 @@ namespace BeanTensor::Tensors::detail {
          * @param v Packed element.
          * @return Accumulator pair {lo, hi}.
          */
-        __device__ __forceinline__ float2 widen_acc(const bfloat16x2_t v) {
+        __device__ __forceinline__ float2 widen_acc(const bfloat16x2_t& v) {
             return make_float2(__bfloat162float(__low2bfloat16(v)), __bfloat162float(__high2bfloat16(v)));
         }
         /**
@@ -76,7 +75,7 @@ namespace BeanTensor::Tensors::detail {
          */
         __device__ __forceinline__ uint2 widen_acc(const int4x2_t v) {
             const auto bits = __builtin_bit_cast(uint8_t, v);
-            return make_uint2(static_cast<uint32_t>(bits & 0x0Fu), static_cast<uint32_t>(bits >> 4));
+            return make_uint2(bits & 0x0Fu, bits >> 4);
         }
         /**
          * Modular accumulate keeps every backend/chunking bit-identical.
@@ -148,7 +147,7 @@ namespace BeanTensor::Tensors::detail {
             const auto tid = threadIdx.x;
             const size_t gid = threadIdx.x + blockIdx.x * blockDim.x;
             const size_t stride = blockDim.x * gridDim.x;
-            Acc acc;
+            auto acc = Acc{};
             if constexpr (std::is_same_v<Acc, float2>) {
                 acc = make_float2(0.0f, 0.0f);
             } else if constexpr (std::is_same_v<Acc, uint2>) {
@@ -207,7 +206,7 @@ namespace BeanTensor::Tensors::detail {
         __global__ void sum_final_kernel(const Acc* __restrict__ partials, const size_t count, T* __restrict__ out) {
             __shared__ Acc shared[BT_GPU_THREADS];
             const auto tid = threadIdx.x;
-            Acc acc;
+            auto acc = Acc{};
             if constexpr (std::is_same_v<Acc, float2>) {
                 acc = make_float2(0.0f, 0.0f);
             } else if constexpr (std::is_same_v<Acc, uint2>) {
@@ -256,7 +255,7 @@ namespace BeanTensor::Tensors::detail {
      * @param t Input tensor.
      * @param out Single element output tensor, same dtype as t.
      */
-    __host__ void sum_gpu(const Tensor& t, Tensor& out) {
+    __host__ void sum_gpu(const Tensor& t, const Tensor& out) {
         if (t.device != Device::GPU || out.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(t.device));
         }

@@ -7,8 +7,6 @@
  * @version 0.1
  * @date 2026-10-20
  */
-#include <algorithm>
-#include <cstdint>
 #include <future>
 #include <type_traits>
 #include <vector>
@@ -18,8 +16,6 @@
 #include "Math/LinearAlgebra/LinearAlgebraShared.h"
 #include "Tensor/Tensor.h"
 
-#include "Helpers/CPUThreading.h"
-#include "Helpers/Hardware.h"
 #include "Intrinsics/Native/DTypeConversions.h"
 
 namespace BeanTensor::Tensors::detail {
@@ -137,7 +133,7 @@ namespace BeanTensor::Tensors::detail {
      * @param bias Rank-1 bias tensor matching the last dimension of t.
      * @param out Output tensor, same shape and dtype as t.
      */
-    void bias_add_cpu(const Tensor& t, const Tensor& bias, Tensor& out) {
+    void bias_add_cpu(const Tensor& t, const Tensor& bias, const Tensor& out) {
         if (t.device != Device::CPU || bias.device != Device::CPU || out.device != Device::CPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("CPU", stringify_device_source(t.device));
         }
@@ -151,7 +147,7 @@ namespace BeanTensor::Tensors::detail {
                 const auto* b_ptr = static_cast<const float32_t*>(bias.data) + bias.offset;
                 const BiasAddScalarFn<float32_t> kernel = Math::LinearAlgebra::bias_add_avx512_available()
                     ? Math::LinearAlgebra::bias_add_f32_range_avx512
-                    : (Math::LinearAlgebra::bias_add_avx2_available() ? Math::LinearAlgebra::bias_add_f32_range_avx2 : bias_add_range_scalar<float32_t>);
+                    : Math::LinearAlgebra::bias_add_avx2_available() ? Math::LinearAlgebra::bias_add_f32_range_avx2 : bias_add_range_scalar<float32_t>;
                 /**
                  * Forwards the captured bias_add pointers to the range kernel.
                  * @brief Elementwise bias_add range worker (fp32/fp64 SIMD or scalar).
@@ -168,7 +164,7 @@ namespace BeanTensor::Tensors::detail {
                 const auto* b_ptr = static_cast<const float64_t*>(bias.data) + bias.offset;
                 const BiasAddScalarFn<float64_t> kernel = Math::LinearAlgebra::bias_add_avx512_available()
                     ? Math::LinearAlgebra::bias_add_f64_range_avx512
-                    : (Math::LinearAlgebra::bias_add_avx2_available() ? Math::LinearAlgebra::bias_add_f64_range_avx2 : bias_add_range_scalar<float64_t>);
+                    : Math::LinearAlgebra::bias_add_avx2_available() ? Math::LinearAlgebra::bias_add_f64_range_avx2 : bias_add_range_scalar<float64_t>;
                 /**
                  * Forwards the captured bias_add pointers to the range kernel.
                  * @brief Elementwise bias_add range worker (fp32/fp64 SIMD or scalar).
@@ -353,7 +349,7 @@ namespace BeanTensor::Tensors {
         }
         sync();
         bias.sync();
-        auto out = Tensor(std::vector<size_t>(this->shape, this->shape + this->ndim), this->dtype, this->device, false);
+        auto out = Tensor(std::vector(this->shape, this->shape + this->ndim), this->dtype, this->device, false);
         if (this->device == Device::CPU) {
             detail::bias_add_cpu(*this, bias, out);
         } else if (this->device == Device::GPU) {

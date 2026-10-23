@@ -2,7 +2,7 @@
  * @file Tensor.h
  * @author GreenBean
  * @brief Tensor class declaration: dtype, shape, device and buffer ownership.
- * @version 0.2
+ * @version 0.3.2
  * @date 2026-10-18
  */
 #pragma once
@@ -60,7 +60,7 @@ namespace BeanTensor::Tensors {
             case Device::GPU: return "GPU";
             [[unlikely]] default: return "Unknown";
         }
-    };
+    }
 
     // Defined ahead of Tensor: Tensor's inline destructor and move assignment
     // delete their owned Node, which requires the complete type.
@@ -289,7 +289,7 @@ namespace BeanTensor::Tensors {
          * reject with NotImplemented. Works identically on CPU and GPU — no
          * data moves, so the call is synchronous.
          * @brief Strided view over per-dimension [start, end) ranges.
-         * @param ranges One [start, end) pair per dimension; rank must match
+         * ranges: One [start, end) pair per dimension; rank must match
          * exactly. Empty ranges (start == end) yield a zero-extent dimension.
          * @return View tensor sharing this tensor's buffer.
          * @throws ErrorHandling::MismatchedShapes Range count differs from the rank.
@@ -304,8 +304,8 @@ namespace BeanTensor::Tensors {
          * contiguous operands — only a leading-axis split feeds straight
          * back into cat). Synchronous and metadata-only, like slice.
          * @brief Split into equal slice views along an axis.
-         * @param axis Axis to split along.
-         * @param sections Number of chunks; must be nonzero and divide shape[axis].
+         * axis: Axis to split along.
+         * sections: Number of chunks; must be nonzero and divide shape[axis].
          * @return One view per chunk, in axis order.
          * @throws ErrorHandling::IndexOutOfRange axis out of bounds.
          * @throws ErrorHandling::MismatchedShapes sections is 0 or does not divide shape[axis].
@@ -326,8 +326,8 @@ namespace BeanTensor::Tensors {
          * drained failures re-queued on the result and surfacing at its next
          * sync() (same contract as matmul).
          * @brief Select slabs along an axis by an index tensor.
-         * @param axis Axis to select along.
-         * @param indices Rank-1 integer index tensor.
+         * axis: Axis to select along.
+         * indices: Rank-1 integer index tensor.
          * @return New tensor with the selected slabs.
          * @throws ErrorHandling::IndexOutOfRange axis out of bounds, or an index
          * outside [0, shape[axis]) (GPU: at sync()).
@@ -347,8 +347,8 @@ namespace BeanTensor::Tensors {
          * output never joins the autograd graph. Blocking contract matches
          * index_select (CPU: direct throw; GPU: at the result's sync()).
          * @brief Gather elements along an axis by an index tensor.
-         * @param axis Axis to gather along.
-         * @param indices Integer index tensor, same rank as this tensor.
+         * axis: Axis to gather along.
+         * indices: Integer index tensor, same rank as this tensor.
          * @return New tensor with the indices' shape.
          * @throws ErrorHandling::IndexOutOfRange axis out of bounds, or an index
          * outside [0, shape[axis]) (GPU: at sync()).
@@ -369,8 +369,8 @@ namespace BeanTensor::Tensors {
          * contract matches index_select (CPU: caller thread; GPU: queued, then
          * drained by the move out, failures surfacing at the result's sync()).
          * @brief Concatenate tensors along an axis.
-         * @param tensors Non-empty list of inputs.
-         * @param axis Axis to concatenate along.
+         * tensors: Non-empty list of inputs.
+         * axis: Axis to concatenate along.
          * @return New contiguous tensor holding all inputs in list order.
          * @throws ErrorHandling::MismatchedShapes Empty list, rank mismatch, or
          * off-axis shape mismatch.
@@ -405,7 +405,7 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::MismatchedDevices Devices differ.
          * @throws ErrorHandling::NotImplemented Non-contiguous operand.
          */
-        void sgd_update(const Tensor& grad, float64_t lr);
+        void sgd_update(const Tensor&, float64_t);
 
         /**
          * SGD step using this tensor's accumulated gradient: sgd_update(*grad, lr).
@@ -537,7 +537,7 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::IndexOutOfRange axis out of bounds or tensor is empty.
          * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
          */
-        [[nodiscard]] Tensor argmax(const size_t axis) const;
+        [[nodiscard]] Tensor argmax(size_t axis) const;
 
         /**
          * Elementwise equality mask, out of place: out[i] = this[i] == other[i]
@@ -682,7 +682,7 @@ namespace BeanTensor::Tensors {
          * move is re-queued on the result as a poisoned future and still
          * surfaces at its next sync().
          * @brief Elementwise add with NumPy-style broadcasting.
-         * @param o Right operand, same dtype and device, contiguous.
+         * o: Right operand, same dtype and device, contiguous.
          * @return New tensor, the broadcast shape, this tensor's dtype.
          * @throws ErrorHandling::MismatchedShapes Operands are not broadcast-compatible.
          * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
@@ -695,13 +695,13 @@ namespace BeanTensor::Tensors {
          * this tensor's dtype. Broadcasting/compute/async contracts: see the
          * tensor-tensor add doc block above.
          * @brief Elementwise add of a scalar.
-         * @param scalar Scalar operand (float64_t).
+         * scalar: Scalar operand (float64_t).
          * @return New tensor, same shape/dtype/device as this.
          */
         [[nodiscard]] Tensor add(const float64_t&) const;
         /**
          * @brief Elementwise subtract with NumPy-style broadcasting.
-         * @param o Right operand (the subtrahend), same dtype and device, contiguous.
+         * o: Right operand (the subtrahend), same dtype and device, contiguous.
          * @return New tensor, the broadcast shape, this tensor's dtype.
          * @throws ErrorHandling::MismatchedShapes Operands are not broadcast-compatible.
          * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
@@ -714,13 +714,13 @@ namespace BeanTensor::Tensors {
          * into this tensor's dtype. Contracts: see the tensor-tensor add doc
          * block above.
          * @brief Elementwise subtract of a scalar.
-         * @param scalar Scalar operand (float64_t).
+         * scalar: Scalar operand (float64_t).
          * @return New tensor, same shape/dtype/device as this.
          */
         [[nodiscard]] Tensor sub(const float64_t&) const;
         /**
          * @brief Elementwise multiply with NumPy-style broadcasting.
-         * @param o Right operand, same dtype and device, contiguous.
+         * o: Right operand, same dtype and device, contiguous.
          * @return New tensor, the broadcast shape, this tensor's dtype.
          * @throws ErrorHandling::MismatchedShapes Operands are not broadcast-compatible.
          * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
@@ -733,7 +733,7 @@ namespace BeanTensor::Tensors {
          * into this tensor's dtype. Contracts: see the tensor-tensor add doc
          * block above.
          * @brief Elementwise multiply by a scalar.
-         * @param scalar Scalar operand (float64_t).
+         * scalar: Scalar operand (float64_t).
          * @return New tensor, same shape/dtype/device as this.
          */
         [[nodiscard]] Tensor mul(const float64_t&) const;
@@ -742,7 +742,7 @@ namespace BeanTensor::Tensors {
          * NaN); integer div truncates toward zero, division by zero yields 0,
          * and min/-1 yields min (wrap) — never UB.
          * @brief Elementwise divide with NumPy-style broadcasting.
-         * @param o Right operand (the divisor), same dtype and device, contiguous.
+         * o: Right operand (the divisor), same dtype and device, contiguous.
          * @return New tensor, the broadcast shape, this tensor's dtype.
          * @throws ErrorHandling::MismatchedShapes Operands are not broadcast-compatible.
          * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
@@ -755,7 +755,7 @@ namespace BeanTensor::Tensors {
          * into this tensor's dtype. Division edge semantics: see the
          * tensor-tensor div doc block above.
          * @brief Elementwise divide by a scalar.
-         * @param scalar Scalar operand (float64_t).
+         * scalar: Scalar operand (float64_t).
          * @return New tensor, same shape/dtype/device as this.
          */
         [[nodiscard]] Tensor div(const float64_t&) const;
@@ -767,7 +767,7 @@ namespace BeanTensor::Tensors {
          * RNE. IEEE edge semantics come from the backend libm (e.g. negative
          * base with non-integer exponent -> NaN, 0^0 -> 1).
          * @brief Elementwise power with NumPy-style broadcasting.
-         * @param o Right operand (the exponent), same dtype and device, contiguous.
+         * o: Right operand (the exponent), same dtype and device, contiguous.
          * @return New tensor, the broadcast shape, this tensor's dtype.
          * @throws ErrorHandling::MismatchedShapes Operands are not broadcast-compatible.
          * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
@@ -780,7 +780,7 @@ namespace BeanTensor::Tensors {
          * this tensor's dtype; integer dtypes are rejected (same contract as
          * the tensor-tensor pow).
          * @brief Elementwise power with a scalar exponent.
-         * @param scalar Scalar exponent (float64_t).
+         * scalar: Scalar exponent (float64_t).
          * @return New tensor, same shape/dtype/device as this.
          * @throws ErrorHandling::NotImplemented Integer dtype.
          */
@@ -835,7 +835,7 @@ namespace BeanTensor::Tensors {
         }
 
         [[nodiscard]] bool is_same_shape(const Tensor& t2) const {
-            return (ndim == t2.ndim) && std::equal(shape, shape + ndim, t2.shape);
+            return ndim == t2.ndim && std::equal(shape, shape + ndim, t2.shape);
         }
 
 
@@ -1092,8 +1092,8 @@ namespace BeanTensor::Tensors {
          * (add/sub/mul/div/pow); the public methods are thin wrappers. See
          * Tensor::add for the full broadcasting/dtype/async contract.
          * @brief Tensor-tensor elementwise op with broadcasting.
-         * @param o Right operand, same dtype and device.
-         * @param op Operation selector.
+         * o: Right operand, same dtype and device.
+         * op: Operation selector.
          * @return New tensor with the broadcast shape and the input dtype.
          */
         [[nodiscard]] Tensor elementwise_binary(const Tensor&, ElementwiseOp) const;
@@ -1102,8 +1102,8 @@ namespace BeanTensor::Tensors {
          * public methods are thin wrappers. See Tensor::add for the full
          * scalar-narrowing/async contract.
          * @brief Tensor-scalar elementwise op.
-         * @param scalar Scalar operand (float64_t, narrowed into this tensor's dtype).
-         * @param op Operation selector.
+         * scalar: Scalar operand (float64_t, narrowed into this tensor's dtype).
+         * op: Operation selector.
          * @return New tensor shaped like this.
          */
         [[nodiscard]] Tensor elementwise_scalar(const float64_t&, ElementwiseOp) const;
@@ -1111,7 +1111,7 @@ namespace BeanTensor::Tensors {
          * Shared implementation of the unary elementwise ops (exp/log); the
          * public methods are thin wrappers. See Tensor::exp for the contract.
          * @brief Unary elementwise op (exp/log).
-         * @param op Operation selector.
+         * op: Operation selector.
          * @return New tensor shaped like this.
          */
         [[nodiscard]] Tensor elementwise_unary(ElementwiseUnaryOp) const;
@@ -1135,53 +1135,53 @@ namespace BeanTensor::Tensors {
         friend void detail::set_random_gpu(Tensor& t, float64_t min, float64_t max, int64_t seed);
         friend void detail::move_to_gpu(Tensor& t);
         friend void detail::move_to_cpu(Tensor& t);
-        friend void detail::convert_gpu(Tensor& t, const BeanTensor::DataTypes::DType& new_dtype, ConversionClampMethod method);
-        friend void detail::matmul_cpu(const Tensor&, const Tensor&, Tensor&);
-        friend void detail::matmul_gpu(const Tensor&, const Tensor&, Tensor&);
-        friend void detail::sgd_update_cpu(Tensor&, const Tensor&, float64_t);
-        friend void detail::sgd_update_gpu(Tensor&, const Tensor&, float64_t);
-        friend void detail::sum_cpu(const Tensor&, Tensor&);
-        friend void detail::sum_gpu(const Tensor&, Tensor&);
+        friend void detail::convert_gpu(Tensor& t, const DataTypes::DType& new_dtype, ConversionClampMethod method);
+        friend void detail::matmul_cpu(const Tensor&, const Tensor&, const Tensor&);
+        friend void detail::matmul_gpu(const Tensor&, const Tensor&, const Tensor&);
+        friend void detail::sgd_update_cpu(const Tensor&, const Tensor&, float64_t);
+        friend void detail::sgd_update_gpu(const Tensor&, const Tensor&, float64_t);
+        friend void detail::sum_cpu(const Tensor&, const Tensor&);
+        friend void detail::sum_gpu(const Tensor&, const Tensor&);
         friend void detail::argmax_cpu(const Tensor&, uint64_t&);
         friend void detail::argmax_gpu(const Tensor&, uint64_t&);
         friend void detail::argmax_axis_cpu(const Tensor&, Tensor&, size_t);
-        friend void detail::argmax_axis_gpu(const Tensor&, Tensor&, size_t);
-        friend void detail::mean_cpu(const Tensor&, Tensor&);
-        friend void detail::mean_gpu(const Tensor&, Tensor&);
+        friend void detail::argmax_axis_gpu(const Tensor&, const Tensor&, size_t);
+        friend void detail::mean_cpu(const Tensor&, const Tensor&);
+        friend void detail::mean_gpu(const Tensor&, const Tensor&);
         friend void detail::equal_cpu(const Tensor&, const Tensor&, Tensor&);
-        friend void detail::equal_gpu(const Tensor&, const Tensor&, Tensor&);
-        friend void detail::bias_add_cpu(const Tensor&, const Tensor&, Tensor&);
-        friend void detail::bias_add_gpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::equal_gpu(const Tensor&, const Tensor&, const Tensor&);
+        friend void detail::bias_add_cpu(const Tensor&, const Tensor&, const Tensor&);
+        friend void detail::bias_add_gpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::relu_cpu(const Tensor&, const Tensor&);
         friend void detail::relu_gpu(const Tensor&, const Tensor&);
         friend void detail::softmax_ce_cpu(const Tensor&, const Tensor&, Tensor&);
-        friend void detail::softmax_ce_gpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::softmax_ce_gpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::gemm_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::bias_add_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
-        friend void detail::relu_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
-        friend void detail::softmax_ce_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
-        friend void detail::grad_acc_cpu(Tensor&, const Tensor&);
-        friend void detail::grad_acc_gpu(Tensor&, const Tensor&);
-        friend void detail::transpose_last2_cpu(const Tensor&, Tensor&);
-        friend void detail::transpose_last2_gpu(const Tensor&, Tensor&);
-        friend void detail::relu_g_cpu(const Tensor&, const Tensor&, Tensor&);
-        friend void detail::relu_g_gpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::relu_g_node(const Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::softmax_ce_g_node(const Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::grad_acc_cpu(const Tensor&, const Tensor&);
+        friend void detail::grad_acc_gpu(const Tensor&, const Tensor&);
+        friend void detail::transpose_last2_cpu(const Tensor&, const Tensor&);
+        friend void detail::transpose_last2_gpu(const Tensor&, const Tensor&);
+        friend void detail::relu_g_cpu(const Tensor&, const Tensor&, const Tensor&);
+        friend void detail::relu_g_gpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::bias_add_g_cpu(const Tensor&, Tensor&);
-        friend void detail::bias_add_g_gpu(const Tensor&, Tensor&);
+        friend void detail::bias_add_g_gpu(const Tensor&, const Tensor&);
         friend void detail::softmax_ce_g_cpu(const Tensor&, const Tensor&, const Tensor&, Tensor&);
-        friend void detail::softmax_ce_g_gpu(const Tensor&, const Tensor&, const Tensor&, Tensor&);
-        friend void detail::index_select_cpu(const Tensor&, const Tensor&, Tensor&, size_t);
-        friend void detail::index_select_gpu(const Tensor&, const Tensor&, Tensor&, size_t);
-        friend void detail::gather_cpu(const Tensor&, const Tensor&, Tensor&, size_t);
-        friend void detail::gather_gpu(const Tensor&, const Tensor&, Tensor&, size_t);
-        friend void detail::cat_cpu(const std::vector<Tensor>&, Tensor&, size_t);
-        friend void detail::cat_gpu(const std::vector<Tensor>&, Tensor&, size_t);
-        friend void detail::elementwise_cpu(const Tensor&, const Tensor&, Tensor&, ElementwiseOp, const detail::ElementwiseBcast&);
-        friend void detail::elementwise_gpu(const Tensor&, const Tensor&, Tensor&, ElementwiseOp, const detail::ElementwiseBcast&);
-        friend void detail::elementwise_scalar_cpu(const Tensor&, const float64_t&, Tensor&, ElementwiseOp);
-        friend void detail::elementwise_scalar_gpu(const Tensor&, const float64_t&, Tensor&, ElementwiseOp);
-        friend void detail::elementwise_unary_cpu(const Tensor&, Tensor&, ElementwiseUnaryOp);
-        friend void detail::elementwise_unary_gpu(const Tensor&, Tensor&, ElementwiseUnaryOp);
+        friend void detail::softmax_ce_g_gpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&);
+        friend void detail::index_select_cpu(const Tensor&, const Tensor&, const Tensor&, size_t);
+        friend void detail::index_select_gpu(const Tensor&, const Tensor&, const Tensor&, size_t);
+        friend void detail::gather_cpu(const Tensor&, const Tensor&, const Tensor&, size_t);
+        friend void detail::gather_gpu(const Tensor&, const Tensor&, const Tensor&, size_t);
+        friend void detail::cat_cpu(const std::vector<Tensor>&, const Tensor&, size_t);
+        friend void detail::cat_gpu(const std::vector<Tensor>&, const Tensor&, size_t);
+        friend void detail::elementwise_cpu(const Tensor&, const Tensor&, const Tensor&, ElementwiseOp, const detail::ElementwiseBcast&);
+        friend void detail::elementwise_gpu(const Tensor&, const Tensor&, const Tensor&, ElementwiseOp, const detail::ElementwiseBcast&);
+        friend void detail::elementwise_scalar_cpu(const Tensor&, const float64_t&, const Tensor&, ElementwiseOp);
+        friend void detail::elementwise_scalar_gpu(const Tensor&, const float64_t&, const Tensor&, ElementwiseOp);
+        friend void detail::elementwise_unary_cpu(const Tensor&, const Tensor&, ElementwiseUnaryOp);
+        friend void detail::elementwise_unary_gpu(const Tensor&, const Tensor&, ElementwiseUnaryOp);
         friend void Intrinsics::detail::launch_conv_cpu(Tensor& t, const DataTypes::DType& new_dtype, ConversionClampMethod method);
 
     };

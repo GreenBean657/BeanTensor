@@ -8,7 +8,10 @@
 #include "Dispatcher.h"
 
 #include <memory>
+#include <stdexcept>
 
+#include "Intrinsics/AVX2/DTypeConversions.h"
+#include "Intrinsics/AVX512/DTypeConversions.h"
 #include "Tensor/Tensor.h"
 
 namespace BeanTensor::Intrinsics::detail {

@@ -6,7 +6,6 @@
  * @version 0.1
  * @date 2026-10-20
  */
-#include <cstdint>
 #include <type_traits>
 #include <vector>
 
@@ -139,7 +138,7 @@ namespace BeanTensor::Tensors::detail {
      * @throws ErrorHandling::DirectFunctionCallOnWrongDataSource if any tensor is not on the CPU.
      * @throws ErrorHandling::NotImplemented for an unsupported dtype.
      */
-    void relu_g_cpu(const Tensor& dy, const Tensor& x, Tensor& dx) {
+    void relu_g_cpu(const Tensor& dy, const Tensor& x, const Tensor& dx) {
         if (dy.device != Device::CPU || x.device != Device::CPU || dx.device != Device::CPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("CPU", stringify_device_source(x.device));
         }
@@ -152,7 +151,7 @@ namespace BeanTensor::Tensors::detail {
                 const auto* dy_ptr = static_cast<const float32_t*>(dy.data) + dy.offset;
                 const ReluGScalarFn<float32_t> kernel = Math::Autograd::relu_g_avx512_available()
                     ? Math::Autograd::relu_g_f32_range_avx512
-                    : (Math::Autograd::relu_g_avx2_available() ? Math::Autograd::relu_g_f32_range_avx2 : relu_g_range_scalar<float32_t>);
+                    : Math::Autograd::relu_g_avx2_available() ? Math::Autograd::relu_g_f32_range_avx2 : relu_g_range_scalar<float32_t>;
                 /**
                  * Runs on a pool worker (or inline for small inputs) over the element range [b, e). Captures by value (the futures outlive this call): dx_ptr, x_ptr, dy_ptr and the dispatched kernel.
                  * Calls kernel(dx_ptr, x_ptr, dy_ptr, b, e), where the pointers already include their tensors' offsets.
@@ -169,7 +168,7 @@ namespace BeanTensor::Tensors::detail {
                 const auto* dy_ptr = static_cast<const float64_t*>(dy.data) + dy.offset;
                 const ReluGScalarFn<float64_t> kernel = Math::Autograd::relu_g_avx512_available()
                     ? Math::Autograd::relu_g_f64_range_avx512
-                    : (Math::Autograd::relu_g_avx2_available() ? Math::Autograd::relu_g_f64_range_avx2 : relu_g_range_scalar<float64_t>);
+                    : Math::Autograd::relu_g_avx2_available() ? Math::Autograd::relu_g_f64_range_avx2 : relu_g_range_scalar<float64_t>;
                 /**
                  * Runs on a pool worker (or inline for small inputs) over the element range [b, e). Captures by value (the futures outlive this call): dx_ptr, x_ptr, dy_ptr and the dispatched kernel.
                  * Calls kernel(dx_ptr, x_ptr, dy_ptr, b, e), where the pointers already include their tensors' offsets.
@@ -345,7 +344,7 @@ namespace BeanTensor::Tensors::detail {
      * @param grad_dtype The calling backward()'s assigned gradient dtype.
      * @throws ErrorHandling::UnReachableCode if n_inputs is not 1 or the device is neither CPU nor GPU.
      */
-    void relu_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+    void relu_g_node(const Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
         if (n_inputs != 1) [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
@@ -355,7 +354,7 @@ namespace BeanTensor::Tensors::detail {
         }
         output_grad->sync();
         x.sync();
-        auto dx = Tensor(std::vector<size_t>(x.shape, x.shape + x.ndim), grad_dtype, x.device, false);
+        auto dx = Tensor(std::vector(x.shape, x.shape + x.ndim), grad_dtype, x.device, false);
         /**
          * Captures output_grad, dx and x by reference (all outlive the call).
          * Dispatches relu_g on x's device with dy = *output_grad, x = x_op, dx = dx.
@@ -374,7 +373,7 @@ namespace BeanTensor::Tensors::detail {
         if (x.dtype == grad_dtype) {
             run(x);
         } else {
-            auto xg = grad_converted_copy(x, grad_dtype);
+            const auto xg = grad_converted_copy(x, grad_dtype);
             run(xg);
         }
         if (x.node != nullptr) {

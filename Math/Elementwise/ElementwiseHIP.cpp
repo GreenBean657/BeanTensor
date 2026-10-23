@@ -13,7 +13,6 @@
  */
 #if defined(USE_HIP)
 #include <cstdint>
-#include <type_traits>
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -138,7 +137,7 @@ namespace BeanTensor::Tensors::detail {
      * @param plan Broadcast execution plan built by the Tensor method.
      * @note Throws DirectFunctionCallOnWrongDataSource when any tensor is not on the GPU.
      */
-    __host__ void elementwise_gpu(const Tensor& a, const Tensor& b, Tensor& out, const ElementwiseOp op, const ElementwiseBcast& plan) {
+    __host__ void elementwise_gpu(const Tensor& a, const Tensor& b, const Tensor& out, const ElementwiseOp op, const ElementwiseBcast& plan) {
         if (a.device != Device::GPU || b.device != Device::GPU || out.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(a.device));
         }
@@ -275,7 +274,7 @@ namespace BeanTensor::Tensors::detail {
      * @param op Operation selector.
      * @note Throws DirectFunctionCallOnWrongDataSource when any tensor is not on the GPU.
      */
-    __host__ void elementwise_scalar_gpu(const Tensor& a, const float64_t& scalar, Tensor& out, const ElementwiseOp op) {
+    __host__ void elementwise_scalar_gpu(const Tensor& a, const float64_t& scalar, const Tensor& out, const ElementwiseOp op) {
         if (a.device != Device::GPU || out.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(a.device));
         }
@@ -408,7 +407,7 @@ namespace BeanTensor::Tensors::detail {
      * @param op Operation selector.
      * @note Throws DirectFunctionCallOnWrongDataSource when any tensor is not on the GPU.
      */
-    __host__ void elementwise_unary_gpu(const Tensor& a, Tensor& out, const ElementwiseUnaryOp op) {
+    __host__ void elementwise_unary_gpu(const Tensor& a, const Tensor& out, const ElementwiseUnaryOp op) {
         if (a.device != Device::GPU || out.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(a.device));
         }

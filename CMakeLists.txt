@@ -90,7 +90,7 @@ set(BEANTENSOR_WERROR_FLAGS
         -Werror=format=2
         -Werror=reorder
 )
-# -Werror=maybe-uninitialized is GNU-onlyyyyyyyyyyyyyyyyyyy so lets make it be that.
+# -Werror=maybe-uninitialized is GNU-only so let's make it be that.
 set(BEANTENSOR_WERROR_FLAGS_GNU ${BEANTENSOR_WERROR_FLAGS} -Werror=maybe-uninitialized -Werror=sequence-point)
 set(BEANTENSOR_WERROR_FLAGS_CLANG ${BEANTENSOR_WERROR_FLAGS} -Werror=unsequenced)
 if (USE_CUDA)
@@ -159,6 +159,9 @@ set(CORE_SOURCES
         Math/Elementwise/ElementwiseCudaShared.h
         Math/Elementwise/ElementwiseHipShared.h
         Math/Elementwise/ElementwiseCPU.cpp
+        Math/Elementwise/ElementwiseKernels.h
+        Math/Elementwise/ElementwiseAVX2.cpp
+        Math/Elementwise/ElementwiseAVX512.cpp
         Math/LinearAlgebra/MatMul/Matmul.h
         Math/LinearAlgebra/MatMul/Matmul.hpp
         Math/LinearAlgebra/MatMul/MatmulCPU.cpp
@@ -315,8 +318,10 @@ if(USE_CUDA)
     # toolkit headers as plain -I (not -isystem), so cuda_bf16.hpp's float
     # comparisons would otherwise trip the project's -Werror=float-equal.
     # float-equal stays an error everywhere except CUDA host passes.
+    # --extended-lambda permits explicit __device__ annotations on lambdas
+    # (used in SgdUpdateCUDA's int4 lane step); harmless elsewhere.
     target_compile_options(BeanTensorV5Core PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:-std=c++20;-Xcompiler=-Wno-error=float-equal>
+            $<$<COMPILE_LANGUAGE:CUDA>:-std=c++20;--extended-lambda;-Xcompiler=-Wno-error=float-equal>
     )
 endif()
 if(USE_STRIX_HALO)
@@ -375,10 +380,15 @@ if(USE_HIP)
             Math/Autograd/ReluG/ReluGAVX512.cpp
             Math/Autograd/BiasAddG/BiasAddGAVX2.cpp
             Math/Autograd/BiasAddG/BiasAddGAVX512.cpp
+            Math/Elementwise/ElementwiseAVX2.cpp
+            Math/Elementwise/ElementwiseAVX512.cpp
             Intrinsics/AVX2/DTypeConversions.cpp
             Intrinsics/AVX512/DTypeConversions.cpp
             Intrinsics/Dispatcher.cpp
             Math/Shape/Indexing/IndexingHIP.cpp
+            Math/Shape/Indexing/IndexingCPU.cpp
+            Math/Shape/Slice.cpp
+            Math/Elementwise/ElementwiseCPU.cpp
             PROPERTIES LANGUAGE HIP
     )
     set_source_files_properties(
@@ -416,8 +426,21 @@ if(USE_HIP)
             Math/Autograd/TransposeLast2/TransposeLast2HIP.cpp
             Math/Autograd/GemmG/GemmGCPU.cpp
             Math/Autograd/Backward.cpp
-            Intrinsics/Dispatcher.cpp
+            Math/Shape/Indexing/IndexingCPU.cpp
+            Math/Shape/Slice.cpp
+            Math/Elementwise/ElementwiseAVX2.cpp
+            Math/Elementwise/ElementwiseAVX512.cpp
+            Math/Elementwise/ElementwiseCPU.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native"
+    )
+    # The conversion dispatcher's IncludedCPUFeatures() copy needs every ISA flag
+    # it gates on (AVX512F/BF16/DQ, AVX2, F16C); without them its #if defined()
+    # guards in Helpers/Hardware.h are all false and the AVX512/AVX2 conversion
+    # fast paths never dispatch. Same clobber rule as the AVX512 kernels above:
+    # offload arch + host flags in ONE COMPILE_OPTIONS property.
+    set_source_files_properties(
+            Intrinsics/Dispatcher.cpp
+            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512bw;-mavx512bf16;-mavx512dq;-mavx512vnni;-mavx2;-mfma;-mf16c"
     )
     # AVX512 kernels: HIP offload arch + host AVX512 codegen combined (the
     # single COMPILE_OPTIONS property would otherwise clobber one or the other).
@@ -437,6 +460,18 @@ if(USE_HIP)
     # Intrinsics AVX2 conversion file does not.
     set_source_files_properties(
             Intrinsics/AVX2/DTypeConversions.cpp
+            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx2;-mf16c"
+    )
+    # Elementwise AVX512 kernels need -mavx512bf16 (cvtneps2bf16 bf16 narrowing)
+    # and -mavx512bw (epi8/epi16 lane ops + 16-bit masked tails); -mavx512dq
+    # covers mullo_epi64. Same clobber rule: offload arch + host flags in ONE
+    # COMPILE_OPTIONS property.
+    set_source_files_properties(
+            Math/Elementwise/ElementwiseAVX512.cpp
+            PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512bw;-mavx512bf16;-mavx512dq;-mf16c"
+    )
+    set_source_files_properties(
+            Math/Elementwise/ElementwiseAVX2.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx2;-mf16c"
     )
     set_source_files_properties(
@@ -478,6 +513,14 @@ else()
             Intrinsics/AVX512/DTypeConversions.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bf16;-mavx512dq;-mf16c"
     )
+    # The conversion dispatcher gates its AVX512/AVX2 fast paths on
+    # IncludedCPUFeatures(), whose #if defined() guards in Helpers/Hardware.h
+    # only see flags the dispatcher's own TU was compiled with — it needs the
+    # full union or the fast paths silently never dispatch.
+    set_source_files_properties(
+            Intrinsics/Dispatcher.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512bf16;-mavx512dq;-mavx512vnni;-mavx2;-mfma;-mf16c"
+    )
     # Same split as the HIP branch: GEMM AVX512 kernels get -mavx512bw and
     # -mavx512vnni.
     set_source_files_properties(
@@ -486,6 +529,17 @@ else()
     )
     set_source_files_properties(
             Intrinsics/AVX2/DTypeConversions.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx2;-mf16c"
+    )
+    # Same split as the HIP branch: elementwise AVX512 kernels get -mavx512bw
+    # (epi8/epi16 lanes + 16-bit masked tails) and -mavx512bf16 (cvtneps2bf16);
+    # -mavx512dq covers mullo_epi64.
+    set_source_files_properties(
+            Math/Elementwise/ElementwiseAVX512.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512bf16;-mavx512dq;-mf16c"
+    )
+    set_source_files_properties(
+            Math/Elementwise/ElementwiseAVX2.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx2;-mf16c"
     )
     set_source_files_properties(

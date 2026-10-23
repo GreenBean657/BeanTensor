@@ -17,7 +17,7 @@ namespace BeanTensor::Tensors {
         /**
          * @brief CPU-only build stub for the GPU grad accumulation backend: throws ErrorHandling::GPUTaskOnCPUBuild, since no GPU backend exists to link against.
          */
-        inline void grad_acc_gpu(Tensor&, const Tensor&) {
+        inline void grad_acc_gpu(const Tensor&, const Tensor&) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
     }
