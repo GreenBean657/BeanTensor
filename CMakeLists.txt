@@ -279,6 +279,12 @@ set(CORE_SOURCES
         Math/Autograd/ElementwiseG/ElementwiseGCPU.cpp
         Math/Autograd/ElementwiseG/ElementwiseGHIP.cpp
         Math/Autograd/ElementwiseG/ElementwiseGCUDA.cu
+        Module/Module.h
+        Module/Module.cpp
+        Module/Linear.h
+        Module/Linear.cpp
+        Module/Sequential.h
+        Module/Sequential.cpp
         Helpers/Bits.h
 )
 
@@ -426,6 +432,9 @@ if(USE_HIP)
             Math/Elementwise/ElementwiseCPU.cpp
             Math/Autograd/ElementwiseG/ElementwiseGCPU.cpp
             Math/Autograd/ElementwiseG/ElementwiseGHIP.cpp
+            Module/Module.cpp
+            Module/Linear.cpp
+            Module/Sequential.cpp
             PROPERTIES LANGUAGE HIP
     )
     set_source_files_properties(
@@ -474,6 +483,9 @@ if(USE_HIP)
             Math/Elementwise/ElementwiseCPU.cpp
             Math/Autograd/ElementwiseG/ElementwiseGCPU.cpp
             Math/Autograd/ElementwiseG/ElementwiseGHIP.cpp
+            Module/Module.cpp
+            Module/Linear.cpp
+            Module/Sequential.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native"
     )
     # The conversion dispatcher's IncludedCPUFeatures() copy needs every ISA flag
@@ -818,6 +830,24 @@ if(BUILD_TESTING)
             -mf16c
     )
     add_test(NAME BeanTensorV5LossAdamTests COMMAND BeanTensorV5LossAdamTests)
+
+    add_executable(BeanTensorV5ModuleTests tests/module_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5ModuleTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5ModuleTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5ModuleTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5ModuleTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5ModuleTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5ModuleTests COMMAND BeanTensorV5ModuleTests)
 endif()
 
 if(USE_HIP)
