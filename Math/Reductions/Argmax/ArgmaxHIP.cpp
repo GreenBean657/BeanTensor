@@ -5,12 +5,11 @@
  * Divergent twin of Math/Reductions/Argmax/ArgmaxCUDA.cu — the two backends are
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same NaN-wins argmax rule.
- * @version 0.2
+ * @version 0.3
  * @date 2026-10-22
  */
 #if defined(USE_HIP)
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <type_traits>
 
@@ -80,13 +79,18 @@ namespace BeanTensor::Tensors::detail {
          * @return T/F - the candidate is strictly better.
          */
         __device__ __forceinline__ bool vi_better(const float2 c, const float2 b) {
-            if (dev_key_better(static_cast<float64_t>(c.x), static_cast<float64_t>(b.x))) {
+            // Widen once, explicitly: the implicit float -> float64 promotion at the call sites trips -Werror=double-promotion.
+            const auto cx = static_cast<float64_t>(c.x);
+            const auto cy = static_cast<float64_t>(c.y);
+            const auto bx = static_cast<float64_t>(b.x);
+            const auto by = static_cast<float64_t>(b.y);
+            if (dev_key_better(cx, bx)) {
                 return true;
             }
-            if (dev_key_better(static_cast<float64_t>(b.x), static_cast<float64_t>(c.x))) {
+            if (dev_key_better(bx, cx)) {
                 return false;
             }
-            return dev_key_better(static_cast<float64_t>(c.y), static_cast<float64_t>(b.y));
+            return dev_key_better(cy, by);
         }
         /**
          * Compares lexicographically (lo, then hi).
@@ -172,7 +176,7 @@ namespace BeanTensor::Tensors::detail {
          * @param v Element.
          * @return Argmax key {lo, hi}.
          */
-        __device__ __forceinline__ float2 to_key(const bfloat16x2_t v) {
+        __device__ __forceinline__ float2 to_key(const bfloat16x2_t& v) {
             return make_float2(__bfloat162float(__low2bfloat16(v)), __bfloat162float(__high2bfloat16(v)));
         }
         /**
@@ -315,7 +319,7 @@ namespace BeanTensor::Tensors::detail {
                                            const size_t out_numel, const size_t axis_len, const size_t inner) {
             const size_t stride = blockDim.x * gridDim.x;
             for (size_t o = threadIdx.x + blockIdx.x * blockDim.x; o < out_numel; o += stride) {
-                const auto base = (o / inner) * (axis_len * inner) + (o % inner);
+                const auto base = o / inner * (axis_len * inner) + o % inner;
                 auto best = ValIdx<K>{key_zero<K>(), UINT64_MAX};
                 for (auto i = size_t{0}; i < axis_len; ++i) {
                     best = vi_combine(best, ValIdx<K>{to_key(data[base + i * inner]), i});
@@ -355,7 +359,7 @@ namespace BeanTensor::Tensors::detail {
         const auto t_offset = t.offset;
         const auto dtype = t.dtype;
         const auto numel = t.numel;
-        auto res = std::make_shared<uint64_t>(0);
+        const auto res = std::make_shared<uint64_t>(0);
         /**
          * Raw pointers are captured by value: the future lands on the tensors, so buffer teardown
          * always drains this worker first. Dispatches on dtype to the typed host launcher.
@@ -402,7 +406,7 @@ namespace BeanTensor::Tensors::detail {
      * @param axis Axis to reduce.
      * @note Throws DirectFunctionCallOnWrongDataSource when any tensor is not on the GPU.
      */
-    __host__ void argmax_axis_gpu(const Tensor& t, Tensor& out, const size_t axis) {
+    __host__ void argmax_axis_gpu(const Tensor& t, const Tensor& out, const size_t axis) {
         if (t.device != Device::GPU || out.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(t.device));
         }

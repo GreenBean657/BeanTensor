@@ -61,27 +61,27 @@ namespace BeanTensor::Tensors {
         /**
          * @brief CPU tensor-tensor elementwise backend: out = a (op) b with NumPy-style broadcasting.
          */
-        void elementwise_cpu(const Tensor&, const Tensor&, Tensor&, ElementwiseOp, const ElementwiseBcast&);
+        void elementwise_cpu(const Tensor&, const Tensor&, const Tensor&, ElementwiseOp, const ElementwiseBcast&);
         /**
          * @brief GPU tensor-tensor elementwise backend: out = a (op) b with NumPy-style broadcasting.
          */
-        void elementwise_gpu(const Tensor&, const Tensor&, Tensor&, ElementwiseOp, const ElementwiseBcast&);
+        void elementwise_gpu(const Tensor&, const Tensor&, const Tensor&, ElementwiseOp, const ElementwiseBcast&);
         /**
          * @brief CPU tensor-scalar elementwise backend: out[i] = a[i] (op) scalar, scalar narrowed into a's dtype.
          */
-        void elementwise_scalar_cpu(const Tensor&, const float64_t&, Tensor&, ElementwiseOp);
+        void elementwise_scalar_cpu(const Tensor&, const float64_t&, const Tensor&, ElementwiseOp);
         /**
          * @brief GPU tensor-scalar elementwise backend: out[i] = a[i] (op) scalar, scalar narrowed into a's dtype.
          */
-        void elementwise_scalar_gpu(const Tensor&, const float64_t&, Tensor&, ElementwiseOp);
+        void elementwise_scalar_gpu(const Tensor&, const float64_t&, const Tensor&, ElementwiseOp);
         /**
          * @brief CPU unary elementwise backend: out[i] = fn(a[i]) (exp/log, float kinds only).
          */
-        void elementwise_unary_cpu(const Tensor&, Tensor&, ElementwiseUnaryOp);
+        void elementwise_unary_cpu(const Tensor&, const Tensor&, ElementwiseUnaryOp);
         /**
          * @brief GPU unary elementwise backend: out[i] = fn(a[i]) (exp/log, float kinds only).
          */
-        void elementwise_unary_gpu(const Tensor&, Tensor&, ElementwiseUnaryOp);
+        void elementwise_unary_gpu(const Tensor&, const Tensor&, ElementwiseUnaryOp);
     }
 }
 

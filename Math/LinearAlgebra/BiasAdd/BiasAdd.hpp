@@ -19,7 +19,7 @@ namespace BeanTensor::Tensors {
          * @brief CPU-only build stub for GPU bias_add.
          * @note Always throws ErrorHandling::GPUTaskOnCPUBuild.
          */
-        inline void bias_add_gpu(const Tensor&, const Tensor&, Tensor&) {
+        inline void bias_add_gpu(const Tensor&, const Tensor&, const Tensor&) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
     }

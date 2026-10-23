@@ -7,7 +7,6 @@
  */
 #pragma once
 
-#include "Tensor/DTypes.h"
 
 namespace BeanTensor::Tensors {
     class Tensor;
@@ -16,11 +15,11 @@ namespace BeanTensor::Tensors {
         /**
          * @brief CPU gradient accumulation, g += d.
          */
-        void grad_acc_cpu(Tensor&, const Tensor&);
+        void grad_acc_cpu(const Tensor&, const Tensor&);
         /**
          * @brief GPU gradient accumulation, g += d.
          */
-        void grad_acc_gpu(Tensor&, const Tensor&);
+        void grad_acc_gpu(const Tensor&, const Tensor&);
     }
 }
 

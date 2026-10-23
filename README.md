@@ -22,19 +22,19 @@ what the patch does and why it's safe: [CUDA_GLIBC_PATCH.md](CUDA_GLIBC_PATCH.md
 **BeanTensor is intended for:**
 - NVIDIA GPUs of Volta Architecture (Compute SM_70) or newer.
 - AMD GPUs of RDNA2 or newer, supported by ROCM 10. CDNA is not supported.
-- 64 bit CPUs. AVX2, AVX512, AVX512BF, and other accelerating instructions are not required, but will be used when possible.
+- 64-bit CPUs. AVX2, AVX512, AVX512BF, and other accelerating instructions are not required, but will be used when possible.
 
 **BeanTensor is not intended for:**
 - Intel & AMD NPUs attached to x86 CPUs (though this is planned in the future!)
-- TPUs, including google coral.
-- 32 bit processors.
+- TPUs, including Google Coral.
+- 32-bit processors.
 - Legacy Nvidia & AMD cards, including Pascal & RDNA 1 + Vega. Support for Pascal and basic RDNA is planned, but not a current priority and that plan may change as AI evolves. 
 
 **BeanTensor will target a few major floating point and integer precision's, including:**
 - FP64 (double)
 - FP32 (float)
 - FP16 (half) (supports packing as *float16_tx2*)
-- BF16 (bhalf) (supports packing as *bfloat16_tx2*)
+- BF16 (bf16) (supports packing as *bfloat16_tx2*)
 - INT64 (long)
 - INT32 (int)
 - INT16 (short)
@@ -45,7 +45,7 @@ what the patch does and why it's safe: [CUDA_GLIBC_PATCH.md](CUDA_GLIBC_PATCH.md
 - UINT16 (unsigned short)
 - UINT8 (unsigned byte)
 
-Note: UINT4 will not be supported at this time. U's are primary for indexing, and the lack of acceleration for it (especially since it inheritly lacks a dtype as is, and needs packing) overcomplicates things. 
+Note: UINT4 will not be supported at this time. U's are primary for indexing, and the lack of acceleration for it (especially since it inherently lacks a dtype as is, and needs packing) overcomplicates things. 
 
 Planned, but not introduced in the MVP:
 - FP4

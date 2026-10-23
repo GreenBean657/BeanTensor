@@ -5,7 +5,7 @@
  * Divergent twin of Math/Optimization/SgdUpdate/SgdUpdateCUDA.cu — the two backends are
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same fp32/fp64 compute widths, same RNE narrowing.
- * @version 0.1
+ * @version 0.1.1
  * @date 2026-10-20
  */
 #if defined(USE_HIP)
@@ -49,7 +49,7 @@ namespace BeanTensor::Tensors::detail {
                 if constexpr (std::is_same_v<T, float32_t>) {
                     w[i] = __fmaf_rn(neg_lr32, g[i], w[i]);
                 } else if constexpr (std::is_same_v<T, float64_t>) {
-                    w[i] = __fma_rn(-lr, g[i], w[i]);
+                    w[i] = fma(-lr, g[i], w[i]);
                 } else if constexpr (std::is_same_v<T, float16_t>) {
                     w[i] = __float2half_rn(__fmaf_rn(neg_lr32, __half2float(g[i]), __half2float(w[i])));
                 } else if constexpr (std::is_same_v<T, bfloat16_t>) {
@@ -77,8 +77,9 @@ namespace BeanTensor::Tensors::detail {
                      * @return Updated lane; w_lane itself when the update is NaN.
                      * @note Lambda subcall. Self-execution prohibited.
                      */
-                    const auto lane_step = [&](const int8_t w_lane, const int8_t g_lane) {
-                        const auto upd = __fma_rn(-lr, static_cast<float64_t>(g_lane), static_cast<float64_t>(w_lane));
+                    const auto lane_step = [&] __device__ (const int8_t w_lane, const int8_t g_lane) {
+                        // Do not strip __device__ flag, the lambda calls fma which causes the IDE to warn it's invalid calling methodology. It *RUNS*, but you are relying on the compiler to not break it.
+                        const auto upd = fma(-lr, g_lane, w_lane);
                         if (isnan(upd)) {
                             return w_lane;
                         }
@@ -93,7 +94,7 @@ namespace BeanTensor::Tensors::detail {
                     w[i] = dev_i4_pack(lane_step(dev_i4_lo(w[i]), dev_i4_lo(g[i])),
                                        lane_step(dev_i4_hi(w[i]), dev_i4_hi(g[i])));
                 } else {
-                    const auto upd = __fma_rn(-lr, static_cast<float64_t>(g[i]), static_cast<float64_t>(w[i]));
+                    const auto upd = fma(-lr, static_cast<float64_t>(g[i]), static_cast<float64_t>(w[i]));
                     if (isnan(upd)) {
                         continue;
                     }
@@ -140,7 +141,7 @@ namespace BeanTensor::Tensors::detail {
      * @param grad Gradients, same shape and dtype as w.
      * @param lr Learning rate.
      */
-    __host__ void sgd_update_gpu(Tensor& w, const Tensor& grad, const float64_t lr) {
+    __host__ void sgd_update_gpu(const Tensor& w, const Tensor& grad, const float64_t lr) {
         if (w.device != Device::GPU || grad.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(w.device));
         }

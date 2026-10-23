@@ -62,8 +62,11 @@ static bool gpu_available() {
 #endif
 }
 
-static bool near64(const float64_t a, const float64_t b, const float64_t eps) {
-    return std::fabs(a - b) <= eps;
+// Mixed-precision comparisons happen at float64: the casts are explicit so no
+// call site relies on an implicit float->double promotion.
+template<typename A, typename B>
+static bool near64(const A a, const B b, const float64_t eps) {
+    return std::fabs(static_cast<float64_t>(a) - static_cast<float64_t>(b)) <= eps;
 }
 
 // --- Packed/half-dtype helpers (host-side, via the unaccel conversion pathway) ---
@@ -113,7 +116,7 @@ static int32_t int4_lo(const int4x2_t v) {
 }
 
 static int32_t int4_hi(const int4x2_t v) {
-    const auto n = static_cast<int32_t>(idet::bit_cast_memcpy<uint8_t>(v) >> 4);
+    const int32_t n = idet::bit_cast_memcpy<uint8_t>(v) >> 4;
     return n >= 8 ? n - 16 : n;
 }
 
@@ -130,7 +133,7 @@ static void set_flat(Tensor& t, const std::vector<size_t>& shape, const size_t i
     } else if (shape.size() == 2) {
         t.set<T>({i / shape[1], i % shape[1]}, v);
     } else {
-        t.set<T>({i / (shape[1] * shape[2]), (i / shape[2]) % shape[1], i % shape[2]}, v);
+        t.set<T>({i / (shape[1] * shape[2]), i / shape[2] % shape[1], i % shape[2]}, v);
     }
 }
 
@@ -142,7 +145,7 @@ static T get_flat(Tensor& t, const std::vector<size_t>& shape, const size_t i) {
     if (shape.size() == 2) {
         return t.at<T>({i / shape[1], i % shape[1]});
     }
-    return t.at<T>({i / (shape[1] * shape[2]), (i / shape[2]) % shape[1], i % shape[2]});
+    return t.at<T>({i / (shape[1] * shape[2]), i / shape[2] % shape[1], i % shape[2]});
 }
 
 static size_t numel_of(const std::vector<size_t>& shape) {
@@ -332,7 +335,7 @@ static void test_relu_g_threaded(const Device dev, const DType dt) {
     g.sync();
     auto bad = size_t{0};
     for (auto i = size_t{0}; i < n; i += 37) {
-        const auto want = (static_cast<T>(i % 7) - static_cast<T>(3) + static_cast<T>(0.5)) > T{0} ? T{1} : T{0};
+        const auto want = static_cast<T>(i % 7) - static_cast<T>(3) + static_cast<T>(0.5) > T{0} ? T{1} : T{0};
         if (std::fabs(get_flat<T>(g, shape, i) - want) > T{0}) {
             ++bad;
         }
@@ -382,8 +385,8 @@ static void test_bias_add_g_threaded(const Device dev, const DType dt) {
 
 template<typename T>
 static void run_gemm_g_case(const Device dev, const DType dt, const size_t batch, const size_t m, const size_t k, const size_t n, const float64_t eps) {
-    const auto a_shape = batch == 0 ? std::vector<size_t>{m, k} : std::vector<size_t>{batch, m, k};
-    const auto b_shape = batch == 0 ? std::vector<size_t>{k, n} : std::vector<size_t>{batch, k, n};
+    const auto a_shape = batch == 0 ? std::vector{m, k} : std::vector{batch, m, k};
+    const auto b_shape = batch == 0 ? std::vector{k, n} : std::vector{batch, k, n};
     const auto bt = batch == 0 ? size_t{1} : batch;
     std::vector<float64_t> av(bt * m * k);
     std::vector<float64_t> bv(bt * k * n);
@@ -447,7 +450,7 @@ template<typename T, typename I>
 static void run_sce_g_case(const Device dev, const DType dt, const DType it, const float64_t eps) {
     constexpr size_t rows = 3;
     constexpr size_t cols = 4;
-    const auto lv = std::vector<float64_t>{1.0, 2.0, 3.0, -1.0, 0.5, -1.0, 2.0, 0.25, -3.0, 0.0, 1.5, 1.5};
+    const auto lv = std::vector{1.0, 2.0, 3.0, -1.0, 0.5, -1.0, 2.0, 0.25, -3.0, 0.0, 1.5, 1.5};
     const auto tv = std::vector<size_t>{2, 0, 3};
     Tensor logits({rows, cols}, dt, dev, true);
     Tensor targets({rows}, it, dev, false);
@@ -489,7 +492,7 @@ static void test_softmax_ce_g_threaded(const Device dev) {
         logits.set<float64_t>({i / cols, i % cols}, lv[i]);
     }
     for (auto r = size_t{0}; r < rows; ++r) {
-        tv[r] = (r * 7) % cols;
+        tv[r] = r * 7 % cols;
         targets.set<int32_t>({r}, static_cast<int32_t>(tv[r]));
     }
     if (dev == Device::GPU) {
@@ -782,10 +785,10 @@ static void test_int4x2_pathways(const Device dev) {
     {
         Tensor a({2, 2}, DType::Int4x2, dev, true);
         Tensor b({2, 2}, DType::Int4x2, dev, true);
-        const auto alo = std::vector<int32_t>{1, -1, 2, 0};
-        const auto ahi = std::vector<int32_t>{0, 1, -1, 1};
-        const auto blo = std::vector<int32_t>{1, 2, -1, 1};
-        const auto bhi = std::vector<int32_t>{2, -1, 0, 1};
+        const auto alo = std::vector{1, -1, 2, 0};
+        const auto ahi = std::vector{0, 1, -1, 1};
+        const auto blo = std::vector{1, 2, -1, 1};
+        const auto bhi = std::vector{2, -1, 0, 1};
         for (auto i = size_t{0}; i < 4; ++i) {
             a.set<int4x2_t>({i / 2, i % 2}, pack_int4(alo[i], ahi[i]));
             b.set<int4x2_t>({i / 2, i % 2}, pack_int4(blo[i], bhi[i]));
@@ -871,7 +874,7 @@ static void test_half_pathways(const Device dev, const DType dt) {
     {
         constexpr size_t rows = 2;
         constexpr size_t cols = 3;
-        const auto lv = std::vector<float64_t>{1.0, 2.0, 0.5, -1.0, 0.25, 1.5};
+        const auto lv = std::vector{1.0, 2.0, 0.5, -1.0, 0.25, 1.5};
         const auto tv = std::vector<size_t>{1, 2};
         Tensor logits({rows, cols}, dt, dev, true);
         Tensor targets({rows}, DType::Int16, dev, false);
@@ -899,7 +902,7 @@ static void test_packed_pathways(const Device dev, const DType dt) {
         auto y = x.relu();
         y.backward(dt);
         const auto g = x.gradient().at<P>({0, 0});
-        CHECK(idet::bit_cast_memcpy<uint32_t>(g) == (static_cast<uint32_t>(idet::bit_cast_memcpy<uint16_t>(narrow_lane<H>(1.0f))) << 16));
+        CHECK(idet::bit_cast_memcpy<uint32_t>(g) == static_cast<uint32_t>(idet::bit_cast_memcpy<uint16_t>(narrow_lane<H>(1.0f))) << 16);
     }
     // bias_add_G: per-lane fp32 column sums.
     {
@@ -919,8 +922,8 @@ static void test_packed_pathways(const Device dev, const DType dt) {
     {
         Tensor a({2, 2}, dt, dev, true);
         Tensor b({2, 2}, dt, dev, true);
-        const auto av = std::vector<float32_t>{1.0f, -0.5f, 2.0f, 0.25f};
-        const auto bv = std::vector<float32_t>{0.5f, 1.0f, -1.0f, 1.5f};
+        const auto av = std::vector{1.0f, -0.5f, 2.0f, 0.25f};
+        const auto bv = std::vector{0.5f, 1.0f, -1.0f, 1.5f};
         for (auto i = size_t{0}; i < 4; ++i) {
             a.set<P>({i / 2, i % 2}, pack_lanes<P, H>(av[i], 2.0f * av[i]));
             b.set<P>({i / 2, i % 2}, pack_lanes<P, H>(bv[i], 2.0f * bv[i]));
@@ -945,7 +948,7 @@ static void test_packed_pathways(const Device dev, const DType dt) {
         constexpr size_t rows = 2;
         constexpr size_t cols_store = 2;
         constexpr size_t cols = 4;
-        const auto lv = std::vector<float64_t>{1.0, -0.5, 2.0, 0.0, 0.5, 0.5, -1.0, 1.5};
+        const auto lv = std::vector{1.0, -0.5, 2.0, 0.0, 0.5, 0.5, -1.0, 1.5};
         const auto tv = std::vector<size_t>{3, 0};
         Tensor logits({rows, cols_store}, dt, dev, true);
         Tensor targets({rows}, DType::UInt32, dev, false);
@@ -1100,8 +1103,7 @@ namespace {
 // the leaves x/w, so exactly 3 intermediate deliveries land per call.
 static void test_grad_dtype_override_same_graph() {
     auto c = GradDtypeChain(DType::Float32);
-    const auto cases = std::vector<DType>{DType::Float64, DType::Float16, DType::Float32, DType::Int8, DType::Int32};
-    for (const auto gd : cases) {
+    for (const auto cases = std::vector{DType::Float64, DType::Float16, DType::Float32, DType::Int8, DType::Int32}; const auto gd : cases) {
         tdetail::grad_probe_reset();
         c.loss.backward(gd);
         CHECK(tdetail::grad_probe_count(gd) == 3);
@@ -1156,19 +1158,19 @@ static void test_grad_dtype_override_numeric() {
     CHECK(c64.x.gradient().get_dtype() == DType::Float64);
     auto bad = size_t{0};
     for (auto i = size_t{0}; i < 6; ++i) {
-        if (!near64(static_cast<float64_t>(get_flat<float32_t>(c32.x.gradient(), {2, 3}, i)),
+        if (!near64(get_flat<float32_t>(c32.x.gradient(), {2, 3}, i),
                     get_flat<float64_t>(c64.x.gradient(), {2, 3}, i), 1e-5)) {
             ++bad;
         }
     }
     for (auto i = size_t{0}; i < 12; ++i) {
-        if (!near64(static_cast<float64_t>(get_flat<float32_t>(c32.w.gradient(), {3, 4}, i)),
+        if (!near64(get_flat<float32_t>(c32.w.gradient(), {3, 4}, i),
                     get_flat<float64_t>(c64.w.gradient(), {3, 4}, i), 1e-5)) {
             ++bad;
         }
     }
     for (auto i = size_t{0}; i < 4; ++i) {
-        if (!near64(static_cast<float64_t>(c32.b.gradient().at<float32_t>({i})),
+        if (!near64(c32.b.gradient().at<float32_t>({i}),
                     c64.b.gradient().at<float64_t>({i}), 1e-5)) {
             ++bad;
         }
@@ -1195,15 +1197,19 @@ static void test_grad_dtype_override_half_mixed() {
         auto bad = size_t{0};
         for (auto i = size_t{0}; i < 12; ++i) {
             const auto got = widen_lane(get_flat<float16_t>(c.w.gradient(), {3, 4}, i));
-            const auto want = get_flat<float32_t>(ref.w.gradient(), {3, 4}, i);
-            if (!near64(static_cast<float64_t>(got), static_cast<float64_t>(want), 1e-2)) {
+            if (
+                const auto want = get_flat<float32_t>(ref.w.gradient(), {3, 4}, i);
+                !near64(got, want, 1e-2)
+            ) {
                 ++bad;
             }
         }
         for (auto i = size_t{0}; i < 4; ++i) {
             const auto got = widen_lane(c.b.gradient().at<float16_t>({i}));
-            const auto want = ref.b.gradient().at<float32_t>({i});
-            if (!near64(static_cast<float64_t>(got), static_cast<float64_t>(want), 1e-2)) {
+            if (
+                const auto want = ref.b.gradient().at<float32_t>({i});
+                !near64(got, want, 1e-2)
+            ) {
                 ++bad;
             }
         }
@@ -1224,15 +1230,19 @@ static void test_grad_dtype_override_half_mixed() {
         auto bad = size_t{0};
         for (auto i = size_t{0}; i < 12; ++i) {
             const auto got = get_flat<float32_t>(c.w.gradient(), {3, 4}, i);
-            const auto want = widen_lane(get_flat<float16_t>(ref.w.gradient(), {3, 4}, i));
-            if (!near64(static_cast<float64_t>(got), static_cast<float64_t>(want), 1e-2)) {
+            if (
+                const auto want = widen_lane(get_flat<float16_t>(ref.w.gradient(), {3, 4}, i));
+                !near64(got, want, 1e-2)
+            ) {
                 ++bad;
             }
         }
         for (auto i = size_t{0}; i < 4; ++i) {
             const auto got = c.b.gradient().at<float32_t>({i});
-            const auto want = widen_lane(ref.b.gradient().at<float16_t>({i}));
-            if (!near64(static_cast<float64_t>(got), static_cast<float64_t>(want), 1e-2)) {
+            if (
+                const auto want = widen_lane(ref.b.gradient().at<float16_t>({i}));
+                !near64(got, want, 1e-2)
+            ) {
                 ++bad;
             }
         }
@@ -1275,8 +1285,8 @@ static void test_sgd_step_mixed_dtype() {
     CHECK(w.gradient().get_dtype() == DType::Float64);
     w.sgd_step(0.1);
     w.sync();
-    CHECK(near64(static_cast<float64_t>(w.at<float32_t>({0})), 1.4, 1e-6));
-    CHECK(near64(static_cast<float64_t>(w.at<float32_t>({1})), 2.4, 1e-6));
+    CHECK(near64(w.at<float32_t>({0}), 1.4, 1e-6));
+    CHECK(near64(w.at<float32_t>({1}), 2.4, 1e-6));
 }
 
 int main() {

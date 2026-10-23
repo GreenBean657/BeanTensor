@@ -4,11 +4,10 @@
  * @brief HIP GPU kernels + host wrappers for basic tensor operations.
  * Mirror pair of Tensor/Ops/TensorOps.cu (CUDA); both backends must stay behaviorally identical (same rounding via
  * explicit _rn intrinsics, same fail_check semantics, same async handoff to Threading::GetCPUThreadPool()).
- * @version 0.1
+ * @version 0.1.1
  * @date 2026-10-18
  */
 #include <cstdint>
-#include <limits>
 #include <type_traits>
 
 #include "Tensor/Tensor.h"
@@ -218,11 +217,11 @@ namespace BeanTensor::Tensors::detail::gpu {
         __device__ __forceinline__ float32_t dev_fp64_to_fp32(const float64_t v, bool& flag, const ConversionClampMethod m) {
             if (v > DataTypes::detail::FP32_MAX_D) {
                 if (m != ConversionClampMethod::PERMISSIVE) flag = true;
-                return static_cast<float32_t>(DataTypes::detail::FP32_MAX_D);
+                return DataTypes::detail::FP32_MAX_D;
             }
             if (v < DataTypes::detail::FP32_MIN_D) {
                 if (m != ConversionClampMethod::PERMISSIVE) flag = true;
-                return static_cast<float32_t>(DataTypes::detail::FP32_MIN_D);
+                return DataTypes::detail::FP32_MIN_D;
             }
             if (__isnan(v)) {
                 if (m != ConversionClampMethod::PERMISSIVE) flag = true;
@@ -336,7 +335,7 @@ namespace BeanTensor::Tensors::detail::gpu {
          * @return Low lane sign-extended into [-8,7].
          */
         __device__ __forceinline__ int8_t int4_lane_lo(const int4x2_t v) {
-            const auto nibble = static_cast<int32_t>(static_cast<uint8_t>(v) & 0x0Fu);
+            const auto nibble = static_cast<uint8_t>(v) & 0x0Fu;
             return static_cast<int8_t>(nibble > 7 ? nibble - 16 : nibble);
         }
 
@@ -348,7 +347,7 @@ namespace BeanTensor::Tensors::detail::gpu {
          * @return High lane sign-extended into [-8,7].
          */
         __device__ __forceinline__ int8_t int4_lane_hi(const int4x2_t v) {
-            const auto nibble = static_cast<int32_t>(static_cast<uint8_t>(v) >> 4);
+            const auto nibble = static_cast<uint8_t>(v) >> 4;
             return static_cast<int8_t>(nibble > 7 ? nibble - 16 : nibble);
         }
 
@@ -381,13 +380,13 @@ namespace BeanTensor::Tensors::detail::gpu {
                 if (m != ConversionClampMethod::PERMISSIVE) {
                     flag = true;
                 }
-                return static_cast<int8_t>(7);
+                return 7;
             }
             if (v < -8) {
                 if (m != ConversionClampMethod::PERMISSIVE) {
                     flag = true;
                 }
-                return static_cast<int8_t>(-8);
+                return -8;
             }
             return v;
         }
@@ -798,7 +797,7 @@ namespace BeanTensor::Tensors::detail {
      */
     __host__ void set_amount_gpu(Tensor& t, const int64_t amount) {
         if (t.device != Device::GPU) {
-            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", Tensors::stringify_device_source(t.device));
+            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(t.device));
         }
         t.sync();
         static auto& threadMgr = Threading::GetCPUThreadPool();
@@ -818,7 +817,7 @@ namespace BeanTensor::Tensors::detail {
      */
     __host__ void set_amount_gpu(Tensor& t, const uint64_t amount) {
         if (t.device != Device::GPU) {
-            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", Tensors::stringify_device_source(t.device));
+            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(t.device));
         }
         t.sync();
         static auto& threadMgr = Threading::GetCPUThreadPool();
@@ -838,7 +837,7 @@ namespace BeanTensor::Tensors::detail {
      */
     __host__ void set_amount_gpu(Tensor& t, const float64_t amount) {
         if (t.device != Device::GPU) {
-            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", Tensors::stringify_device_source(t.device));
+            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(t.device));
         }
         t.sync();
         static auto& threadMgr = Threading::GetCPUThreadPool();
@@ -858,7 +857,7 @@ namespace BeanTensor::Tensors::detail {
      */
     __host__ void set_random_gpu(Tensor& t, const float64_t min, const float64_t max, const std::int64_t seed) {
         if (t.device != Device::GPU) {
-            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", Tensors::stringify_device_source(t.device));
+            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(t.device));
         }
         t.sync();
         const auto worker = [&t, min, max, seed] {
@@ -883,7 +882,7 @@ namespace BeanTensor::Tensors::detail {
      */
     __host__ void move_to_gpu(Tensor& t) {
         if (t.device != Device::CPU) {
-            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("CPU", Tensors::stringify_device_source(t.device));
+            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("CPU", stringify_device_source(t.device));
         }
         t.sync();
         t.kill_buffer();
@@ -917,7 +916,7 @@ namespace BeanTensor::Tensors::detail {
      */
     __host__ void move_to_cpu(Tensor& t) {
         if (t.device != Device::GPU) {
-            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", Tensors::stringify_device_source(t.device));
+            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(t.device));
         }
         t.sync();
         t.kill_buffer();

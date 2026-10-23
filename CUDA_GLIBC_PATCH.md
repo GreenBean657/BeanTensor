@@ -80,7 +80,7 @@ header is the one that gets patched.
 
 ## Caveats
 
-- The patch is per machine, per toolkit install. A fresh CUDA 12.9 install
+- The patch is per machine, per toolkit install. A fresh CUDA 12.9 installation
   needs it re-applied. If you forget, the build fails and prints the command.
   That's intentional.
 - HIP/ROCm and CPU-only builds are unaffected. This applies only to

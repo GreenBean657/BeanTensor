@@ -20,7 +20,7 @@ namespace BeanTensor::Tensors {
          * @note Always throws ErrorHandling::GPUTaskOnCPUBuild.
          * @brief CPU-only build stub for matmul_gpu.
          */
-        inline void matmul_gpu(const Tensor&, const Tensor&, Tensor&) {
+        inline void matmul_gpu(const Tensor&, const Tensor&, const Tensor&) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
     }

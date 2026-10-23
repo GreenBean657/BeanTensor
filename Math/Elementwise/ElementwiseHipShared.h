@@ -10,7 +10,7 @@
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same fp32/fp64 compute widths, same RNE narrowing
  * (CPU unaccel pathway), same wrap integer ops, same div-by-zero/min-rules.
- * @version 0.1
+ * @version 0.1.1
  * @date 2026-10-22
  */
 #pragma once
@@ -46,7 +46,7 @@ namespace BeanTensor::Tensors::detail::elementwise_kernels {
      */
     [[nodiscard]] inline __host__ size_t grid_for(const size_t numel) {
         const auto blocks = (numel + BT_GPU_THREADS - 1) / BT_GPU_THREADS;
-        return blocks < 1 ? 1 : (blocks > BT_GPU_MAX_BLOCKS ? BT_GPU_MAX_BLOCKS : blocks);
+        return blocks < 1 ? 1 : blocks > BT_GPU_MAX_BLOCKS ? BT_GPU_MAX_BLOCKS : blocks;
     }
 
     // --------------------------- narrowing twins ---------------------------
@@ -64,12 +64,14 @@ namespace BeanTensor::Tensors::detail::elementwise_kernels {
      */
     __device__ __forceinline__ bfloat16_t dev_narrow_bf16(const float32_t f) {
         const auto to_bits = __builtin_bit_cast(uint32_t, f);
-        constexpr auto mantissa_mask = 0x007FFFFFu;
         constexpr auto exponent_mask = 0x7F800000u;
         if ((to_bits & exponent_mask) == exponent_mask) {
             // NaN or Inf: truncate the payload; NaN sets the quiet bit so it can never become Inf.
             auto truncated = static_cast<uint16_t>(to_bits >> 16);
-            if ((to_bits & mantissa_mask) != 0u) {
+            if (
+                constexpr auto mantissa_mask = 0x007FFFFFu;
+                (to_bits & mantissa_mask) != 0u
+                ) {
                 truncated = static_cast<uint16_t>(truncated | 0x0040u);
             }
             return __builtin_bit_cast(bfloat16_t, truncated);
@@ -116,8 +118,10 @@ namespace BeanTensor::Tensors::detail::elementwise_kernels {
         if (const auto exp_field = (to_bits >> 23) & 0xFFu; exp_field < 113u) {
             // FP16-subnormal result: shift the mantissa into place with RNE gradual underflow.
             const auto mant24 = (to_bits & 0x007FFFFFu) | 0x00800000u;
-            const auto shift = 126u - exp_field; // distance to the fp16 subnormal LSB (2^-24)
-            if (shift <= 25u) {
+            if (
+                const auto shift = 126u - exp_field; // distance to the fp16 subnormal LSB (2^-24)
+                shift <= 25u
+                ) {
                 const auto halfway = 1u << (shift - 1u);
                 converted = static_cast<uint16_t>(converted | ((mant24 + halfway - 1u + ((mant24 >> shift) & 1u)) >> shift));
             }
@@ -153,7 +157,7 @@ namespace BeanTensor::Tensors::detail::elementwise_kernels {
     template<typename P> struct packed_lane;
     template<> struct packed_lane<float16x2_t> { using type = float16_t; };
     template<> struct packed_lane<bfloat16x2_t> { using type = bfloat16_t; };
-    template<typename P> using packed_lane_t = typename packed_lane<P>::type;
+    template<typename P> using packed_lane_t = packed_lane<P>::type;
 
     /**
      * @brief Low lane of a packed value.
@@ -166,7 +170,7 @@ namespace BeanTensor::Tensors::detail::elementwise_kernels {
      * @param v Packed value.
      * @return The low lane.
      */
-    __device__ __forceinline__ bfloat16_t dev_lane_lo(const bfloat16x2_t v) { return __low2bfloat16(v); }
+    __device__ __forceinline__ bfloat16_t dev_lane_lo(const bfloat16x2_t& v) { return __low2bfloat16(v); }
     /**
      * @brief High lane of a packed value.
      * @param v Packed value.
@@ -178,7 +182,7 @@ namespace BeanTensor::Tensors::detail::elementwise_kernels {
      * @param v Packed value.
      * @return The high lane.
      */
-    __device__ __forceinline__ bfloat16_t dev_lane_hi(const bfloat16x2_t v) { return __high2bfloat16(v); }
+    __device__ __forceinline__ bfloat16_t dev_lane_hi(const bfloat16x2_t& v) { return __high2bfloat16(v); }
 
     /**
      * @brief Pack two narrowed fp16 lanes back into a packed value.
@@ -215,7 +219,7 @@ namespace BeanTensor::Tensors::detail::elementwise_kernels {
      * @return High nibble in [-8, 7].
      */
     __device__ __forceinline__ int32_t dev_int4_hi(const int4x2_t v) {
-        const auto n = static_cast<int32_t>(static_cast<uint8_t>(v) >> 4);
+        const auto n = static_cast<uint8_t>(v) >> 4;
         return n >= 8 ? n - 16 : n;
     }
 
@@ -354,7 +358,7 @@ namespace BeanTensor::Tensors::detail::elementwise_kernels {
      * @brief Scalar binary apply (fp16x2/bf16x2, per-lane fp32 compute).
      */
     template<typename P, ElementwiseOp Op>
-    __device__ __forceinline__ P dev_apply_packed(const P a, const P b) {
+    __device__ __forceinline__ P dev_apply_packed(const P& a, const P& b) {
         using H = packed_lane_t<P>;
         const auto r_lo = dev_apply_half<H, Op>(dev_lane_lo(a), dev_lane_lo(b));
         const auto r_hi = dev_apply_half<H, Op>(dev_lane_hi(a), dev_lane_hi(b));
@@ -425,7 +429,7 @@ namespace BeanTensor::Tensors::detail::elementwise_kernels {
      * @brief Category dispatch for the binary applies.
      */
     template<typename T, ElementwiseOp Op>
-    __device__ __forceinline__ T dev_apply_any(const T a, const T b) {
+    __device__ __forceinline__ T dev_apply_any(const T& a, const T& b) {
         if constexpr (std::is_same_v<T, float32_t> || std::is_same_v<T, float64_t>) {
             return dev_apply_native<Op>(a, b);
         } else if constexpr (std::is_same_v<T, float16_t> || std::is_same_v<T, bfloat16_t>) {
@@ -494,7 +498,7 @@ namespace BeanTensor::Tensors::detail::elementwise_kernels {
      * @brief Scalar unary apply (fp16x2/bf16x2, per-lane fp32 compute).
      */
     template<typename P, ElementwiseUnaryOp Op>
-    __device__ __forceinline__ P dev_apply_unary_packed(const P v) {
+    __device__ __forceinline__ P dev_apply_unary_packed(const P& v) {
         using H = packed_lane_t<P>;
         return dev_pack_lanes(dev_apply_unary_half<H, Op>(dev_lane_lo(v)), dev_apply_unary_half<H, Op>(dev_lane_hi(v)));
     }
@@ -503,7 +507,7 @@ namespace BeanTensor::Tensors::detail::elementwise_kernels {
      * @brief Category dispatch for the unary applies.
      */
     template<typename T, ElementwiseUnaryOp Op>
-    __device__ __forceinline__ T dev_apply_any_unary(const T v) {
+    __device__ __forceinline__ T dev_apply_any_unary(const T& v) {
         if constexpr (std::is_same_v<T, float32_t> || std::is_same_v<T, float64_t>) {
             return dev_apply_unary_native<Op>(v);
         } else if constexpr (std::is_same_v<T, float16_t> || std::is_same_v<T, bfloat16_t>) {

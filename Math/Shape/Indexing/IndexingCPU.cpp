@@ -5,7 +5,7 @@
  * the Tensor::index_select / Tensor::gather / Tensor::cat method definitions
  * (mirrors how Tensor::sum lives in SumCPU.cpp). All three are pure byte
  * movement: dtype-agnostic slab/element copies, so no per-dtype kernels exist.
- * @version 0.1
+ * @version 0.2
  * @date 2026-10-22
  */
 #include <cstdint>
@@ -28,7 +28,7 @@ namespace BeanTensor::Tensors::detail {
      * @param out Fresh output tensor, t's shape with shape[axis] = idx.numel.
      * @param axis Axis selected along.
      */
-    void index_select_cpu(const Tensor& t, const Tensor& idx, Tensor& out, const size_t axis) {
+    void index_select_cpu(const Tensor& t, const Tensor& idx, const Tensor& out, const size_t axis) {
         if (t.device != Device::CPU || idx.device != Device::CPU || out.device != Device::CPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("CPU", stringify_device_source(t.device));
         }
@@ -57,7 +57,7 @@ namespace BeanTensor::Tensors::detail {
         using DType = DataTypes::DType;
         switch (idx.dtype) {
             case DType::Int8: run(reinterpret_cast<const int8_t*>(idx_base)); break;
-            case DType::UInt8: run(reinterpret_cast<const uint8_t*>(idx_base)); break;
+            case DType::UInt8: run(idx_base); break;
             case DType::Int16: run(reinterpret_cast<const int16_t*>(idx_base)); break;
             case DType::UInt16: run(reinterpret_cast<const uint16_t*>(idx_base)); break;
             case DType::Int32: run(reinterpret_cast<const int32_t*>(idx_base)); break;
@@ -77,7 +77,7 @@ namespace BeanTensor::Tensors::detail {
      * @param out Fresh output tensor with idx's shape and t's dtype.
      * @param axis Axis gathered along.
      */
-    void gather_cpu(const Tensor& t, const Tensor& idx, Tensor& out, const size_t axis) {
+    void gather_cpu(const Tensor& t, const Tensor& idx, const Tensor& out, const size_t axis) {
         if (t.device != Device::CPU || idx.device != Device::CPU || out.device != Device::CPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("CPU", stringify_device_source(t.device));
         }
@@ -109,7 +109,7 @@ namespace BeanTensor::Tensors::detail {
         using DType = DataTypes::DType;
         switch (idx.dtype) {
             case DType::Int8: run(reinterpret_cast<const int8_t*>(idx_base)); break;
-            case DType::UInt8: run(reinterpret_cast<const uint8_t*>(idx_base)); break;
+            case DType::UInt8: run(idx_base); break;
             case DType::Int16: run(reinterpret_cast<const int16_t*>(idx_base)); break;
             case DType::UInt16: run(reinterpret_cast<const uint16_t*>(idx_base)); break;
             case DType::Int32: run(reinterpret_cast<const int32_t*>(idx_base)); break;
@@ -127,7 +127,7 @@ namespace BeanTensor::Tensors::detail {
      * @param out Fresh output tensor, summed extent along axis.
      * @param axis Axis concatenated along.
      */
-    void cat_cpu(const std::vector<Tensor>& tensors, Tensor& out, const size_t axis) {
+    void cat_cpu(const std::vector<Tensor>& tensors, const Tensor& out, const size_t axis) {
         for (const auto& t : tensors) {
             if (t.device != Device::CPU || out.device != Device::CPU) {
                 throw ErrorHandling::DirectFunctionCallOnWrongDataSource("CPU", stringify_device_source(t.device));
@@ -180,7 +180,7 @@ namespace BeanTensor::Tensors {
         }
         sync();
         indices.sync();
-        std::vector<size_t> out_shape(this->shape, this->shape + this->ndim);
+        std::vector out_shape(this->shape, this->shape + this->ndim);
         out_shape[axis] = indices.numel;
         auto out = Tensor(out_shape, this->dtype, this->device, false);
         if (this->device == Device::CPU) {
@@ -223,7 +223,7 @@ namespace BeanTensor::Tensors {
         }
         sync();
         indices.sync();
-        auto out = Tensor(std::vector<size_t>(indices.shape, indices.shape + indices.ndim), this->dtype, this->device, false);
+        auto out = Tensor(std::vector(indices.shape, indices.shape + indices.ndim), this->dtype, this->device, false);
         if (this->device == Device::CPU) {
             detail::gather_cpu(*this, indices, out, axis);
         } else if (this->device == Device::GPU) {
@@ -268,7 +268,7 @@ namespace BeanTensor::Tensors {
             }
             t.sync();
         }
-        std::vector<size_t> out_shape(first.shape, first.shape + first.ndim);
+        std::vector out_shape(first.shape, first.shape + first.ndim);
         out_shape[axis] = 0;
         for (const auto& t : tensors) {
             out_shape[axis] += t.shape[axis];

@@ -18,7 +18,7 @@ namespace BeanTensor::Tensors {
         /**
          * @brief CPU-only build stub for the GPU sum reduction. Always throws.
          */
-        inline void sum_gpu(const Tensor&, Tensor&) {
+        inline void sum_gpu(const Tensor&, const Tensor&) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
     }

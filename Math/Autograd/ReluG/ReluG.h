@@ -7,7 +7,6 @@
  */
 #pragma once
 
-#include <cstddef>
 
 #include "Tensor/DTypes.h"
 
@@ -18,17 +17,17 @@ namespace BeanTensor::Tensors {
         /**
          * @brief CPU relu backward: dx = x > 0 ? dy : 0 (written, not accumulated).
          */
-        void relu_g_cpu(const Tensor&, const Tensor&, Tensor&);
+        void relu_g_cpu(const Tensor&, const Tensor&, const Tensor&);
         /**
          * @brief GPU relu backward: dx = x > 0 ? dy : 0 (written, not accumulated).
          */
-        void relu_g_gpu(const Tensor&, const Tensor&, Tensor&);
+        void relu_g_gpu(const Tensor&, const Tensor&, const Tensor&);
 
         /**
          * @brief Backward trampoline for relu; matches Node::_backward_fn's
          * signature. The trailing DType is the calling backward()'s assigned grad dtype.
          */
-        void relu_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        void relu_g_node(const Tensor*, Tensor**, size_t, DataTypes::DType);
     }
 }
 

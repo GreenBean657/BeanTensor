@@ -54,7 +54,7 @@ namespace BeanTensor::Tensors::detail {
          * @return A new contiguous tensor holding the transposed data.
          */
         auto transpose = [](const Tensor& t) {
-            auto t_shape = std::vector<size_t>(t.shape, t.shape + t.ndim);
+            auto t_shape = std::vector(t.shape, t.shape + t.ndim);
             std::swap(t_shape[t.ndim - 1], t_shape[t.ndim - 2]);
             auto out = Tensor(t_shape, t.dtype, t.device, false);
             if (t.device == Device::CPU) {

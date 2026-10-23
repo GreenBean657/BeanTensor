@@ -352,7 +352,7 @@ namespace BeanTensor::Tensors::detail {
      * @throws ErrorHandling::NotImplemented (from the worker, at sync) for an unsupported logits or targets dtype.
      * @throws ErrorHandling::IndexOutOfRange (from the worker, at sync) when a target is outside [0, cols_eff).
      */
-    __host__ void softmax_ce_g_gpu(const Tensor& dloss_grad, const Tensor& logits, const Tensor& targets, Tensor& dlogits) {
+    __host__ void softmax_ce_g_gpu(const Tensor& dloss_grad, const Tensor& logits, const Tensor& targets, const Tensor& dlogits) {
         if (dloss_grad.device != Device::GPU || logits.device != Device::GPU || targets.device != Device::GPU || dlogits.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(logits.device));
         }

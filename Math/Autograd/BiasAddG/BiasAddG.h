@@ -7,8 +7,6 @@
  */
 #pragma once
 
-#include <cstddef>
-
 #include "Tensor/DTypes.h"
 
 namespace BeanTensor::Tensors {
@@ -22,7 +20,7 @@ namespace BeanTensor::Tensors {
         /**
          * @brief GPU bias_add backward: dbias = per-column sum of dy over all leading rows.
          */
-        void bias_add_g_gpu(const Tensor&, Tensor&);
+        void bias_add_g_gpu(const Tensor&, const Tensor&);
 
         /**
          * @brief Backward trampoline for bias_add; matches Node::_backward_fn's

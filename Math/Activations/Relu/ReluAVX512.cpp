@@ -7,7 +7,6 @@
  * @version 0.1
  * @date 2026-10-20
  */
-#include <algorithm>
 #include <immintrin.h>
 
 #include "Math/Activations/Relu/ReluKernels.h"

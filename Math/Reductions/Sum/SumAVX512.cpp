@@ -7,7 +7,6 @@
  * @version 0.1
  * @date 2026-10-20
  */
-#include <cmath>
 #include <immintrin.h>
 
 #include "Math/Reductions/Sum/SumKernels.h"

@@ -6,3 +6,5 @@ scratch/
 AGENTS.md
 *.d
 *.ddi
+.clangd
+gpu-test.sh

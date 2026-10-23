@@ -2,14 +2,12 @@
  * @file Argmax.h
  * @author GreenBean
  * @brief Entry point for argmax (cpu vs gpu).
- * @version 0.2
+ * @version 0.3
  * @date 2026-10-22
  */
 #pragma once
 
 #include <cstdint>
-
-#include "Tensor/DTypes.h"
 
 namespace BeanTensor::Tensors {
     class Tensor;
@@ -30,7 +28,7 @@ namespace BeanTensor::Tensors {
         /**
          * @brief GPU argmax along one axis, written as int64 indices into the output tensor.
          */
-        void argmax_axis_gpu(const Tensor&, Tensor&, size_t);
+        void argmax_axis_gpu(const Tensor&, const Tensor&, size_t);
     }
 }
 

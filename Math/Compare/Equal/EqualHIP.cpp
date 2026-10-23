@@ -6,7 +6,7 @@
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same IEEE equality semantics (NaN never equal,
  * -0.0 equals 0.0), same per-lane packed compare.
- * @version 0.1
+ * @version 0.1.1
  * @date 2026-10-22
  */
 #if defined(USE_HIP)
@@ -61,15 +61,15 @@ namespace BeanTensor::Tensors::detail {
                 } else if constexpr (std::is_same_v<T, float16x2_t>) {
                     const auto lo = dev_float_eq(static_cast<float64_t>(__half2float(__low2half(a[i]))), static_cast<float64_t>(__half2float(__low2half(b[i]))));
                     const auto hi = dev_float_eq(static_cast<float64_t>(__half2float(__high2half(a[i]))), static_cast<float64_t>(__half2float(__high2half(b[i]))));
-                    out[i] = (lo && hi) ? uint8_t{1} : uint8_t{0};
+                    out[i] = lo && hi ? uint8_t{1} : uint8_t{0};
                 } else if constexpr (std::is_same_v<T, bfloat16x2_t>) {
                     const auto lo = dev_float_eq(static_cast<float64_t>(__bfloat162float(__low2bfloat16(a[i]))), static_cast<float64_t>(__bfloat162float(__low2bfloat16(b[i]))));
                     const auto hi = dev_float_eq(static_cast<float64_t>(__bfloat162float(__high2bfloat16(a[i]))), static_cast<float64_t>(__bfloat162float(__high2bfloat16(b[i]))));
-                    out[i] = (lo && hi) ? uint8_t{1} : uint8_t{0};
+                    out[i] = lo && hi ? uint8_t{1} : uint8_t{0};
                 } else if constexpr (std::is_same_v<T, int4x2_t>) {
-                    out[i] = (__builtin_bit_cast(uint8_t, a[i]) == __builtin_bit_cast(uint8_t, b[i])) ? uint8_t{1} : uint8_t{0};
+                    out[i] = __builtin_bit_cast(uint8_t, a[i]) == __builtin_bit_cast(uint8_t, b[i]) ? uint8_t{1} : uint8_t{0};
                 } else {
-                    out[i] = (a[i] == b[i]) ? uint8_t{1} : uint8_t{0};
+                    out[i] = a[i] == b[i] ? uint8_t{1} : uint8_t{0};
                 }
             }
         }
@@ -99,7 +99,7 @@ namespace BeanTensor::Tensors::detail {
      * @param out Output UInt8 tensor, same shape/device as the inputs.
      * @note Throws DirectFunctionCallOnWrongDataSource when any tensor is not on the GPU.
      */
-    __host__ void equal_gpu(const Tensor& a, const Tensor& b, Tensor& out) {
+    __host__ void equal_gpu(const Tensor& a, const Tensor& b, const Tensor& out) {
         if (a.device != Device::GPU || b.device != Device::GPU || out.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(a.device));
         }

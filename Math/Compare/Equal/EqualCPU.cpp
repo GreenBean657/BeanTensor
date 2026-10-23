@@ -8,8 +8,6 @@
  * @version 0.1
  * @date 2026-10-22
  */
-#include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <future>
 #include <type_traits>
@@ -19,8 +17,6 @@
 #include "Math/Compare/CompareShared.h"
 #include "Tensor/Tensor.h"
 
-#include "Helpers/CPUThreading.h"
-#include "Helpers/Hardware.h"
 #include "Intrinsics/Native/DTypeConversions.h"
 
 namespace BeanTensor::Tensors::detail {
@@ -78,7 +74,7 @@ namespace BeanTensor::Tensors::detail {
                 const auto b_bits = Intrinsics::detail::bit_cast_memcpy<uint32_t>(b[i]);
                 const auto lo = float_eq(static_cast<float64_t>(widen_lane(lane_lo<H>(a_bits))), static_cast<float64_t>(widen_lane(lane_lo<H>(b_bits))));
                 const auto hi = float_eq(static_cast<float64_t>(widen_lane(lane_hi<H>(a_bits))), static_cast<float64_t>(widen_lane(lane_hi<H>(b_bits))));
-                out[i] = (lo && hi) ? uint8_t{1} : uint8_t{0};
+                out[i] = lo && hi ? uint8_t{1} : uint8_t{0};
             }
         }
 
@@ -94,7 +90,7 @@ namespace BeanTensor::Tensors::detail {
         template<typename T>
         void equal_range_int(uint8_t* out, const T* a, const T* b, const size_t begin, const size_t end) {
             for (auto i = begin; i < end; ++i) {
-                out[i] = (a[i] == b[i]) ? uint8_t{1} : uint8_t{0};
+                out[i] = a[i] == b[i] ? uint8_t{1} : uint8_t{0};
             }
         }
 
@@ -107,9 +103,9 @@ namespace BeanTensor::Tensors::detail {
          * @param begin First element compared.
          * @param end One past the last element compared.
          */
-        inline void equal_range_i4x2(uint8_t* out, const int4x2_t* a, const int4x2_t* b, const size_t begin, const size_t end) {
+        void equal_range_i4x2(uint8_t* out, const int4x2_t* a, const int4x2_t* b, const size_t begin, const size_t end) {
             for (auto i = begin; i < end; ++i) {
-                out[i] = (Intrinsics::detail::bit_cast_memcpy<uint8_t>(a[i]) == Intrinsics::detail::bit_cast_memcpy<uint8_t>(b[i])) ? uint8_t{1} : uint8_t{0};
+                out[i] = Intrinsics::detail::bit_cast_memcpy<uint8_t>(a[i]) == Intrinsics::detail::bit_cast_memcpy<uint8_t>(b[i]) ? uint8_t{1} : uint8_t{0};
             }
         }
     }
@@ -233,7 +229,7 @@ namespace BeanTensor::Tensors {
         if (!this->is_contiguous || !other.is_contiguous) {
             throw ErrorHandling::NotImplemented();
         }
-        auto out = Tensor(std::vector<size_t>(this->shape, this->shape + this->ndim), DataTypes::DType::UInt8, this->device, false);
+        auto out = Tensor(std::vector(this->shape, this->shape + this->ndim), DataTypes::DType::UInt8, this->device, false);
         if (this->device == Device::CPU) {
             detail::equal_cpu(*this, other, out);
         } else if (this->device == Device::GPU) {

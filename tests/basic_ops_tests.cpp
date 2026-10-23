@@ -4,18 +4,21 @@
  * @brief Reduction, optimization and shape ops tests - framework-free assertion suite.
  * Covers reshape, sgd_update/sgd_step, sum and argmax across the full dtype family (CPU threaded + SIMD tiers),
  * and the GPU (CUDA/HIP) paths for all four ops when a backend and device exist.
- * @version 0.1
+ * @version 0.2
  * @date 2026-10-18
  */
 #include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <random>
 #include <type_traits>
 #include <vector>
 
 #include "Helpers/Errors.h"
+#include "Helpers/Hardware.h"
 #include "Intrinsics/Native/DTypeConversions.h"
+#include "Math/Reductions/Sum/SumKernels.h"
 #include "Tensor/Tensor.h"
 
 #if defined(USE_HIP)
@@ -199,14 +202,14 @@ static void test_sum_cpu() {
     }
     // Threaded + SIMD tiers: 100k elements exceeds the inline threshold.
     {
-        const auto n = size_t{100000};
+        constexpr auto n = size_t{100000};
         auto t = Tensor({n}, DType::Float32, Device::CPU);
         t.set_one();
         auto s = t.sum();
         CHECK(near(s.at<float32_t>({0}), static_cast<float32_t>(n), 1e-3));
     }
     {
-        const auto n = size_t{100000};
+        constexpr auto n = size_t{100000};
         auto t = Tensor({n}, DType::Float64, Device::CPU);
         t.set_one();
         auto s = t.sum();
@@ -244,7 +247,7 @@ static void test_sum_cpu() {
         t.set<bfloat16x2_t>({1}, pack_lanes<bfloat16x2_t, bfloat16_t>(2.0f, 20.0f));
         auto s = t.sum();
         CHECK(near(unpack_lo(s.at<bfloat16x2_t>({0})), 3.0f, 1e-2));
-        CHECK(near(unpack_hi(s.at<bfloat16x2_t>({0})), 30.0f, 0.5f));
+        CHECK(near(unpack_hi(s.at<bfloat16x2_t>({0})), 30.0f, 0.5));
     }
     // Integers: uint64 modular accumulate, wrap on store.
     {
@@ -402,14 +405,14 @@ static void test_argmax_cpu() {
     }
     {
         // Threaded tier with the max in the last chunk.
-        const auto n = size_t{100000};
+        constexpr auto n = size_t{100000};
         auto t = Tensor({n}, DType::Int32, Device::CPU);
         t.set_zero();
         t.set<int32_t>({n - 7}, int32_t{1});
         CHECK(t.argmax() == uint64_t{n - 7});
     }
     {
-        const auto n = size_t{100000};
+        constexpr auto n = size_t{100000};
         auto t = Tensor({n}, DType::Float32, Device::CPU);
         t.set_zero();
         t.set<float32_t>({12345}, 0.5f);
@@ -460,7 +463,7 @@ static void test_sgd_cpu() {
     }
     {
         // Threaded + SIMD tier: every element must update.
-        const auto n = size_t{100000};
+        constexpr auto n = size_t{100000};
         auto w = Tensor({n}, DType::Float32, Device::CPU);
         w.set_one();
         auto g = Tensor({n}, DType::Float32, Device::CPU);
@@ -710,7 +713,7 @@ static void test_gpu() {
         auto s = t.sum();
         s.sync();
         CHECK(near(unpack_lo(s.at<bfloat16x2_t>({0})), 3.0f, 1e-2));
-        CHECK(near(unpack_hi(s.at<bfloat16x2_t>({0})), 30.0f, 0.5f));
+        CHECK(near(unpack_hi(s.at<bfloat16x2_t>({0})), 30.0f, 0.5));
     }
     {
         auto t = Tensor({3}, DType::Float32, Device::GPU);
@@ -809,9 +812,72 @@ static void test_gpu() {
     }
 }
 
+// Direct probe of the AVX2 sum kernels. SumCPU dispatches AVX512-first, so on
+// an AVX512 machine these kernels never run through the normal tensor path —
+// this test is their only exercise. Tree-reduction order differs from the
+// scalar loop, so the exact checks use order-insensitive values (all ones);
+// the random fills compare against an fp64 reference with tolerance.
+static void test_sum_avx2_kernels() {
+    namespace sr = BeanTensor::Math::Reductions;
+    const auto hw_avx2 = sr::sum_avx2_available();
+
+    {
+        constexpr auto n = size_t{100003}; // odd, exercises the scalar tail
+        auto ones = std::vector<float32_t>(n, 1.0f);
+        try {
+            // All ones: every partial sum is an exact small integer, so the
+            // tree order is irrelevant and the result must be exact.
+            CHECK(near(sr::sum_f32_range_avx2(ones.data(), 0, n), static_cast<float32_t>(n), 0.0f));
+        } catch (const BeanTensor::ErrorHandling::CPUIllegalInstruction&) {
+            CHECK(!hw_avx2);
+        }
+        auto rnd = std::vector<float32_t>(n);
+        auto rng = std::mt19937{42};
+        for (auto i = size_t{0}; i < n; ++i) {
+            rnd[i] = static_cast<float32_t>(static_cast<int32_t>(rng() % 2001) - 1000) / 250.0f;
+        }
+        auto expect = float64_t{0};
+        for (const auto v : rnd) {
+            expect += static_cast<float64_t>(v);
+        }
+        try {
+            const auto got = static_cast<float64_t>(sr::sum_f32_range_avx2(rnd.data(), 0, n));
+            CHECK(std::fabs(got - expect) <= 1e-3 * std::fabs(expect) + 1e-3);
+        } catch (const BeanTensor::ErrorHandling::CPUIllegalInstruction&) {
+            CHECK(!hw_avx2);
+        }
+    }
+    {
+        constexpr auto n = size_t{100003};
+        auto ones = std::vector<float64_t>(n, 1.0);
+        try {
+            // All ones: exact for any summation order.
+            CHECK(near64(sr::sum_f64_range_avx2(ones.data(), 0, n), static_cast<float64_t>(n), 0.0));
+        } catch (const BeanTensor::ErrorHandling::CPUIllegalInstruction&) {
+            CHECK(!hw_avx2);
+        }
+        auto rnd = std::vector<float64_t>(n);
+        auto rng = std::mt19937_64{42};
+        for (auto i = size_t{0}; i < n; ++i) {
+            rnd[i] = static_cast<float64_t>(static_cast<int64_t>(rng() % 2001) - 1000) / 250.0;
+        }
+        auto expect = float64_t{0};
+        for (const auto v : rnd) {
+            expect += v;
+        }
+        try {
+            const auto got = sr::sum_f64_range_avx2(rnd.data(), 0, n);
+            CHECK(std::fabs(got - expect) <= 1e-9 * std::fabs(expect) + 1e-9);
+        } catch (const BeanTensor::ErrorHandling::CPUIllegalInstruction&) {
+            CHECK(!hw_avx2);
+        }
+    }
+}
+
 int main() {
     test_reshape_cpu();
     test_sum_cpu();
+    test_sum_avx2_kernels();
     test_argmax_cpu();
     test_sgd_cpu();
     test_gpu();

@@ -58,7 +58,7 @@ namespace BeanTensor::Tensors {
         template<typename P> struct packed_lane;
         template<> struct packed_lane<float16x2_t> { using type = float16_t; };
         template<> struct packed_lane<bfloat16x2_t> { using type = bfloat16_t; };
-        template<typename P> using packed_lane_t = typename packed_lane<P>::type;
+        template<typename P> using packed_lane_t = packed_lane<P>::type;
 
         /**
          * Reinterprets the low 16 bits through memcpy, never a pointer cast.
@@ -113,7 +113,7 @@ namespace BeanTensor::Tensors {
          * @return High nibble in [-8, 7].
          */
         [[nodiscard]] inline int32_t int4_hi(const int4x2_t v) {
-            const auto n = static_cast<int32_t>(Intrinsics::detail::bit_cast_memcpy<uint8_t>(v) >> 4);
+            const auto n = Intrinsics::detail::bit_cast_memcpy<uint8_t>(v) >> 4;
             return n >= 8 ? n - 16 : n;
         }
 

@@ -11,8 +11,6 @@
  */
 #if defined(USE_HIP)
 #include <cstdint>
-#include <limits>
-#include <type_traits>
 
 #include <hip/hip_runtime.h>
 
@@ -81,7 +79,7 @@ namespace BeanTensor::Tensors::detail {
      * @throws ErrorHandling::DirectFunctionCallOnWrongDataSource if t or out is not on the GPU.
      * @throws ErrorHandling::UnReachableCode (from the worker, at sync) for an element width other than 1, 2, 4 or 8 bytes.
      */
-    __host__ void transpose_last2_gpu(const Tensor& t, Tensor& out) {
+    __host__ void transpose_last2_gpu(const Tensor& t, const Tensor& out) {
         if (t.device != Device::GPU || out.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(t.device));
         }

@@ -7,8 +7,6 @@
  */
 #pragma once
 
-#include "Tensor/DTypes.h"
-
 namespace BeanTensor::Tensors {
     class Tensor;
     namespace detail {

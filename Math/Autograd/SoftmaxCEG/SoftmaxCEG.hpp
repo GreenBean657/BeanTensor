@@ -17,7 +17,7 @@ namespace BeanTensor::Tensors {
         /**
          * @brief CPU-only build stub for the GPU softmax_ce backward backend: throws ErrorHandling::GPUTaskOnCPUBuild, since no GPU backend exists to link against.
          */
-        inline void softmax_ce_g_gpu(const Tensor&, const Tensor&, const Tensor&, Tensor&) {
+        inline void softmax_ce_g_gpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
     }

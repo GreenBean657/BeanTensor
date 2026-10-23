@@ -108,7 +108,7 @@ static int32_t int4_lo(const int4x2_t v) {
 }
 
 static int32_t int4_hi(const int4x2_t v) {
-    const auto n = static_cast<int32_t>(idet::bit_cast_memcpy<uint8_t>(v) >> 4);
+    const int32_t n = idet::bit_cast_memcpy<uint8_t>(v) >> 4;
     return n >= 8 ? n - 16 : n;
 }
 
@@ -162,13 +162,13 @@ static void test_bias_add_cpu_f64_rank3() {
         bias.set<float64_t>({c}, -static_cast<float64_t>(c));
     }
     for (auto i = size_t{0}; i < 24; ++i) {
-        t.set<float64_t>({i / 12, (i / 4) % 3, i % 4}, static_cast<float64_t>(i) * 0.25);
+        t.set<float64_t>({i / 12, i / 4 % 3, i % 4}, static_cast<float64_t>(i) * 0.25);
     }
     auto out = t.bias_add(bias);
     out.sync();
     for (auto i = size_t{0}; i < 24; ++i) {
         const auto want = static_cast<float64_t>(i) * 0.25 - static_cast<float64_t>(i % 4);
-        CHECK(idet::bit_cast_memcpy<uint64_t>(out.at<float64_t>({i / 12, (i / 4) % 3, i % 4})) == idet::bit_cast_memcpy<uint64_t>(want));
+        CHECK(idet::bit_cast_memcpy<uint64_t>(out.at<float64_t>({i / 12, i / 4 % 3, i % 4})) == idet::bit_cast_memcpy<uint64_t>(want));
     }
 }
 
@@ -354,7 +354,7 @@ static void test_relu_cpu_f64() {
     CHECK(idet::bit_cast_memcpy<uint64_t>(out.at<float64_t>({0, 0})) == 0ull);
     CHECK(idet::bit_cast_memcpy<uint64_t>(out.at<float64_t>({0, 1})) == idet::bit_cast_memcpy<uint64_t>(1.0e-300));
     CHECK(std::isnan(out.at<float64_t>({0, 2})));
-    CHECK(idet::bit_cast_memcpy<uint64_t>(out.at<float64_t>({0, 3})) == (uint64_t{1} << 63));
+    CHECK(idet::bit_cast_memcpy<uint64_t>(out.at<float64_t>({0, 3})) == uint64_t{1} << 63);
 }
 
 static void test_relu_cpu_halfs_packed() {
@@ -481,7 +481,7 @@ static void test_softmax_ce_cpu_threaded() {
 static void test_softmax_ce_cpu_halfs() {
     Tensor t({2, 4}, DType::Float16);
     Tensor targets({2}, DType::Int16);
-    const float32_t vals[2][4] = {{0.5f, -1.0f, 2.0f, 0.25f}, {3.0f, 1.0f, -2.0f, 0.0f}};
+    constexpr float32_t vals[2][4] = {{0.5f, -1.0f, 2.0f, 0.25f}, {3.0f, 1.0f, -2.0f, 0.0f}};
     for (auto r = size_t{0}; r < 2; ++r) {
         for (auto c = size_t{0}; c < 4; ++c) {
             t.set<float16_t>({r, c}, narrow_lane<float16_t>(vals[r][c]));
@@ -839,7 +839,7 @@ static void test_softmax_ce_gpu() {
             row[c] = static_cast<float64_t>(v);
             t_cpu.set<float32_t>({r, c}, v);
         }
-        const auto target = (r * 7) % cols;
+        const auto target = r * 7 % cols;
         targets_cpu.set<int32_t>({r}, static_cast<int32_t>(target));
         ref_total += ref_row_loss(row, target);
     }

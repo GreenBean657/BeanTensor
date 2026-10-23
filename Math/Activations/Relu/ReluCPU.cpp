@@ -117,6 +117,21 @@ namespace BeanTensor::Tensors::detail {
          */
         template<typename T>
         using ReluScalarFn = void(*)(T*, const T*, size_t, size_t);
+
+        /**
+         * wire_node's function-pointer type takes a mutable output_grad while
+         * relu_g_node takes a const one (a function-pointer type mismatch the
+         * Clang build accepts as an extension but GCC rejects). The trampoline
+         * only reads output_grad, so forward through a matching bridge.
+         * @brief Signature bridge between wire_node and relu_g_node.
+         * @param output_grad Gradient of the forward output, in grad_dtype.
+         * @param inputs Input tensors of the forward op.
+         * @param n_inputs Number of entries in inputs.
+         * @param grad_dtype The calling backward()'s assigned gradient dtype.
+         */
+        void relu_g_bridge(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+            relu_g_node(output_grad, inputs, n_inputs, grad_dtype);
+        }
     }
 
     /**
@@ -138,7 +153,7 @@ namespace BeanTensor::Tensors::detail {
                 const auto* in_ptr = static_cast<const float32_t*>(t.data) + t.offset;
                 const ReluScalarFn<float32_t> kernel = Math::Activations::relu_avx512_available()
                     ? Math::Activations::relu_f32_range_avx512
-                    : (Math::Activations::relu_avx2_available() ? Math::Activations::relu_f32_range_avx2 : relu_range_scalar<float32_t>);
+                    : Math::Activations::relu_avx2_available() ? Math::Activations::relu_f32_range_avx2 : relu_range_scalar<float32_t>;
                 /**
                  * Forwards the captured relu pointers to the range kernel.
                  * @brief Elementwise relu range worker (fp32/fp64 SIMD or scalar).
@@ -154,7 +169,7 @@ namespace BeanTensor::Tensors::detail {
                 const auto* in_ptr = static_cast<const float64_t*>(t.data) + t.offset;
                 const ReluScalarFn<float64_t> kernel = Math::Activations::relu_avx512_available()
                     ? Math::Activations::relu_f64_range_avx512
-                    : (Math::Activations::relu_avx2_available() ? Math::Activations::relu_f64_range_avx2 : relu_range_scalar<float64_t>);
+                    : Math::Activations::relu_avx2_available() ? Math::Activations::relu_f64_range_avx2 : relu_range_scalar<float64_t>;
                 /**
                  * Forwards the captured relu pointers to the range kernel.
                  * @brief Elementwise relu range worker (fp32/fp64 SIMD or scalar).
@@ -327,7 +342,7 @@ namespace BeanTensor::Tensors {
             throw ErrorHandling::NotImplemented();
         }
         sync();
-        auto out = Tensor(std::vector<size_t>(this->shape, this->shape + this->ndim), this->dtype, this->device, false);
+        auto out = Tensor(std::vector(this->shape, this->shape + this->ndim), this->dtype, this->device, false);
         if (this->device == Device::CPU) {
             detail::relu_cpu(*this, out);
         } else if (this->device == Device::GPU) {
@@ -335,7 +350,7 @@ namespace BeanTensor::Tensors {
         } else [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
-        out.wire_node(detail::relu_g_node, *this);
+        out.wire_node(detail::relu_g_bridge, *this);
         return out;
     }
 }

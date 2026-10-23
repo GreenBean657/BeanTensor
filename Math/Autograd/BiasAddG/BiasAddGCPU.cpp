@@ -7,7 +7,6 @@
  * @date 2026-10-20
  */
 #include <algorithm>
-#include <cstdint>
 #include <future>
 #include <type_traits>
 #include <vector>
@@ -272,10 +271,10 @@ namespace BeanTensor::Tensors::detail {
         switch (dy.dtype) {
             case DType::Float32: {
                 const auto* dy_ptr = static_cast<const float32_t*>(dy.data) + dy.offset;
-                std::vector<float32_t> partials(slots * cols, 0.0f);
+                std::vector partials(slots * cols, 0.0f);
                 const ColsumScalarFn<float32_t> kernel = Math::Autograd::bias_add_g_avx512_available()
                     ? Math::Autograd::bias_add_g_f32_colsum_avx512
-                    : (Math::Autograd::bias_add_g_avx2_available() ? Math::Autograd::bias_add_g_f32_colsum_avx2 : bias_add_g_colsum_scalar<float32_t>);
+                    : Math::Autograd::bias_add_g_avx2_available() ? Math::Autograd::bias_add_g_f32_colsum_avx2 : bias_add_g_colsum_scalar<float32_t>;
                 /**
                  * Runs on a pool worker (or inline, slot 0, for small inputs) over the row range [b, e). Captures by reference (partials and dy_ptr outlive it: the caller drains before returning).
                  * Adds the column sums of those rows of dy into its own slot of partials (partials + slot * cols), so chunks never race; the partials are merged afterwards. Uses the dispatched kernel.
@@ -290,10 +289,10 @@ namespace BeanTensor::Tensors::detail {
             }
             case DType::Float64: {
                 const auto* dy_ptr = static_cast<const float64_t*>(dy.data) + dy.offset;
-                std::vector<float64_t> partials(slots * cols, 0.0);
+                std::vector partials(slots * cols, 0.0);
                 const ColsumScalarFn<float64_t> kernel = Math::Autograd::bias_add_g_avx512_available()
                     ? Math::Autograd::bias_add_g_f64_colsum_avx512
-                    : (Math::Autograd::bias_add_g_avx2_available() ? Math::Autograd::bias_add_g_f64_colsum_avx2 : bias_add_g_colsum_scalar<float64_t>);
+                    : Math::Autograd::bias_add_g_avx2_available() ? Math::Autograd::bias_add_g_f64_colsum_avx2 : bias_add_g_colsum_scalar<float64_t>;
                 /**
                  * Runs on a pool worker (or inline, slot 0, for small inputs) over the row range [b, e). Captures by reference (partials and dy_ptr outlive it: the caller drains before returning).
                  * Adds the column sums of those rows of dy into its own slot of partials (partials + slot * cols), so chunks never race; the partials are merged afterwards. Uses the dispatched kernel.
@@ -308,7 +307,7 @@ namespace BeanTensor::Tensors::detail {
             }
             case DType::Float16: {
                 const auto* dy_ptr = static_cast<const float16_t*>(dy.data) + dy.offset;
-                std::vector<float32_t> partials(slots * cols, 0.0f);
+                std::vector partials(slots * cols, 0.0f);
                 /**
                  * Runs on a pool worker (or inline, slot 0, for small inputs) over the row range [b, e). Captures by reference (partials and dy_ptr outlive it: the caller drains before returning).
                  * Adds the column sums of those rows of dy into its own slot of partials (partials + slot * cols), so chunks never race; the partials are merged afterwards. Accumulates in fp32.
@@ -323,7 +322,7 @@ namespace BeanTensor::Tensors::detail {
             }
             case DType::BFloat16: {
                 const auto* dy_ptr = static_cast<const bfloat16_t*>(dy.data) + dy.offset;
-                std::vector<float32_t> partials(slots * cols, 0.0f);
+                std::vector partials(slots * cols, 0.0f);
                 /**
                  * Runs on a pool worker (or inline, slot 0, for small inputs) over the row range [b, e). Captures by reference (partials and dy_ptr outlive it: the caller drains before returning).
                  * Adds the column sums of those rows of dy into its own slot of partials (partials + slot * cols), so chunks never race; the partials are merged afterwards. Accumulates in fp32.
@@ -338,7 +337,7 @@ namespace BeanTensor::Tensors::detail {
             }
             case DType::Float16x2: {
                 const auto* dy_ptr = static_cast<const float16x2_t*>(dy.data) + dy.offset;
-                std::vector<float32_t> partials(slots * 2 * cols, 0.0f);
+                std::vector partials(slots * 2 * cols, 0.0f);
                 /**
                  * Runs on a pool worker (or inline, slot 0, for small inputs) over the row range [b, e). Captures by reference (partials and dy_ptr outlive it: the caller drains before returning).
                  * Adds the column sums of those rows of dy into its own slot of partials (partials + slot * 2 * cols), so chunks never race; the partials are merged afterwards. Each element carries two columns, so each slot holds 2 * cols fp32 sums.
@@ -353,7 +352,7 @@ namespace BeanTensor::Tensors::detail {
             }
             case DType::BFloat16x2: {
                 const auto* dy_ptr = static_cast<const bfloat16x2_t*>(dy.data) + dy.offset;
-                std::vector<float32_t> partials(slots * 2 * cols, 0.0f);
+                std::vector partials(slots * 2 * cols, 0.0f);
                 /**
                  * Runs on a pool worker (or inline, slot 0, for small inputs) over the row range [b, e). Captures by reference (partials and dy_ptr outlive it: the caller drains before returning).
                  * Adds the column sums of those rows of dy into its own slot of partials (partials + slot * 2 * cols), so chunks never race; the partials are merged afterwards. Each element carries two columns, so each slot holds 2 * cols fp32 sums.
@@ -368,7 +367,7 @@ namespace BeanTensor::Tensors::detail {
             }
             case DType::Int4x2: {
                 const auto* dy_ptr = static_cast<const int4x2_t*>(dy.data) + dy.offset;
-                std::vector<int32_t> partials(slots * 2 * cols, 0);
+                std::vector partials(slots * 2 * cols, 0);
                 /**
                  * Runs on a pool worker (or inline, slot 0, for small inputs) over the row range [b, e). Captures by reference (partials and dy_ptr outlive it: the caller drains before returning).
                  * Adds the column sums of those rows of dy into its own slot of partials (partials + slot * 2 * cols), so chunks never race; the partials are merged afterwards. Each element carries two nibbles, so each slot holds 2 * cols int32 sums.
@@ -450,7 +449,7 @@ namespace BeanTensor::Tensors::detail {
         }
         if (bias.requires_grad) {
             bias.sync();
-            auto dbias = Tensor(std::vector<size_t>(bias.shape, bias.shape + bias.ndim), grad_dtype, bias.device, false);
+            auto dbias = Tensor(std::vector(bias.shape, bias.shape + bias.ndim), grad_dtype, bias.device, false);
             if (bias.device == Device::CPU) {
                 bias_add_g_cpu(*output_grad, dbias);
             } else if (bias.device == Device::GPU) {

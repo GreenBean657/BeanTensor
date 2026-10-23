@@ -29,7 +29,7 @@ namespace BeanTensor::Tensors {
         if (this->grad != nullptr) {
             return;
         }
-        this->grad = new Tensor(std::vector<size_t>(this->shape, this->shape + this->ndim), grad_dtype, this->device, false);
+        this->grad = new Tensor(std::vector(this->shape, this->shape + this->ndim), grad_dtype, this->device, false);
         this->grad->set_zero();
         this->grad->sync(); // the zero-fill must land before any reader queues work
     }
@@ -133,7 +133,7 @@ namespace BeanTensor::Tensors {
         // Discover every tensor reachable through the graph.
         std::vector<Tensor*> visited;
         std::unordered_set<Tensor*> seen;
-        std::vector<Tensor*> stack{this};
+        std::vector stack{this};
         while (!stack.empty()) {
             auto* t = stack.back();
             stack.pop_back();
@@ -161,7 +161,7 @@ namespace BeanTensor::Tensors {
         }
         // Seed the root with ones in the assigned grad dtype.
         this->ensure_grad(grad_dtype);
-        auto ones = Tensor(std::vector<size_t>(this->shape, this->shape + this->ndim), grad_dtype, this->device, false);
+        auto ones = Tensor(std::vector(this->shape, this->shape + this->ndim), grad_dtype, this->device, false);
         ones.set_one();
         this->accumulate_grad(std::move(ones));
         // Kahn's algorithm over consumer counts: a node fires once every
@@ -176,8 +176,10 @@ namespace BeanTensor::Tensors {
                 continue;
             }
             for (auto i = size_t{0}; i < t->node->_n_inputs; ++i) {
-                const auto* in = t->node->_inputs[i];
-                if (in->node != nullptr) {
+                if (
+                    const auto* in = t->node->_inputs[i];
+                    in->node != nullptr
+                    ) {
                     if (in->node->_n_outputs_pending == std::numeric_limits<uint8_t>::max()) {
                         throw ErrorHandling::DimensionTooLarge("backward graph fan-in exceeds 255");
                     }

@@ -245,10 +245,10 @@ static void test_matmul_cpu_packed() {
         }
         auto c = a.matmul(b);
         c.sync();
-        constexpr float32_t expected_lo[4] = {5.0f, 11.0f, 11.0f, 25.0f};
-        constexpr float32_t expected_hi[4] = {10.0f, 22.0f, 22.0f, 50.0f};
         for (auto i = size_t{0}; i < 2; ++i) {
             for (auto j = size_t{0}; j < 2; ++j) {
+                constexpr float32_t expected_lo[4] = {5.0f, 11.0f, 11.0f, 25.0f};
+                constexpr float32_t expected_hi[4] = {10.0f, 22.0f, 22.0f, 50.0f};
                 const auto idx = i * 2 + j;
                 if (dtype == DType::Float16x2) {
                     const auto v = c.at<float16x2_t>({i, j});
@@ -333,10 +333,10 @@ static void test_matmul_cpu_f16_bf16_large() {
     // Odd extents exercise the odd-k tail, the masked column tails and the
     // single-row tail of the AVX512 half-dtype kernels (and of the scalar
     // fallback on CPUs without them). Big enough to engage the thread pool.
-    constexpr size_t m = 67;
-    constexpr size_t k = 51;
-    constexpr size_t n = 29;
     for (const auto dtype : {DType::Float16, DType::BFloat16}) {
+        constexpr size_t m = 67;
+        constexpr size_t k = 51;
+        constexpr size_t n = 29;
         Tensor a({m, k}, dtype);
         Tensor b({k, n}, dtype);
         std::vector<float64_t> av(m * k);
@@ -384,10 +384,10 @@ static void fill_packed(Tensor& t, std::vector<float64_t>& widened_lo, std::vect
 static void test_matmul_cpu_packed_large() {
     // Per-lane FP64 reference; odd k exercises the packed kernels' zero-pair
     // tail, n = 17 the masked 16-column tail, m = 129 the single-row tail.
-    constexpr size_t m = 129;
-    constexpr size_t k = 25;
-    constexpr size_t n = 17;
     for (const auto dtype : {DType::Float16x2, DType::BFloat16x2}) {
+        constexpr size_t m = 129;
+        constexpr size_t k = 25;
+        constexpr size_t n = 17;
         Tensor a({m, k}, dtype);
         Tensor b({k, n}, dtype);
         std::vector<float64_t> av_lo(m * k);
@@ -435,7 +435,7 @@ template<typename T>
 static void ref_gemm_int(const std::vector<T>& a, const std::vector<T>& b,
                          std::vector<T>& c, const size_t m, const size_t k, const size_t n) {
     using UT = std::make_unsigned_t<T>;
-    using Acc = std::conditional_t<(sizeof(T) < 8), uint32_t, uint64_t>;
+    using Acc = std::conditional_t<sizeof(T) < 8, uint32_t, uint64_t>;
     for (auto i = size_t{0}; i < m; ++i) {
         for (auto j = size_t{0}; j < n; ++j) {
             auto acc = Acc{0};
@@ -506,18 +506,18 @@ static void test_matmul_cpu_int_wrap() {
     Tensor b({k, n}, DType::Int8);
     for (auto i = size_t{0}; i < m; ++i) {
         for (auto kk = size_t{0}; kk < k; ++kk) {
-            a.set<int8_t>({i, kk}, static_cast<int8_t>(127));
+            a.set<int8_t>({i, kk}, int8_t{127});
         }
     }
     for (auto kk = size_t{0}; kk < k; ++kk) {
         for (auto j = size_t{0}; j < n; ++j) {
-            b.set<int8_t>({kk, j}, static_cast<int8_t>(127));
+            b.set<int8_t>({kk, j}, int8_t{127});
         }
     }
     auto c = a.matmul(b);
     c.sync();
     // 40·127·127 = 645160; 645160 mod 256 = 216 → as int8: -40.
-    const auto expected = static_cast<int8_t>(static_cast<uint8_t>((645160u) & 0xFFu));
+    constexpr auto expected = static_cast<int8_t>(static_cast<uint8_t>(645160u & 0xFFu));
     for (auto i = size_t{0}; i < m; ++i) {
         for (auto j = size_t{0}; j < n; ++j) {
             CHECK(c.at<int8_t>({i, j}) == expected);
@@ -568,8 +568,8 @@ static void test_matmul_cpu_int_batched() {
     CHECK(c.shape_to_string() == "{4, 16, 8}");
     for (auto bi = size_t{0}; bi < batch; ++bi) {
         std::vector<int32_t> ref(m * n);
-        ref_gemm_int(std::vector<int32_t>(av.begin() + static_cast<std::ptrdiff_t>(bi * m * k), av.begin() + static_cast<std::ptrdiff_t>((bi + 1) * m * k)),
-                     std::vector<int32_t>(bv.begin() + static_cast<std::ptrdiff_t>(bi * k * n), bv.begin() + static_cast<std::ptrdiff_t>((bi + 1) * k * n)),
+        ref_gemm_int(std::vector(av.begin() + static_cast<std::ptrdiff_t>(bi * m * k), av.begin() + static_cast<std::ptrdiff_t>((bi + 1) * m * k)),
+                     std::vector(bv.begin() + static_cast<std::ptrdiff_t>(bi * k * n), bv.begin() + static_cast<std::ptrdiff_t>((bi + 1) * k * n)),
                      ref, m, k, n);
         for (auto i = size_t{0}; i < m; ++i) {
             for (auto j = size_t{0}; j < n; ++j) {
@@ -798,10 +798,10 @@ static void test_matmul_gpu_packed() {
         }
         auto c = a.matmul(b);
         c.sync();
-        constexpr float32_t expected_lo[4] = {5.0f, 11.0f, 11.0f, 25.0f};
-        constexpr float32_t expected_hi[4] = {10.0f, 22.0f, 22.0f, 50.0f};
         for (auto i = size_t{0}; i < 2; ++i) {
             for (auto j = size_t{0}; j < 2; ++j) {
+                constexpr float32_t expected_lo[4] = {5.0f, 11.0f, 11.0f, 25.0f};
+                constexpr float32_t expected_hi[4] = {10.0f, 22.0f, 22.0f, 50.0f};
                 const auto idx = i * 2 + j;
                 if (dtype == DType::Float16x2) {
                     const auto v = c.at<float16x2_t>({i, j});

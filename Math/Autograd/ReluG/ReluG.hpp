@@ -17,7 +17,7 @@ namespace BeanTensor::Tensors {
         /**
          * @brief CPU-only build stub for the GPU relu backward backend: throws ErrorHandling::GPUTaskOnCPUBuild, since no GPU backend exists to link against.
          */
-        inline void relu_g_gpu(const Tensor&, const Tensor&, Tensor&) {
+        inline void relu_g_gpu(const Tensor&, const Tensor&, const Tensor&) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
     }

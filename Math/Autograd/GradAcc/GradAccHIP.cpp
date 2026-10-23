@@ -11,7 +11,6 @@
  */
 #if defined(USE_HIP)
 #include <cstdint>
-#include <limits>
 #include <type_traits>
 
 #include <hip/hip_runtime.h>
@@ -95,7 +94,7 @@ namespace BeanTensor::Tensors::detail {
      * @throws ErrorHandling::DirectFunctionCallOnWrongDataSource if g or d is not on the GPU.
      * @throws ErrorHandling::NotImplemented (from the worker, at sync) for an unsupported dtype.
      */
-    __host__ void grad_acc_gpu(Tensor& g, const Tensor& d) {
+    __host__ void grad_acc_gpu(const Tensor& g, const Tensor& d) {
         if (g.device != Device::GPU || d.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(g.device));
         }

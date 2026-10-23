@@ -7,8 +7,6 @@
  */
 #pragma once
 
-#include "Tensor/DTypes.h"
-
 namespace BeanTensor::Tensors {
     class Tensor;
     namespace detail {
@@ -16,11 +14,11 @@ namespace BeanTensor::Tensors {
         /**
          * @brief CPU bias_add backend: out = input + bias broadcast over the last dimension.
          */
-        void bias_add_cpu(const Tensor&, const Tensor&, Tensor&);
+        void bias_add_cpu(const Tensor&, const Tensor&, const Tensor&);
         /**
          * @brief GPU bias_add backend: out = input + bias broadcast over the last dimension.
          */
-        void bias_add_gpu(const Tensor&, const Tensor&, Tensor&);
+        void bias_add_gpu(const Tensor&, const Tensor&, const Tensor&);
     }
 }
 

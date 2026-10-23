@@ -8,8 +8,6 @@
  */
 #pragma once
 
-#include "Tensor/DTypes.h"
-
 namespace BeanTensor::Tensors {
     class Tensor;
     namespace detail {
@@ -17,11 +15,11 @@ namespace BeanTensor::Tensors {
         /**
          * @brief CPU transpose of the last two dimensions: out[..., j, i] = t[..., i, j].
          */
-        void transpose_last2_cpu(const Tensor&, Tensor&);
+        void transpose_last2_cpu(const Tensor&, const Tensor&);
         /**
          * @brief GPU transpose of the last two dimensions: out[..., j, i] = t[..., i, j].
          */
-        void transpose_last2_gpu(const Tensor&, Tensor&);
+        void transpose_last2_gpu(const Tensor&, const Tensor&);
     }
 }
 

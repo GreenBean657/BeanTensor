@@ -19,7 +19,7 @@ namespace BeanTensor::Tensors {
          * @brief CPU-only build stub for GPU relu.
          * @note Always throws ErrorHandling::GPUTaskOnCPUBuild.
          */
-        inline void relu_gpu(const Tensor&, Tensor&) {
+        inline void relu_gpu(const Tensor&, const Tensor&) {
             throw ErrorHandling::GPUTaskOnCPUBuild();
         }
     }

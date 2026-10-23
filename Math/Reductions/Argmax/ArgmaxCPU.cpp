@@ -3,7 +3,7 @@
  * @author GreenBean
  * @brief CPU backend for argmax. Hosts the Tensor::argmax method definition
  * (mirrors how Tensor::matmul lives in MatmulCPU.cpp).
- * @version 0.2
+ * @version 0.3
  * @date 2026-10-22
  */
 #include <algorithm>
@@ -34,11 +34,11 @@ namespace BeanTensor::Tensors::detail {
          * @param best Incumbent key.
          * @return T/F - the candidate should replace the incumbent.
          */
-        [[nodiscard]] inline bool key_better(const float64_t cand, const float64_t best) {
-            if (std::isnan(cand)) {
-                return !std::isnan(best);
+        [[nodiscard]] bool key_better(const float64_t cand, const float64_t best) {
+            if (__builtin_isnan(cand)) {
+                return !__builtin_isnan(best);
             }
-            return !std::isnan(best) && cand > best;
+            return !__builtin_isnan(best) && cand > best;
         }
 
         /**
@@ -55,8 +55,10 @@ namespace BeanTensor::Tensors::detail {
         bool argmax_range_scalar(const T* data, const size_t begin, const size_t end, float64_t& best, uint64_t& best_idx) {
             auto has = false;
             for (auto i = begin; i < end; ++i) {
-                const auto key = static_cast<float64_t>(data[i]);
-                if (!has || key_better(key, best)) {
+                if (
+                    const auto key = static_cast<float64_t>(data[i]);
+                    !has || key_better(key, best)
+                    ) {
                     best = key;
                     best_idx = i;
                     has = true;
@@ -79,8 +81,10 @@ namespace BeanTensor::Tensors::detail {
         bool argmax_range_half(const H* data, const size_t begin, const size_t end, float64_t& best, uint64_t& best_idx) {
             auto has = false;
             for (auto i = begin; i < end; ++i) {
-                const auto key = static_cast<float64_t>(widen_lane(data[i]));
-                if (!has || key_better(key, best)) {
+                if (
+                    const auto key = static_cast<float64_t>(widen_lane(data[i]));
+                    !has || key_better(key, best)
+                    ) {
                     best = key;
                     best_idx = i;
                     has = true;
@@ -98,14 +102,19 @@ namespace BeanTensor::Tensors::detail {
          * @param bhi Incumbent high lane.
          * @return T/F - the candidate should replace the incumbent.
          */
-        [[nodiscard]] inline bool pair_better(const float32_t clo, const float32_t chi, const float32_t blo, const float32_t bhi) {
-            if (key_better(static_cast<float64_t>(clo), static_cast<float64_t>(blo))) {
+        [[nodiscard]] bool pair_better(const float32_t clo, const float32_t chi, const float32_t blo, const float32_t bhi) {
+            // Widen once, explicitly: the implicit float32 -> float64 promotion at the call sites trips -Werror=double-promotion.
+            const auto clo64 = static_cast<float64_t>(clo);
+            const auto chi64 = static_cast<float64_t>(chi);
+            const auto blo64 = static_cast<float64_t>(blo);
+            const auto bhi64 = static_cast<float64_t>(bhi);
+            if (key_better(clo64, blo64)) {
                 return true;
             }
-            if (key_better(static_cast<float64_t>(blo), static_cast<float64_t>(clo))) {
+            if (key_better(blo64, clo64)) {
                 return false;
             }
-            return key_better(static_cast<float64_t>(chi), static_cast<float64_t>(bhi));
+            return key_better(chi64, bhi64);
         }
 
         /**
@@ -150,13 +159,15 @@ namespace BeanTensor::Tensors::detail {
          * @param best_idx Flat index of the best pair.
          * @return T/F - the chunk held at least one element.
          */
-        inline bool argmax_range_i4x2(const int4x2_t* data, const size_t begin, const size_t end,
+        bool argmax_range_i4x2(const int4x2_t* data, const size_t begin, const size_t end,
                                       float32_t& best_lo, float32_t& best_hi, uint64_t& best_idx) {
             auto has = false;
             for (auto i = begin; i < end; ++i) {
                 const auto lo = static_cast<float32_t>(i4_lane_lo(data[i]));
-                const auto hi = static_cast<float32_t>(i4_lane_hi(data[i]));
-                if (!has || pair_better(lo, hi, best_lo, best_hi)) {
+                if (
+                    const auto hi = static_cast<float32_t>(i4_lane_hi(data[i]));
+                    !has || pair_better(lo, hi, best_lo, best_hi)
+                    ) {
                     best_lo = lo;
                     best_hi = hi;
                     best_idx = i;
@@ -267,7 +278,7 @@ namespace BeanTensor::Tensors::detail {
         template<typename T>
         void argmax_axis_range_float(const T* data, int64_t* out, const size_t axis_len, const size_t inner, const size_t begin, const size_t end) {
             for (auto o = begin; o < end; ++o) {
-                const auto base = (o / inner) * (axis_len * inner) + (o % inner);
+                const auto base = o / inner * (axis_len * inner) + o % inner;
                 auto best_idx = size_t{0};
                 auto best = float64_t{0.0};
                 for (auto i = size_t{0}; i < axis_len; ++i) {
@@ -301,7 +312,7 @@ namespace BeanTensor::Tensors::detail {
         void argmax_axis_range_packed(const P* data, int64_t* out, const size_t axis_len, const size_t inner, const size_t begin, const size_t end) {
             using H = packed_lane_t<P>;
             for (auto o = begin; o < end; ++o) {
-                const auto base = (o / inner) * (axis_len * inner) + (o % inner);
+                const auto base = o / inner * (axis_len * inner) + o % inner;
                 auto best_idx = size_t{0};
                 auto best_lo = float32_t{0.0f};
                 auto best_hi = float32_t{0.0f};
@@ -329,16 +340,18 @@ namespace BeanTensor::Tensors::detail {
          * @param begin First output position computed.
          * @param end One past the last output position computed.
          */
-        inline void argmax_axis_range_i4x2(const int4x2_t* data, int64_t* out, const size_t axis_len, const size_t inner, const size_t begin, const size_t end) {
+        void argmax_axis_range_i4x2(const int4x2_t* data, int64_t* out, const size_t axis_len, const size_t inner, const size_t begin, const size_t end) {
             for (auto o = begin; o < end; ++o) {
-                const auto base = (o / inner) * (axis_len * inner) + (o % inner);
+                const auto base = o / inner * (axis_len * inner) + o % inner;
                 auto best_idx = size_t{0};
                 auto best_lo = float32_t{0.0f};
                 auto best_hi = float32_t{0.0f};
                 for (auto i = size_t{0}; i < axis_len; ++i) {
                     const auto lo = static_cast<float32_t>(i4_lane_lo(data[base + i * inner]));
-                    const auto hi = static_cast<float32_t>(i4_lane_hi(data[base + i * inner]));
-                    if (i == 0 || pair_better(lo, hi, best_lo, best_hi)) {
+                    if (
+                        const auto hi = static_cast<float32_t>(i4_lane_hi(data[base + i * inner]));
+                        i == 0 || pair_better(lo, hi, best_lo, best_hi)
+                        ) {
                         best_lo = lo;
                         best_hi = hi;
                         best_idx = i;
@@ -361,7 +374,7 @@ namespace BeanTensor::Tensors::detail {
         template<typename T>
         void argmax_axis_range_int(const T* data, int64_t* out, const size_t axis_len, const size_t inner, const size_t begin, const size_t end) {
             for (auto o = begin; o < end; ++o) {
-                const auto base = (o / inner) * (axis_len * inner) + (o % inner);
+                const auto base = o / inner * (axis_len * inner) + o % inner;
                 auto best_idx = size_t{0};
                 auto best = data[base];
                 for (auto i = size_t{1}; i < axis_len; ++i) {
@@ -391,7 +404,7 @@ namespace BeanTensor::Tensors::detail {
         struct PackedPart { float32_t lo; float32_t hi; uint64_t idx; bool has; };
         switch (t.dtype) {
             case DType::Float32: case DType::Float64: case DType::Float16: case DType::BFloat16: {
-                std::vector<FloatPart> partials(IncludedCPUFeatures().threads, {0.0, 0, false});
+                std::vector<FloatPart> partials(IncludedCPUFeatures().threads, {.key = 0.0, .idx = 0, .has = false});
                 /**
                  * Picks the scalar or half argmax range kernel by T and drains the futures.
                  * @brief Threaded float argmax for one concrete element type.
@@ -414,7 +427,7 @@ namespace BeanTensor::Tensors::detail {
                     case DType::BFloat16: launch_f(static_cast<const bfloat16_t*>(t.data) + t.offset); break;
                     [[unlikely]] default: throw ErrorHandling::UnReachableCode();
                 }
-                auto best = FloatPart{0.0, 0, false};
+                auto best = FloatPart{.key = 0.0, .idx = 0, .has = false};
                 for (const auto& p : partials) {
                     if (p.has && (!best.has || key_better(p.key, best.key))) {
                         best = p;
@@ -424,7 +437,7 @@ namespace BeanTensor::Tensors::detail {
                 break;
             }
             case DType::Float16x2: case DType::BFloat16x2: case DType::Int4x2: {
-                std::vector<PackedPart> partials(IncludedCPUFeatures().threads, {0.0f, 0.0f, 0, false});
+                std::vector<PackedPart> partials(IncludedCPUFeatures().threads, {.lo = 0.0f, .hi = 0.0f, .idx = 0, .has = false});
                 /**
                  * Runs argmax_range_packed<P> over every chunk and drains the futures.
                  * @brief Threaded packed argmax for one concrete packed type.
@@ -446,7 +459,7 @@ namespace BeanTensor::Tensors::detail {
                         partials[slot].has = argmax_range_i4x2(data, b, e, partials[slot].lo, partials[slot].hi, partials[slot].idx);
                     }, t));
                 }
-                auto best = PackedPart{0.0f, 0.0f, 0, false};
+                auto best = PackedPart{.lo = 0.0f, .hi = 0.0f, .idx = 0, .has = false};
                 for (const auto& p : partials) {
                     if (p.has && (!best.has || pair_better(p.lo, p.hi, best.lo, best.hi))) {
                         best = p;

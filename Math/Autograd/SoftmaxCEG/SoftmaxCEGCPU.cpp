@@ -4,12 +4,11 @@
  * @brief CPU backend for softmax cross-entropy backward, plus the softmax_ce
  * backward trampoline (softmax_ce_g_node). Scalar exp()/log() dominate, so
  * there are no SIMD kernels (same reason as forward softmax_ce).
- * @version 0.1
+ * @version 0.1.1
  * @date 2026-10-20
  */
 #include <algorithm>
 #include <cmath>
-#include <cstdint>
 #include <future>
 #include <limits>
 #include <type_traits>
@@ -62,7 +61,7 @@ namespace BeanTensor::Tensors::detail {
             if constexpr (std::is_same_v<T, float64_t>) {
                 return row[j];
             } else if constexpr (std::is_same_v<T, int4x2_t>) {
-                return static_cast<float64_t>((j & 1) != 0 ? int4_hi(row[j >> 1]) : int4_lo(row[j >> 1]));
+                return (j & 1) != 0 ? int4_hi(row[j >> 1]) : int4_lo(row[j >> 1]);
             } else {
                 return static_cast<float64_t>(row[j]);
             }
@@ -109,7 +108,7 @@ namespace BeanTensor::Tensors::detail {
                 return narrow_lane<T>(v_raw);
             } else {
                 auto v = static_cast<float64_t>(v_raw);
-                if (std::isnan(v)) {
+                if (__builtin_isnan(v)) {
                     v = 0.0;
                 }
                 const auto lo = static_cast<float64_t>(std::numeric_limits<T>::lowest());
@@ -425,20 +424,20 @@ namespace BeanTensor::Tensors::detail {
      * @param grad_dtype The calling backward()'s assigned gradient dtype.
      * @throws ErrorHandling::UnReachableCode if n_inputs is not 2 or the device is neither CPU nor GPU.
      */
-    void softmax_ce_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+    void softmax_ce_g_node(const Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
         if (n_inputs != 2) [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
         auto& logits = *inputs[0];
-        auto& targets = *inputs[1];
+        const auto& targets = *inputs[1];
         if (!logits.requires_grad) {
             return;
         }
         output_grad->sync();
         logits.sync();
         targets.sync();
-        auto dloss = grad_converted_copy(*output_grad, logits.dtype);
-        auto dlogits = Tensor(std::vector<size_t>(logits.shape, logits.shape + logits.ndim), logits.dtype, logits.device, false);
+        const auto dloss = grad_converted_copy(*output_grad, logits.dtype);
+        auto dlogits = Tensor(std::vector(logits.shape, logits.shape + logits.ndim), logits.dtype, logits.device, false);
         if (logits.device == Device::CPU) {
             softmax_ce_g_cpu(dloss, logits, targets, dlogits);
         } else if (logits.device == Device::GPU) {
@@ -451,5 +450,20 @@ namespace BeanTensor::Tensors::detail {
             grad_probe_hit(dlogits.dtype); // test hook: an intermediate received a delta
         }
         logits.accumulate_grad(std::move(dlogits));
+    }
+
+    /**
+     * wire_node's function-pointer type takes a mutable output_grad while
+     * softmax_ce_g_node takes a const one (a function-pointer type mismatch
+     * the Clang build accepts as an extension but GCC rejects). The
+     * trampoline only reads output_grad, so forward through a matching bridge.
+     * @brief Signature bridge between wire_node and softmax_ce_g_node.
+     * @param output_grad Gradient of the forward output, in grad_dtype.
+     * @param inputs Input tensors of the forward op.
+     * @param n_inputs Number of entries in inputs.
+     * @param grad_dtype The calling backward()'s assigned gradient dtype.
+     */
+    void softmax_ce_g_bridge(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+        softmax_ce_g_node(output_grad, inputs, n_inputs, grad_dtype);
     }
 }

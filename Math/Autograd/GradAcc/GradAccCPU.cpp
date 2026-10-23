@@ -5,7 +5,6 @@
  * @version 0.1
  * @date 2026-10-20
  */
-#include <cstdint>
 #include <type_traits>
 
 #include "Math/Autograd/AutogradShared.h"
@@ -124,7 +123,7 @@ namespace BeanTensor::Tensors::detail {
      * @throws ErrorHandling::DirectFunctionCallOnWrongDataSource if either tensor is not on the CPU.
      * @throws ErrorHandling::NotImplemented for an unsupported dtype.
      */
-    void grad_acc_cpu(Tensor& g, const Tensor& d) {
+    void grad_acc_cpu(const Tensor& g, const Tensor& d) {
         if (g.device != Device::CPU || d.device != Device::CPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("CPU", stringify_device_source(g.device));
         }
@@ -136,7 +135,7 @@ namespace BeanTensor::Tensors::detail {
                 const auto* d_ptr = static_cast<const float32_t*>(d.data) + d.offset;
                 const GradAccScalarFn<float32_t> kernel = Math::Autograd::grad_acc_avx512_available()
                     ? Math::Autograd::grad_acc_f32_range_avx512
-                    : (Math::Autograd::grad_acc_avx2_available() ? Math::Autograd::grad_acc_f32_range_avx2 : grad_acc_range_scalar<float32_t>);
+                    : Math::Autograd::grad_acc_avx2_available() ? Math::Autograd::grad_acc_f32_range_avx2 : grad_acc_range_scalar<float32_t>;
                 /**
                  * Runs on a pool worker (or inline for small inputs) over the element range [b, e). Captures by value (the futures outlive this call): w, d_ptr and the dispatched kernel.
                  * Calls kernel(w, d_ptr, b, e), where w and d_ptr already include their tensors' offsets.
@@ -152,7 +151,7 @@ namespace BeanTensor::Tensors::detail {
                 const auto* d_ptr = static_cast<const float64_t*>(d.data) + d.offset;
                 const GradAccScalarFn<float64_t> kernel = Math::Autograd::grad_acc_avx512_available()
                     ? Math::Autograd::grad_acc_f64_range_avx512
-                    : (Math::Autograd::grad_acc_avx2_available() ? Math::Autograd::grad_acc_f64_range_avx2 : grad_acc_range_scalar<float64_t>);
+                    : Math::Autograd::grad_acc_avx2_available() ? Math::Autograd::grad_acc_f64_range_avx2 : grad_acc_range_scalar<float64_t>;
                 /**
                  * Runs on a pool worker (or inline for small inputs) over the element range [b, e). Captures by value (the futures outlive this call): w, d_ptr and the dispatched kernel.
                  * Calls kernel(w, d_ptr, b, e), where w and d_ptr already include their tensors' offsets.

@@ -72,15 +72,6 @@ static H narrow_lane(const float32_t v) {
     }
 }
 
-template<typename H>
-static float32_t widen_lane(const H& v) {
-    if constexpr (std::is_same_v<H, float16_t>) {
-        return idet::unaccel_fp16_to_fp32_untracked(v);
-    } else {
-        return idet::unaccel_bf16_to_fp32(v);
-    }
-}
-
 // --- row-wise argmax ---
 
 static void test_argmax_axis_cpu() {
@@ -146,7 +137,7 @@ static void test_argmax_axis_cpu() {
     }
     {
         // NaN beats every non-NaN value; the first NaN wins against later NaNs.
-        const auto nan = std::numeric_limits<float32_t>::quiet_NaN();
+        constexpr auto nan = std::numeric_limits<float32_t>::quiet_NaN();
         auto t = Tensor({3}, DType::Float32, Device::CPU);
         t.set<float32_t>({0}, 1.0f);
         t.set<float32_t>({1}, nan);
@@ -176,7 +167,7 @@ static void test_argmax_axis_cpu() {
     }
     {
         // fp16 rows rank on widened fp64 keys (PyTorch-compatible NaN rule).
-        const auto nan = std::numeric_limits<float32_t>::quiet_NaN();
+        constexpr auto nan = std::numeric_limits<float32_t>::quiet_NaN();
         auto t = Tensor({4}, DType::Float16, Device::CPU);
         t.set<float16_t>({0}, narrow_lane<float16_t>(1.0f));
         t.set<float16_t>({1}, narrow_lane<float16_t>(5.0f));
@@ -217,7 +208,7 @@ static void test_argmax_axis_cpu() {
 static void test_equal_cpu() {
     {
         // IEEE == semantics on widened fp64 keys.
-        const auto nan = std::numeric_limits<float32_t>::quiet_NaN();
+        constexpr auto nan = std::numeric_limits<float32_t>::quiet_NaN();
         auto a = Tensor({5}, DType::Float32, Device::CPU);
         a.set<float32_t>({0}, 1.0f);
         a.set<float32_t>({1}, nan);
@@ -264,7 +255,7 @@ static void test_equal_cpu() {
     }
     {
         // fp16 equality compares widened lanes; NaN lanes never equal.
-        const auto nan = std::numeric_limits<float32_t>::quiet_NaN();
+        constexpr auto nan = std::numeric_limits<float32_t>::quiet_NaN();
         auto a = Tensor({3}, DType::Float16, Device::CPU);
         a.set<float16_t>({0}, narrow_lane<float16_t>(1.5f));
         a.set<float16_t>({1}, narrow_lane<float16_t>(nan));
@@ -431,7 +422,7 @@ static void test_gpu() {
     }
     {
         // Equal on device: NaN never equals, -0.0 equals 0.0.
-        const auto nan = std::numeric_limits<float32_t>::quiet_NaN();
+        constexpr auto nan = std::numeric_limits<float32_t>::quiet_NaN();
         auto a = Tensor({4}, DType::Float32, Device::GPU);
         a.set<float32_t>({0}, nan);
         a.set<float32_t>({1}, -0.0f);

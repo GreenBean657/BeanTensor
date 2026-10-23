@@ -4,7 +4,7 @@
  * @brief CPU backend for sgd_update. Hosts the Tensor::sgd_update and
  * Tensor::sgd_step method definitions (mirrors how Tensor::matmul lives in
  * MatmulCPU.cpp).
- * @version 0.1
+ * @version 0.1.1
  * @date 2026-10-20
  */
 #include <algorithm>
@@ -105,7 +105,7 @@ namespace BeanTensor::Tensors::detail {
             const auto hi = static_cast<float64_t>(std::numeric_limits<T>::max());
             for (auto i = begin; i < end; ++i) {
                 const auto upd = std::fma(-lr, static_cast<float64_t>(g[i]), static_cast<float64_t>(w[i]));
-                if (std::isnan(upd)) {
+                if (__builtin_isnan(upd)) {
                     continue;
                 }
                 if (upd <= lo) {
@@ -128,7 +128,7 @@ namespace BeanTensor::Tensors::detail {
          * @param begin First element processed.
          * @param end One past the last element processed.
          */
-        inline void sgd_range_i4x2(int4x2_t* w, const int4x2_t* g, const float64_t lr, const size_t begin, const size_t end) {
+        void sgd_range_i4x2(int4x2_t* w, const int4x2_t* g, const float64_t lr, const size_t begin, const size_t end) {
             /**
              * Applies one clamped fp64 SGD step to a single signed int4 lane.
              * @brief Update one int4 lane.
@@ -139,7 +139,7 @@ namespace BeanTensor::Tensors::detail {
              */
             const auto lane_step = [lr](const int8_t w_lane, const int8_t g_lane) {
                 const auto upd = std::fma(-lr, static_cast<float64_t>(g_lane), static_cast<float64_t>(w_lane));
-                if (std::isnan(upd)) {
+                if (__builtin_isnan(upd)) {
                     return w_lane;
                 }
                 if (upd <= -8.0) {
@@ -197,7 +197,7 @@ namespace BeanTensor::Tensors::detail {
      * @param grad Gradients, same shape and dtype as w.
      * @param lr Learning rate.
      */
-    void sgd_update_cpu(Tensor& w, const Tensor& grad, const float64_t lr) {
+    void sgd_update_cpu(const Tensor& w, const Tensor& grad, const float64_t lr) {
         if (w.device != Device::CPU || grad.device != Device::CPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("CPU", stringify_device_source(w.device));
         }
@@ -210,7 +210,7 @@ namespace BeanTensor::Tensors::detail {
                 const auto neg_lr = static_cast<float32_t>(-lr);
                 const SgdScalarFn<float32_t> kernel = Math::Optimization::sgd_update_avx512_available()
                     ? Math::Optimization::sgd_f32_range_avx512
-                    : (Math::Optimization::sgd_update_avx2_available() ? Math::Optimization::sgd_f32_range_avx2 : sgd_range_scalar<float32_t>);
+                    : Math::Optimization::sgd_update_avx2_available() ? Math::Optimization::sgd_f32_range_avx2 : sgd_range_scalar<float32_t>;
                 launch_sgd([=](const size_t b, const size_t e) { kernel(w_ptr, g_ptr, neg_lr, b, e); }, numel, w, grad);
                 break;
             }
@@ -219,7 +219,7 @@ namespace BeanTensor::Tensors::detail {
                 const auto* g_ptr = static_cast<const float64_t*>(grad.data) + grad.offset;
                 const SgdScalarFn<float64_t> kernel = Math::Optimization::sgd_update_avx512_available()
                     ? Math::Optimization::sgd_f64_range_avx512
-                    : (Math::Optimization::sgd_update_avx2_available() ? Math::Optimization::sgd_f64_range_avx2 : sgd_range_scalar<float64_t>);
+                    : Math::Optimization::sgd_update_avx2_available() ? Math::Optimization::sgd_f64_range_avx2 : sgd_range_scalar<float64_t>;
                 launch_sgd([=](const size_t b, const size_t e) { kernel(w_ptr, g_ptr, -lr, b, e); }, numel, w, grad);
                 break;
             }
@@ -303,30 +303,30 @@ namespace BeanTensor::Tensors {
      * into the weight dtype via the single grad-conversion rule (GradDType.h) and
      * the update proceeds on that temp.
      * @brief In-place SGD step, this -= lr * grad.
-     * @param grad Gradient tensor.
+     * @param gradient Gradient tensor.
      * @param lr Learning rate.
      */
-    void Tensor::sgd_update(const Tensor& grad, const float64_t lr) {
-        if (!this->is_same_shape(grad)) {
+    void Tensor::sgd_update(const Tensor& gradient, const float64_t lr) {
+        if (!this->is_same_shape(gradient)) {
             throw ErrorHandling::MismatchedShapes("sgd_update requires identical shapes");
         }
-        if (this->device != grad.device) {
+        if (this->device != gradient.device) {
             throw ErrorHandling::MismatchedDevices();
         }
-        if (!this->is_contiguous || !grad.is_contiguous) {
+        if (!this->is_contiguous || !gradient.is_contiguous) {
             throw ErrorHandling::NotImplemented();
         }
-        if (this->dtype != grad.dtype) {
-            auto g = detail::grad_converted_copy(grad, this->dtype);
+        if (this->dtype != gradient.dtype) {
+            const auto g = detail::grad_converted_copy(gradient, this->dtype);
             this->sgd_update(g, lr);
             return;
         }
         sync();
-        grad.sync();
+        gradient.sync();
         if (this->device == Device::CPU) {
-            detail::sgd_update_cpu(*this, grad, lr);
+            detail::sgd_update_cpu(*this, gradient, lr);
         } else if (this->device == Device::GPU) {
-            detail::sgd_update_gpu(*this, grad, lr);
+            detail::sgd_update_gpu(*this, gradient, lr);
         } else [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
