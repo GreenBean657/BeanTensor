@@ -7,7 +7,7 @@
  * per-parameter first/second moments and a step count, and Tensor's verified
  * sizeof layout must not grow, so the state lives in an external map keyed by
  * the parameter's address (this file) instead of new Tensor members.
- * @version 0.1
+ * @version 0.1.1
  * @date 2026-10-23
  */
 #include <cmath>
@@ -50,7 +50,9 @@ namespace BeanTensor::Tensors::detail {
         };
 
         /**
-         * @brief Mutex serializing the state map's lookup/init/increment.
+         * @brief Mutex serializing a whole Adam step on the state map: entry
+         * lookup, stale-entry reset, step-count increment, and dispatch all
+         * run under it, so no thread observes or resets an entry mid-step.
          * @return The map's mutex.
          */
         std::mutex& adam_state_mutex() {
@@ -387,24 +389,23 @@ namespace BeanTensor::Tensors {
         sync();
         gradient.sync();
         // Moment state: external optimizer-side map, keyed by this tensor's
-        // address (Tensor's verified sizeof layout stays untouched). A stale
-        // entry — device rewritten by to(), or a reused address with a
-        // different shape/dtype — is reset rather than trusted.
+        // address (Tensor's verified sizeof layout stays untouched). The
+        // mutex is held across lookup, the stale-entry check/reset, the step
+        // increment, and the dispatch: a stale entry — device rewritten by
+        // to(), or a reused address with a different shape/dtype — resets
+        // atomically with respect to every other step on the map, and two
+        // threads stepping the SAME parameter serialize their whole step
+        // instead of interleaving a reset with an in-flight dispatch.
         auto& states = detail::adam_states();
         auto& mutex = detail::adam_state_mutex();
-        detail::AdamStateEntry* entry;
-        {
-            const auto lock = std::lock_guard{mutex};
-            auto& slot = states[this];
-            if (!slot) {
-                slot = std::make_unique<detail::AdamStateEntry>();
-                slot->device = this->device;
-            }
-            entry = slot.get();
+        const auto lock = std::lock_guard{mutex};
+        auto& slot = states[this];
+        if (!slot) {
+            slot = std::make_unique<detail::AdamStateEntry>();
         }
+        auto* const entry = slot.get();
         if (entry->m == nullptr || entry->device != this->device ||
             !entry->m->is_same_shape(*this) || entry->m->get_dtype() != this->dtype) {
-            const auto lock = std::lock_guard{mutex};
             entry->m = std::make_unique<Tensor>(std::vector(this->shape, this->shape + this->ndim), this->dtype, this->device, false);
             entry->v = std::make_unique<Tensor>(std::vector(this->shape, this->shape + this->ndim), this->dtype, this->device, false);
             entry->m->set_zero();
@@ -414,7 +415,6 @@ namespace BeanTensor::Tensors {
             entry->t = 0;
             entry->device = this->device;
         }
-        const auto lock = std::lock_guard{mutex};
         entry->t += 1;
         const auto t_f = static_cast<float64_t>(entry->t);
         const auto beta1_corr = 1.0 - std::pow(beta1, t_f);
