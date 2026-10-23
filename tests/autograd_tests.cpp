@@ -1,13 +1,15 @@
 // BeanTensorV5 autograd tests — framework-free assertion suite.
 // Covers: the four backward pathways (GEMM_G incl. batched, bias_add_G,
-// relu_G, softmaxCE_G) via the forward ops' auto-wired graph and
-// Tensor::backward(); analytic checks on fp32/fp64, finite-difference checks
-// (fp64) of a full relu(x·W + b) -> softmax_ce chain, threaded/SIMD paths
-// (large tensors), every dtype pathway (fp16/bf16, packed x2, all integer
-// dtypes, int4x2), gradient accumulation across backward() calls, fan-out
-// DAGs, zero_grad, error paths, per-call grad dtype override
-// (backward(DType): fp64/fp16/fp32/int8/int32 on the same graph, with the
-// intermediate-delta probe and leaf/intermediate grad dtype checks), and —
+// relu_G, softmaxCE_G) plus the elementwise backward nodes (add/sub/mul/div/
+// pow tensor-tensor and tensor-scalar, exp/log — analytic checks, broadcast
+// gradient reduction, per-call grad dtype probes) via the forward ops'
+// auto-wired graph and Tensor::backward(); analytic checks on fp32/fp64,
+// finite-difference checks (fp64) of a full relu(x·W + b) -> softmax_ce
+// chain, threaded/SIMD paths (large tensors), every dtype pathway (fp16/bf16,
+// packed x2, all integer dtypes, int4x2), gradient accumulation across
+// backward() calls, fan-out DAGs, zero_grad, error paths, per-call grad dtype
+// override (backward(DType): fp64/fp16/fp32/int8/int32 on the same graph, with
+// the intermediate-delta probe and leaf/intermediate grad dtype checks), and —
 // when a backend + device exist — the
 // same checks on the GPU plus CPU/GPU gradient parity.
 #include <algorithm>
@@ -35,6 +37,7 @@
 
 using BeanTensor::Tensors::Tensor;
 using BeanTensor::Tensors::Device;
+using BeanTensor::Tensors::ElementwiseOp;
 using BeanTensor::float16_t;
 using BeanTensor::float16x2_t;
 using BeanTensor::bfloat16_t;
@@ -987,6 +990,14 @@ static void test_all_dtype_pathways(const Device dev) {
     test_packed_pathways<bfloat16x2_t, bfloat16_t>(dev, DType::BFloat16x2);
 }
 
+// elementwise backward tests (defined below, next to the other grad-dtype suites)
+static void test_ew_binary_gradients(Device);
+static void test_ew_one_side(Device);
+static void test_ew_broadcast_reduce(Device);
+static void test_ew_scalar_gradients(Device);
+static void test_ew_exp_log_gradients(Device);
+static void test_ew_accumulation(Device);
+
 static void run_device_suite(const Device dev) {
     test_relu_g_f32(dev);
     test_relu_g_threaded<float32_t>(dev, DType::Float32);
@@ -1001,6 +1012,12 @@ static void run_device_suite(const Device dev) {
     test_accumulation_and_zero_grad(dev);
     test_fan_out(dev);
     test_all_dtype_pathways(dev);
+    test_ew_binary_gradients(dev);
+    test_ew_one_side(dev);
+    test_ew_broadcast_reduce(dev);
+    test_ew_scalar_gradients(dev);
+    test_ew_exp_log_gradients(dev);
+    test_ew_accumulation(dev);
 }
 
 #if defined(USE_HIP) || defined(USE_CUDA)
@@ -1289,6 +1306,474 @@ static void test_sgd_step_mixed_dtype() {
     CHECK(near64(w.at<float32_t>({1}), 2.4, 1e-6));
 }
 
+// =====================================================================
+// elementwise backward: add/sub/mul/div/pow (tensor-tensor and
+// tensor-scalar) and exp/log — analytic checks against hand-computed values,
+// broadcast gradient reduction, grad-dtype probes
+// =====================================================================
+
+/**
+ * Root = (x op w).mul(c) with c requires_grad=false: the elementwise node's
+ * upstream delta is c's values (here 2 everywhere), not the ones seed, so the
+ * local derivatives are exercised against a non-trivial upstream gradient.
+ * Analytic: add dx=dy, dw=dy; sub dx=dy, dw=-dy; mul dx=dy*w, dw=dy*x;
+ * div dx=dy/w, dw=-dy*x/w^2; pow dx=dy*w*x^(w-1), dw=dy*x^w*ln(x) (x>0).
+ */
+static float64_t ew_ref_dx(const ElementwiseOp op, const float64_t x, const float64_t w, const float64_t dy) {
+    switch (op) {
+        case ElementwiseOp::Add: return dy;
+        case ElementwiseOp::Sub: return dy;
+        case ElementwiseOp::Mul: return dy * w;
+        case ElementwiseOp::Div: return dy / w;
+        case ElementwiseOp::Pow: return dy * w * std::pow(x, w - 1.0);
+        [[unlikely]] default: throw BeanTensor::ErrorHandling::UnReachableCode();
+    }
+}
+
+static float64_t ew_ref_dw(const ElementwiseOp op, const float64_t x, const float64_t w, const float64_t dy) {
+    switch (op) {
+        case ElementwiseOp::Add: return dy;
+        case ElementwiseOp::Sub: return -dy;
+        case ElementwiseOp::Mul: return dy * x;
+        case ElementwiseOp::Div: return -dy * x / (w * w);
+        case ElementwiseOp::Pow: return dy * std::pow(x, w) * std::log(x);
+        [[unlikely]] default: throw BeanTensor::ErrorHandling::UnReachableCode();
+    }
+}
+
+static Tensor ew_apply(const Tensor& x, const Tensor& w, const ElementwiseOp op) {
+    switch (op) {
+        case ElementwiseOp::Add: return x.add(w);
+        case ElementwiseOp::Sub: return x.sub(w);
+        case ElementwiseOp::Mul: return x.mul(w);
+        case ElementwiseOp::Div: return x.div(w);
+        case ElementwiseOp::Pow: return x.pow(w);
+        [[unlikely]] default: throw BeanTensor::ErrorHandling::UnReachableCode();
+    }
+}
+
+template<typename T>
+static void run_ew_binary_case(const Device dev, const DType dt, const ElementwiseOp op,
+                               const std::vector<float64_t>& xs, const std::vector<float64_t>& ws,
+                               const float64_t eps) {
+    constexpr size_t n = 4;
+    const auto cval = float64_t{2.0}; // upstream gradient into the op node
+    Tensor x({2, 2}, dt, dev, true);
+    Tensor w({2, 2}, dt, dev, true);
+    Tensor c({2, 2}, dt, dev, false);
+    for (auto i = size_t{0}; i < n; ++i) {
+        x.set<T>({i / 2, i % 2}, static_cast<T>(xs[i]));
+        w.set<T>({i / 2, i % 2}, static_cast<T>(ws[i]));
+        c.set<T>({i / 2, i % 2}, static_cast<T>(cval));
+    }
+    auto p = ew_apply(x, w, op);
+    auto root = p.mul(c);
+    root.backward(dt);
+    auto bad = size_t{0};
+    for (auto i = size_t{0}; i < n; ++i) {
+        const auto want_dx = ew_ref_dx(op, xs[i], ws[i], cval);
+        const auto want_dw = ew_ref_dw(op, xs[i], ws[i], cval);
+        if (!near64(x.gradient().at<T>({i / 2, i % 2}), want_dx, eps)) {
+            ++bad;
+        }
+        if (!near64(w.gradient().at<T>({i / 2, i % 2}), want_dw, eps)) {
+            ++bad;
+        }
+    }
+    CHECK(bad == 0);
+}
+
+static void test_ew_binary_gradients(const Device dev) {
+    const auto xs = std::vector{1.0, 2.0, 3.0, 4.0};
+    const auto ws = std::vector{5.0, 6.0, 7.0, 8.0};
+    for (const auto op : std::vector{ElementwiseOp::Add, ElementwiseOp::Sub, ElementwiseOp::Mul, ElementwiseOp::Div}) {
+        run_ew_binary_case<float64_t>(dev, DType::Float64, op, xs, ws, 1e-12);
+        run_ew_binary_case<float32_t>(dev, DType::Float32, op, xs, ws, 1e-4);
+    }
+    // pow: x > 0 (ln(x) in dw), small integer exponents for exact fp32 values.
+    const auto ps = std::vector{1.0, 2.0, 3.0, 4.0};
+    const auto pw = std::vector{2.0, 2.0, 2.0, 2.0};
+    run_ew_binary_case<float64_t>(dev, DType::Float64, ElementwiseOp::Pow, ps, pw, 1e-12);
+    run_ew_binary_case<float32_t>(dev, DType::Float32, ElementwiseOp::Pow, ps, pw, 1e-3);
+}
+
+// Only one side requires grad: the other receives nothing.
+static void test_ew_one_side(const Device dev) {
+    Tensor x({2}, DType::Float32, dev, true);
+    Tensor w({2}, DType::Float32, dev, false);
+    x.set<float32_t>({0}, 3.0f);
+    x.set<float32_t>({1}, 4.0f);
+    w.set<float32_t>({0}, 5.0f);
+    w.set<float32_t>({1}, 6.0f);
+    auto y = x.mul(w);
+    y.backward(DType::Float32);
+    CHECK(x.has_grad());
+    CHECK(!w.has_grad());
+    CHECK(near64(x.gradient().at<float32_t>({0}), 5.0, 1e-6));
+    CHECK(near64(x.gradient().at<float32_t>({1}), 6.0, 1e-6));
+}
+
+static void test_ew_broadcast_reduce(const Device dev) {
+    // {2,3} x {3}: dw[j] = sum_i dy[i,j]*x[i,j] (dy = 2 via the .mul(c) root).
+    {
+        Tensor x({2, 3}, DType::Float64, dev, true);
+        Tensor w({3}, DType::Float64, dev, true);
+        Tensor c({2, 3}, DType::Float64, dev, false);
+        const auto xv = std::vector{1.0, 2.0, 3.0, 4.0, 5.0, 6.0};
+        for (auto i = size_t{0}; i < 6; ++i) {
+            x.set<float64_t>({i / 3, i % 3}, xv[i]);
+            c.set<float64_t>({i / 3, i % 3}, 2.0);
+        }
+        w.set<float64_t>({0}, 2.0);
+        w.set<float64_t>({1}, 3.0);
+        w.set<float64_t>({2}, 4.0);
+        auto p = x.mul(w);
+        auto root = p.mul(c);
+        root.backward(DType::Float64);
+        const auto want_dw = std::vector{10.0, 14.0, 18.0}; // 2*(x[0,j]+x[1,j])
+        const auto want_dx = std::vector{4.0, 6.0, 8.0, 4.0, 6.0, 8.0}; // 2*w[j]
+        auto bad = size_t{0};
+        for (auto j = size_t{0}; j < 3; ++j) {
+            if (!near64(w.gradient().at<float64_t>({j}), want_dw[j], 1e-12)) {
+                ++bad;
+            }
+            for (auto i = size_t{0}; i < 2; ++i) {
+                if (!near64(x.gradient().at<float64_t>({i, j}), want_dx[i * 3 + j], 1e-12)) {
+                    ++bad;
+                }
+            }
+        }
+        CHECK(bad == 0);
+    }
+    // Rank-3 general broadcast: {2,1,4} x {3,4} -> {2,3,4}, ones upstream.
+    {
+        Tensor a({2, 1, 4}, DType::Float64, dev, true);
+        Tensor b({3, 4}, DType::Float64, dev, true);
+        for (auto i = size_t{0}; i < 2; ++i) {
+            for (auto k = size_t{0}; k < 4; ++k) {
+                a.set<float64_t>({i, 0, k}, static_cast<float64_t>(1 + i * 4 + k));
+            }
+        }
+        for (auto j = size_t{0}; j < 3; ++j) {
+            for (auto k = size_t{0}; k < 4; ++k) {
+                b.set<float64_t>({j, k}, static_cast<float64_t>(1 + j * 4 + k));
+            }
+        }
+        auto root = a.mul(b);
+        root.backward(DType::Float64);
+        auto bad = size_t{0};
+        for (auto i = size_t{0}; i < 2; ++i) {
+            for (auto k = size_t{0}; k < 4; ++k) {
+                // da[i,0,k] = sum_j b[j,k] = 3k + 15.
+                if (!near64(a.gradient().at<float64_t>({i, 0, k}), 3.0 * static_cast<float64_t>(k) + 15.0, 1e-12)) {
+                    ++bad;
+                }
+            }
+        }
+        for (auto j = size_t{0}; j < 3; ++j) {
+            for (auto k = size_t{0}; k < 4; ++k) {
+                // db[j,k] = sum_i a[i,0,k] = 2k + 6.
+                if (!near64(b.gradient().at<float64_t>({j, k}), 2.0 * static_cast<float64_t>(k) + 6.0, 1e-12)) {
+                    ++bad;
+                }
+            }
+        }
+        CHECK(bad == 0);
+    }
+    // add/sub broadcast with a rank-1 operand: dw[j] = sum_i dy[i,j] (resp. -).
+    for (const auto op : std::vector{ElementwiseOp::Add, ElementwiseOp::Sub}) {
+        Tensor x({2, 3}, DType::Float64, dev, true);
+        Tensor w({3}, DType::Float64, dev, true);
+        Tensor c({2, 3}, DType::Float64, dev, false);
+        for (auto i = size_t{0}; i < 6; ++i) {
+            x.set<float64_t>({i / 3, i % 3}, static_cast<float64_t>(1 + i));
+            c.set<float64_t>({i / 3, i % 3}, 2.0);
+        }
+        x.set_zero();
+        w.set_zero();
+        auto p = ew_apply(x, w, op);
+        auto root = p.mul(c);
+        root.backward(DType::Float64);
+        const auto sign = op == ElementwiseOp::Add ? 1.0 : -1.0;
+        auto bad = size_t{0};
+        for (auto j = size_t{0}; j < 3; ++j) {
+            // dw[j] = sum_i (+/-)dy[i,j] = (+/-)(2+2).
+            if (!near64(w.gradient().at<float64_t>({j}), sign * 4.0, 1e-12)) {
+                ++bad;
+            }
+            for (auto i = size_t{0}; i < 2; ++i) {
+                if (!near64(x.gradient().at<float64_t>({i, j}), 2.0, 1e-12)) {
+                    ++bad;
+                }
+            }
+        }
+        CHECK(bad == 0);
+    }
+}
+
+static void test_ew_scalar_gradients(const Device dev) {
+    // Root = (x op s).mul(c): dx = dy * d(x op s)/dx with dy = 2, s scalar.
+    const auto xv = std::vector{1.0, 2.0, 4.0};
+    auto run = [&](const ElementwiseOp op, const float64_t s, const std::vector<float64_t>& want) {
+        Tensor x({3}, DType::Float64, dev, true);
+        Tensor c({3}, DType::Float64, dev, false);
+        for (auto i = size_t{0}; i < 3; ++i) {
+            x.set<float64_t>({i}, xv[i]);
+            c.set<float64_t>({i}, 2.0);
+        }
+        Tensor t({1}, DType::Float64, dev, false);
+        switch (op) {
+            case ElementwiseOp::Add: t = x.add(s); break;
+            case ElementwiseOp::Sub: t = x.sub(s); break;
+            case ElementwiseOp::Mul: t = x.mul(s); break;
+            case ElementwiseOp::Div: t = x.div(s); break;
+            case ElementwiseOp::Pow: t = x.pow(s); break;
+            [[unlikely]] default: throw BeanTensor::ErrorHandling::UnReachableCode();
+        }
+        auto root = t.mul(c);
+        root.backward(DType::Float64);
+        auto bad = size_t{0};
+        for (auto i = size_t{0}; i < 3; ++i) {
+            if (!near64(x.gradient().at<float64_t>({i}), want[i], 1e-12)) {
+                ++bad;
+            }
+        }
+        CHECK(bad == 0);
+    };
+    run(ElementwiseOp::Add, 5.0, std::vector{2.0, 2.0, 2.0});            // dx = dy
+    run(ElementwiseOp::Sub, 5.0, std::vector{2.0, 2.0, 2.0});            // dx = dy
+    run(ElementwiseOp::Mul, 3.0, std::vector{6.0, 6.0, 6.0});            // dx = dy*s
+    run(ElementwiseOp::Div, 2.0, std::vector{1.0, 1.0, 1.0});            // dx = dy/s
+    run(ElementwiseOp::Pow, 2.0, std::vector{4.0, 8.0, 16.0});           // dx = dy*s*x^(s-1)
+}
+
+static void test_ew_exp_log_gradients(const Device dev) {
+    const auto xv = std::vector{1.0, 2.0, 3.0};
+    // exp with a non-trivial upstream: root = exp(x)*c -> dx = 2*exp(x).
+    {
+        Tensor x({3}, DType::Float64, dev, true);
+        Tensor c({3}, DType::Float64, dev, false);
+        for (auto i = size_t{0}; i < 3; ++i) {
+            x.set<float64_t>({i}, xv[i]);
+            c.set<float64_t>({i}, 2.0);
+        }
+        auto e = x.exp();
+        auto root = e.mul(c);
+        root.backward(DType::Float64);
+        auto bad = size_t{0};
+        for (auto i = size_t{0}; i < 3; ++i) {
+            if (!near64(x.gradient().at<float64_t>({i}), 2.0 * std::exp(xv[i]), 1e-12)) {
+                ++bad;
+            }
+        }
+        CHECK(bad == 0);
+    }
+    // log: root = log(x)*c -> dx = 2/x.
+    {
+        Tensor x({3}, DType::Float64, dev, true);
+        Tensor c({3}, DType::Float64, dev, false);
+        for (auto i = size_t{0}; i < 3; ++i) {
+            x.set<float64_t>({i}, xv[i]);
+            c.set<float64_t>({i}, 2.0);
+        }
+        auto l = x.log();
+        auto root = l.mul(c);
+        root.backward(DType::Float64);
+        auto bad = size_t{0};
+        for (auto i = size_t{0}; i < 3; ++i) {
+            if (!near64(x.gradient().at<float64_t>({i}), 2.0 / xv[i], 1e-12)) {
+                ++bad;
+            }
+        }
+        CHECK(bad == 0);
+    }
+    // exp-then-log: root = log(exp(x)) -> dx = 1 by the chain rule
+    // (1/exp(x) * exp(x)). The log node's delta lands in the exp()
+    // intermediate — one probe hit per call.
+    if (dev == Device::CPU) {
+        tdetail::grad_probe_reset();
+    }
+    {
+        Tensor x({3}, DType::Float64, dev, true);
+        for (auto i = size_t{0}; i < 3; ++i) {
+            x.set<float64_t>({i}, xv[i]);
+        }
+        auto e = x.exp();
+        auto root = e.log();
+        root.backward(DType::Float64);
+        auto bad = size_t{0};
+        for (auto i = size_t{0}; i < 3; ++i) {
+            if (!near64(x.gradient().at<float64_t>({i}), 1.0, 1e-12)) {
+                ++bad;
+            }
+        }
+        CHECK(bad == 0);
+    }
+    if (dev == Device::CPU) {
+        CHECK(tdetail::grad_probe_count(DType::Float64) == 1);
+    }
+}
+
+static void test_ew_accumulation(const Device dev) {
+    // Leaf grads accumulate across backward() calls on an elementwise graph.
+    Tensor x({2}, DType::Float32, dev, true);
+    Tensor w({2}, DType::Float32, dev, true);
+    x.set<float32_t>({0}, 1.0f);
+    x.set<float32_t>({1}, 2.0f);
+    w.set<float32_t>({0}, 3.0f);
+    w.set<float32_t>({1}, 4.0f);
+    auto y = x.mul(w);
+    y.backward(DType::Float32);
+    y.backward(DType::Float32);
+    CHECK(near64(x.gradient().at<float32_t>({0}), 6.0f, 1e-6));
+    CHECK(near64(x.gradient().at<float32_t>({1}), 8.0f, 1e-6));
+    CHECK(near64(w.gradient().at<float32_t>({0}), 2.0f, 1e-6));
+    CHECK(near64(w.gradient().at<float32_t>({1}), 4.0f, 1e-6));
+}
+
+static void test_ew_no_grad_error() {
+    // No input requires grad: the output never joins a graph.
+    Tensor x({2}, DType::Float32);
+    Tensor w({2}, DType::Float32);
+    x.set_one();
+    w.set_one();
+    auto threw = false;
+    try {
+        auto y = x.add(w);
+        y.backward(DType::Float32);
+    } catch (const BeanTensor::ErrorHandling::NoGradient&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+// Per-call grad dtype override on an elementwise chain: z = x.mul(w) feeds
+// root = z.add(v). add_g delivers one intermediate delta into z per call
+// (mul_g feeds only the leaves), so exactly one probe hit lands per call,
+// in the assigned dtype; z's grad is rebuilt per call while the leaf grads
+// pin the first call's dtype and accumulate.
+static void test_ew_grad_dtype_probe() {
+    Tensor x({2, 3}, DType::Float32, Device::CPU, true);
+    Tensor w({3}, DType::Float32, Device::CPU, true);
+    Tensor v({2, 3}, DType::Float32, Device::CPU, true);
+    Tensor z({1}, DType::Float32, Device::CPU, false);
+    Tensor root({1}, DType::Float32, Device::CPU, false);
+    x.set_zero();
+    w.set_zero();
+    v.set_zero();
+    z = x.mul(w);
+    root = z.add(v);
+
+    tdetail::grad_probe_reset();
+    root.backward(DType::Float64);
+    CHECK(tdetail::grad_probe_count(DType::Float64) == 1);
+    CHECK(tdetail::grad_probe_count(DType::Float16) == 0);
+    CHECK(z.gradient().get_dtype() == DType::Float64);
+    CHECK(x.gradient().get_dtype() == DType::Float64);
+
+    root.backward(DType::Float16);
+    CHECK(tdetail::grad_probe_count(DType::Float16) == 1);
+    CHECK(tdetail::grad_probe_count(DType::Float64) == 1); // previous call's hit stays
+    CHECK(z.gradient().get_dtype() == DType::Float16);
+    CHECK(x.gradient().get_dtype() == DType::Float64); // leaf buffer pinned by call 1
+
+    root.backward(DType::Int32);
+    CHECK(tdetail::grad_probe_count(DType::Int32) == 1);
+    CHECK(z.gradient().get_dtype() == DType::Int32);
+    CHECK(x.gradient().get_dtype() == DType::Float64);
+    CHECK(v.gradient().get_dtype() == DType::Float64);
+}
+
+// Integer assigned grad dtypes on elementwise graphs: mul/div/add/sub compute
+// their deltas natively in the assigned dtype (wrap/truncate semantics); pow
+// and exp need a transcendental, so they compute in fp32 and boundary-cast
+// (truncate) the delta into the assigned dtype at delivery.
+static void test_ew_int_grad_dtype() {
+    // mul: dy = 1 -> dx = w, dw = x, exact in int32.
+    {
+        Tensor x({3}, DType::Int32, Device::CPU, true);
+        Tensor w({3}, DType::Int32, Device::CPU, true);
+        x.set<int32_t>({0}, 1);
+        x.set<int32_t>({1}, 2);
+        x.set<int32_t>({2}, 3);
+        w.set<int32_t>({0}, 4);
+        w.set<int32_t>({1}, 5);
+        w.set<int32_t>({2}, 6);
+        auto y = x.mul(w);
+        y.backward(DType::Int32);
+        CHECK(x.gradient().at<int32_t>({0}) == 4);
+        CHECK(x.gradient().at<int32_t>({1}) == 5);
+        CHECK(x.gradient().at<int32_t>({2}) == 6);
+        CHECK(w.gradient().at<int32_t>({0}) == 1);
+        CHECK(w.gradient().at<int32_t>({2}) == 3);
+    }
+    // div: dy = 1 -> dx = 1/w (truncating integer div), dw = -x/w^2.
+    {
+        Tensor x({3}, DType::Int32, Device::CPU, true);
+        Tensor w({3}, DType::Int32, Device::CPU, true);
+        x.set<int32_t>({0}, 4);
+        x.set<int32_t>({1}, 6);
+        x.set<int32_t>({2}, 8);
+        w.set<int32_t>({0}, 2);
+        w.set<int32_t>({1}, 3);
+        w.set<int32_t>({2}, 4);
+        auto y = x.div(w);
+        y.backward(DType::Int32);
+        CHECK(x.gradient().at<int32_t>({0}) == 0); // 1/2 truncates to 0
+        CHECK(w.gradient().at<int32_t>({0}) == -1); // -4/4
+        CHECK(w.gradient().at<int32_t>({1}) == 0);  // -6/9 truncates to 0
+        CHECK(w.gradient().at<int32_t>({2}) == 0);  // -8/16 truncates to 0
+    }
+    // mul under int8, with a broadcast reduction: dw[j] = sum_i x[i,j].
+    {
+        Tensor x({2, 3}, DType::Int8, Device::CPU, true);
+        Tensor w({3}, DType::Int8, Device::CPU, true);
+        x.set<int8_t>({0, 0}, 1);
+        x.set<int8_t>({0, 1}, 2);
+        x.set<int8_t>({0, 2}, 3);
+        x.set<int8_t>({1, 0}, 4);
+        x.set<int8_t>({1, 1}, 5);
+        x.set<int8_t>({1, 2}, 6);
+        w.set_zero();
+        auto y = x.mul(w);
+        y.backward(DType::Int8);
+        CHECK(w.gradient().at<int8_t>({0}) == 5); // 1 + 4
+        CHECK(w.gradient().at<int8_t>({1}) == 7); // 2 + 5
+        CHECK(w.gradient().at<int8_t>({2}) == 9); // 3 + 6
+    }
+    // pow under int32 assigned dtype: fp32 compute, truncating boundary cast.
+    // dx = trunc(w*x^(w-1)) = [2, 4, 8]; dw = trunc(x^w * ln(x)) = [0, 2, 22].
+    {
+        Tensor x({3}, DType::Float32, Device::CPU, true);
+        Tensor w({3}, DType::Float32, Device::CPU, true);
+        const auto xv = std::vector{1.0f, 2.0f, 4.0f};
+        for (auto i = size_t{0}; i < 3; ++i) {
+            x.set<float32_t>({i}, xv[i]);
+            w.set<float32_t>({i}, 2.0f);
+        }
+        auto y = x.pow(w);
+        y.backward(DType::Int32);
+        CHECK(x.gradient().at<int32_t>({0}) == 2);
+        CHECK(x.gradient().at<int32_t>({1}) == 4);
+        CHECK(x.gradient().at<int32_t>({2}) == 8);
+        CHECK(w.gradient().at<int32_t>({0}) == 0);  // 1^2 * ln(1) = 0
+        CHECK(w.gradient().at<int32_t>({1}) == 2);  // trunc(4 * 0.693) = 2
+        CHECK(w.gradient().at<int32_t>({2}) == 22); // trunc(16 * 1.386) = 22
+    }
+    // exp under int32 assigned dtype: dx = trunc(exp(x)) = [1, 2, 7].
+    {
+        Tensor x({3}, DType::Float32, Device::CPU, true);
+        x.set<float32_t>({0}, 0.0f);
+        x.set<float32_t>({1}, 1.0f);
+        x.set<float32_t>({2}, 2.0f);
+        auto y = x.exp();
+        y.backward(DType::Int32);
+        CHECK(x.gradient().at<int32_t>({0}) == 1);
+        CHECK(x.gradient().at<int32_t>({1}) == 2); // trunc(2.718)
+        CHECK(x.gradient().at<int32_t>({2}) == 7); // trunc(7.389)
+    }
+}
+
 int main() {
     test_simd_kernel_parity();
     run_device_suite(Device::CPU);
@@ -1299,6 +1784,9 @@ int main() {
     test_grad_dtype_override_half_mixed();
     test_grad_dtype_override_int_sanity();
     test_sgd_step_mixed_dtype();
+    test_ew_no_grad_error();
+    test_ew_grad_dtype_probe();
+    test_ew_int_grad_dtype();
 #if defined(USE_HIP) || defined(USE_CUDA)
     if (gpu_available()) {
         run_device_suite(Device::GPU);

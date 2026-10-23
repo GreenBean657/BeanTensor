@@ -259,6 +259,12 @@ set(CORE_SOURCES
         Math/Autograd/AutogradShared.h
         Math/Autograd/AutogradCudaShared.h
         Math/Autograd/AutogradHipShared.h
+        Math/Autograd/ElementwiseG/ElementwiseG.h
+        Math/Autograd/ElementwiseG/ElementwiseG.hpp
+        Math/Autograd/ElementwiseG/ElementwiseGShared.h
+        Math/Autograd/ElementwiseG/ElementwiseGCPU.cpp
+        Math/Autograd/ElementwiseG/ElementwiseGHIP.cpp
+        Math/Autograd/ElementwiseG/ElementwiseGCUDA.cu
         Helpers/Bits.h
 )
 
@@ -284,6 +290,7 @@ if (USE_CUDA)
             Math/Autograd/BiasAddG/BiasAddGCUDA.cu
             Math/Autograd/SoftmaxCEG/SoftmaxCEGCUDA.cu
             Math/Autograd/TransposeLast2/TransposeLast2CUDA.cu
+            Math/Autograd/ElementwiseG/ElementwiseGCUDA.cu
             Math/Shape/Indexing/IndexingCUDA.cu
     )
 elseif (USE_HIP)
@@ -304,6 +311,7 @@ elseif (USE_HIP)
             Math/Autograd/BiasAddG/BiasAddGHIP.cpp
             Math/Autograd/SoftmaxCEG/SoftmaxCEGHIP.cpp
             Math/Autograd/TransposeLast2/TransposeLast2HIP.cpp
+            Math/Autograd/ElementwiseG/ElementwiseGHIP.cpp
             Math/Shape/Indexing/IndexingHIP.cpp
     )
 elseif(USE_STRIX_HALO)
@@ -389,6 +397,8 @@ if(USE_HIP)
             Math/Shape/Indexing/IndexingCPU.cpp
             Math/Shape/Slice.cpp
             Math/Elementwise/ElementwiseCPU.cpp
+            Math/Autograd/ElementwiseG/ElementwiseGCPU.cpp
+            Math/Autograd/ElementwiseG/ElementwiseGHIP.cpp
             PROPERTIES LANGUAGE HIP
     )
     set_source_files_properties(
@@ -431,6 +441,8 @@ if(USE_HIP)
             Math/Elementwise/ElementwiseAVX2.cpp
             Math/Elementwise/ElementwiseAVX512.cpp
             Math/Elementwise/ElementwiseCPU.cpp
+            Math/Autograd/ElementwiseG/ElementwiseGCPU.cpp
+            Math/Autograd/ElementwiseG/ElementwiseGHIP.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native"
     )
     # The conversion dispatcher's IncludedCPUFeatures() copy needs every ISA flag
