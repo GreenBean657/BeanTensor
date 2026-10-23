@@ -2,7 +2,7 @@
  * @file Tensor.h
  * @author GreenBean
  * @brief Tensor class declaration: dtype, shape, device and buffer ownership.
- * @version 0.3.2
+ * @version 0.3.3
  * @date 2026-10-18
  */
 #pragma once
@@ -40,6 +40,9 @@ namespace BeanTensor::Tensors {
 }
 namespace BeanTensor::Intrinsics::detail {
     void launch_conv_cpu(Tensors::Tensor& t, const DataTypes::DType& new_dtype, ConversionClampMethod method);
+}
+namespace BeanTensor::Tensors::detail {
+    struct BcastReducePlan;
 }
 namespace BeanTensor::Tensors {
 
@@ -417,7 +420,9 @@ namespace BeanTensor::Tensors {
 
         /**
          * Backpropagate from this tensor through the recorded computation
-         * graph. matmul/bias_add/relu/softmax_ce attach a Node to their output
+         * graph. matmul/bias_add/relu/softmax_ce and the elementwise
+         * add/sub/mul/div/pow (tensor-tensor and tensor-scalar) and exp/log
+         * ops attach a Node to their output
          * whenever an input has requires_grad=true; backward() seeds this
          * tensor's gradient with ones IN grad_dtype and fires every reachable
          * node in reverse-topological order (Kahn's algorithm over
@@ -681,6 +686,16 @@ namespace BeanTensor::Tensors {
          * before returning (same as bias_add()). A failure drained by that
          * move is re-queued on the result as a poisoned future and still
          * surfaces at its next sync().
+         *
+         * Autograd: when either operand has requires_grad=true the output
+         * joins the computation graph (elementwise backward: the analytic
+         * local derivatives composed onto the upstream delta in the assigned
+         * grad dtype, sum-reduced over each broadcast operand's broadcast
+         * dims — Math/Autograd/ElementwiseG). The scalar overloads
+         * differentiate with respect to the tensor only; the scalar is
+         * persisted as a bit-cast payload in Node::_inputs[1] (never
+         * dereferenced, never walked). exp/log wire the matching unary
+         * backward (d exp = dy*exp(x), d log = dy/x).
          * @brief Elementwise add with NumPy-style broadcasting.
          * o: Right operand, same dtype and device, contiguous.
          * @return New tensor, the broadcast shape, this tensor's dtype.
@@ -885,6 +900,18 @@ namespace BeanTensor::Tensors {
          * Compute the strides of this tensor based on its shape. Should be called after setting shape and ndim.
          */
         void compute_strides();
+
+        /**
+         * this is the out-shaped delta of a broadcast elementwise op; op is
+         * the operand the delta is being reduced into. See
+         * Math/Autograd/ElementwiseG/ElementwiseGShared.h for how the plan's
+         * free (size-1 or left-padded missing) operand dims map to full
+         * output extents.
+         * @brief Build the broadcast-reduction plan for (this, op).
+         * @param op The operand the delta will be reduced into.
+         * @return The broadcast-reduction execution plan.
+         */
+        [[nodiscard]] detail::BcastReducePlan build_bcast_reduce_plan(const Tensor& op) const;
 
         /**
          * Set the properties of this tensor and allocate memory for it.
@@ -1160,6 +1187,13 @@ namespace BeanTensor::Tensors {
         friend void detail::bias_add_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::relu_g_node(const Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::softmax_ce_g_node(const Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::ew_binary_g_node_impl(Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseOp);
+        friend void detail::ew_scalar_g_node_impl(Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseOp);
+        friend void detail::ew_unary_g_node_impl(Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseUnaryOp);
+        friend void detail::ew_deliver_delta(Tensor&&, Tensor&, const DataTypes::DType&, const DataTypes::DType&);
+        friend Tensor detail::ew_operand_copy(const Tensor&, const DataTypes::DType&);
+        friend void detail::bcast_sum_to_cpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::bcast_sum_to_gpu(const Tensor&, const Tensor&, Tensor&);
         friend void detail::grad_acc_cpu(const Tensor&, const Tensor&);
         friend void detail::grad_acc_gpu(const Tensor&, const Tensor&);
         friend void detail::transpose_last2_cpu(const Tensor&, const Tensor&);
