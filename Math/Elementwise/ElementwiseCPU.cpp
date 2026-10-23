@@ -12,7 +12,13 @@
  * kernels with the narrow_scalar PERMISSIVE conversion applied once on the
  * host. Pow, integer div, non-row-decomposable plans and Int4x2 splat/broadcast
  * rows keep the scalar path.
- * @version 0.3
+ *
+ * Autograd: the tensor-tensor and tensor-scalar wrappers attach the matching
+ * ElementwiseG node to the output whenever an input has requires_grad=true
+ * (Math/Autograd/ElementwiseG), so elementwise chains join the computation
+ * graph; the tensor-scalar ops persist the scalar as a bit-cast payload in
+ * Node::_inputs[1] (scalar_payload — never dereferenced, never walked).
+ * @version 0.4
  * @date 2026-10-23
  */
 #include <algorithm>
@@ -22,6 +28,7 @@
 #include <utility>
 #include <vector>
 
+#include "Math/Autograd/ElementwiseG/ElementwiseG.h"
 #include "Math/Elementwise/Elementwise.h"
 #include "Math/Elementwise/ElementwiseKernels.h"
 #include "Math/Elementwise/ElementwiseShared.h"
@@ -1381,6 +1388,14 @@ namespace BeanTensor::Tensors {
         } else [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
+        switch (op) {
+            case ElementwiseOp::Add: out.wire_node(detail::add_g_node, *this, &o); break;
+            case ElementwiseOp::Sub: out.wire_node(detail::sub_g_node, *this, &o); break;
+            case ElementwiseOp::Mul: out.wire_node(detail::mul_g_node, *this, &o); break;
+            case ElementwiseOp::Div: out.wire_node(detail::div_g_node, *this, &o); break;
+            case ElementwiseOp::Pow: out.wire_node(detail::pow_g_node, *this, &o); break;
+            [[unlikely]] default: throw ErrorHandling::UnReachableCode();
+        }
         return out;
     }
 
@@ -1408,6 +1423,19 @@ namespace BeanTensor::Tensors {
         } else [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
+        switch (op) {
+            case ElementwiseOp::Add: out.wire_node(detail::add_scalar_g_node, *this); break;
+            case ElementwiseOp::Sub: out.wire_node(detail::sub_scalar_g_node, *this); break;
+            case ElementwiseOp::Mul: out.wire_node(detail::mul_scalar_g_node, *this); break;
+            case ElementwiseOp::Div: out.wire_node(detail::div_scalar_g_node, *this); break;
+            case ElementwiseOp::Pow: out.wire_node(detail::pow_scalar_g_node, *this); break;
+            [[unlikely]] default: throw ErrorHandling::UnReachableCode();
+        }
+        if (out.node != nullptr) {
+            // Persist the scalar for the backward trampoline (never
+            // dereferenced, never walked: _n_inputs stays 1).
+            out.node->_inputs[1] = detail::scalar_payload(scalar);
+        }
         return out;
     }
 
@@ -1433,6 +1461,11 @@ namespace BeanTensor::Tensors {
             detail::elementwise_unary_gpu(*this, out, op);
         } else [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
+        }
+        if (op == ElementwiseUnaryOp::Exp) {
+            out.wire_node(detail::exp_g_node, *this);
+        } else {
+            out.wire_node(detail::log_g_node, *this);
         }
         return out;
     }
