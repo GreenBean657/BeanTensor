@@ -71,7 +71,9 @@ namespace BeanTensor::Tensors {
     }
 
     /**
-     * @brief Split into equal view chunks along an axis (the lazy inverse of cat).
+     * @brief Split into equal view chunks along an axis (leading-axis chunks
+     * round-trip through cat; inner-axis chunks are non-contiguous and cat
+     * rejects those, per the contiguity contract in Tensor.h).
      * @param axis Axis to split along.
      * @param sections Number of equal chunks; shape[axis] must be divisible.
      * @return One slice view per chunk, in axis order.

@@ -1,8 +1,9 @@
 /**
  * @file Elementwise.h
  * @author GreenBean
- * @brief Entry point for elementwise arithmetic/comparison ops with broadcasting (cpu vs gpu):
- * add, sub, mul, div, pow (tensor-tensor and tensor-scalar), exp, log (unary), eq, ne.
+ * @brief Entry point for elementwise arithmetic ops with broadcasting (cpu vs gpu):
+ * add, sub, mul, div, pow (tensor-tensor and tensor-scalar), exp, log (unary).
+ * Equality/comparison lives in Math/Compare (owned by the metrics mission).
  * @version 0.1
  * @date 2026-10-22
  */
@@ -17,7 +18,6 @@ namespace BeanTensor::Tensors {
     class Tensor;
 
     /**
-     * Eq and Ne produce a UInt8 (0/1) tensor; every other op produces the input dtype.
      * @brief Binary elementwise operation selector (tensor-tensor and tensor-scalar).
      */
     enum class ElementwiseOp : uint8_t {
@@ -25,9 +25,7 @@ namespace BeanTensor::Tensors {
         Sub,
         Mul,
         Div,
-        Pow,
-        Eq,
-        Ne
+        Pow
     };
 
     /**

@@ -1179,18 +1179,28 @@ static void test_indexing_cpu() {
     auto eq = [](float32_t a, float32_t b) {
         return std::bit_cast<uint32_t>(a) == std::bit_cast<uint32_t>(b);
     };
+    // Two-input cat lists are built with moves: Tensor copies are deleted.
+    auto make_pair = [](Tensor x, Tensor y) {
+        std::vector<Tensor> v;
+        v.reserve(2);
+        v.emplace_back(std::move(x));
+        v.emplace_back(std::move(y));
+        return v;
+    };
     // ---- slice: leading-dim slice is contiguous; inner slice is not ----
     Tensor t({2, 3}, DType::Float32);
-    for (auto r = size_t{0}; r < 2; ++r)
-        for (auto c = size_t{0}; c < 3; ++c)
+    for (auto r = size_t{0}; r < 2; ++r) {
+        for (auto c = size_t{0}; c < 3; ++c) {
             t.set<float32_t>({r, c}, static_cast<float32_t>(r * 3 + c));
+        }
+    }
     t.sync();
 
     // Leading-dim slice -> contiguous view of shape {1,3}.
     auto lead = t.slice({{0, 1}, {0, 3}});
     CHECK(lead.is_same_shape(Tensor({1, 3})));
-    CHECK(eq(lead.at<float32_t>({0}), 0.0f));
-    CHECK(eq(lead.at<float32_t>({2}), 2.0f));
+    CHECK(eq(lead.at<float32_t>({0, 0}), 0.0f));
+    CHECK(eq(lead.at<float32_t>({0, 2}), 2.0f));
 
     // Inner-dim slice -> non-contiguous view, but reads are offset-correct.
     auto inner = t.slice({{0, 2}, {1, 3}});
@@ -1202,41 +1212,81 @@ static void test_indexing_cpu() {
     t.set<float32_t>({0, 2}, 123.0f);
     CHECK(eq(inner.at<float32_t>({0, 1}), 123.0f));
 
-    // Error paths.
-    bool threw = false;
+    // A full-range slice sees the parent's writes too.
+    auto whole = t.slice({{0, 2}, {0, 3}});
+    CHECK(whole.is_same_shape(Tensor({2, 3})));
+    CHECK(eq(whole.at<float32_t>({0, 2}), 123.0f));
+
+    // Degenerate slice: an empty range yields a zero-extent dimension.
+    auto empty = t.slice({{0, 2}, {0, 0}});
+    CHECK(empty.is_same_shape(Tensor({2, 0})));
+
+    // Error paths: rank mismatch, end past the extent, start past end.
+    auto threw = false;
     try { [[maybe_unused]] auto bad = t.slice({{0, 2}}); } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) { threw = true; }
     CHECK(threw);
     threw = false;
     try { [[maybe_unused]] auto bad = t.slice({{0, 3}, {0, 3}}); } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) { threw = true; }
     CHECK(threw);
+    threw = false;
+    try { [[maybe_unused]] auto bad = t.slice({{2, 1}, {0, 3}}); } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) { threw = true; }
+    CHECK(threw);
 
     // ---- split: equal chunks along an axis are slice views that round-trip with cat ----
     Tensor grid({2, 3}, DType::Float32);
-    for (auto r = size_t{0}; r < 2; ++r)
-        for (auto c = size_t{0}; c < 3; ++c)
+    for (auto r = size_t{0}; r < 2; ++r) {
+        for (auto c = size_t{0}; c < 3; ++c) {
             grid.set<float32_t>({r, c}, static_cast<float32_t>(r * 3 + c));
+        }
+    }
     grid.sync();
 
     auto cols = grid.split(1, 3); // three {2,1} column views
     CHECK(cols.size() == 3);
     for (auto i = size_t{0}; i < 3; ++i) {
         CHECK(cols[i].is_same_shape(Tensor({2, 1})));
-        CHECK(cols[i].at<float32_t>({0}) == static_cast<float32_t>(i));
-        CHECK(cols[i].at<float32_t>({1}) == static_cast<float32_t>(3 + i));
+        CHECK(eq(cols[i].at<float32_t>({0, 0}), static_cast<float32_t>(i)));
+        CHECK(eq(cols[i].at<float32_t>({1, 0}), static_cast<float32_t>(3 + i)));
     }
 
-    // cat(split(axis, n), axis) reproduces the original.
-    auto rebuilt = Tensor::cat(cols, 1);
+    // Inner-axis chunks are non-contiguous views: readable as slices, but
+    // rejected by cat (which requires contiguous operands, per Tensor.h).
+    threw = false;
+    try { [[maybe_unused]] auto bad = Tensor::cat(cols, 1); } catch (const BeanTensor::ErrorHandling::NotImplemented&) { threw = true; }
+    CHECK(threw);
+
+    // cat(split(axis, n), axis) reproduces the original when the chunks are
+    // contiguous — true for a leading-axis split.
+    auto rows = grid.split(0, 2); // two {1,3} row views
+    CHECK(rows.size() == 2);
+    CHECK(rows[0].is_same_shape(Tensor({1, 3})));
+    CHECK(rows[1].is_same_shape(Tensor({1, 3})));
+    auto rebuilt = Tensor::cat(rows, 0);
     CHECK(rebuilt.is_same_shape(Tensor({2, 3})));
-    for (auto r = size_t{0}; r < 2; ++r)
-        for (auto c = size_t{0}; c < 3; ++c)
-            CHECK(rebuilt.at<float32_t>({r, c}) == static_cast<float32_t>(r * 3 + c));
+    for (auto r = size_t{0}; r < 2; ++r) {
+        for (auto c = size_t{0}; c < 3; ++c) {
+            CHECK(eq(rebuilt.at<float32_t>({r, c}), static_cast<float32_t>(r * 3 + c)));
+        }
+    }
+
+    // split error paths: axis out of bounds, zero sections, non-dividing sections.
+    threw = false;
+    try { [[maybe_unused]] auto bad = grid.split(2, 1); } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { [[maybe_unused]] auto bad = grid.split(1, 0); } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { [[maybe_unused]] auto bad = grid.split(1, 2); } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) { threw = true; } // 3 % 2 != 0
+    CHECK(threw);
 
     // ---- index_select: pick columns by a rank-1 integer index tensor ----
     Tensor src({2, 3}, DType::Float32);
-    for (auto r = size_t{0}; r < 2; ++r)
-        for (auto c = size_t{0}; c < 3; ++c)
+    for (auto r = size_t{0}; r < 2; ++r) {
+        for (auto c = size_t{0}; c < 3; ++c) {
             src.set<float32_t>({r, c}, static_cast<float32_t>(r * 3 + c));
+        }
+    }
     src.sync();
 
     Tensor idx({3}, DType::Int64);
@@ -1246,21 +1296,78 @@ static void test_indexing_cpu() {
     idx.sync();
     auto sel = src.index_select(1, idx); // {2,3} axis-1 -> {2,3}; cols [2,0,2]
     CHECK(sel.is_same_shape(Tensor({2, 3})));
-    CHECK(sel.at<float32_t>({0, 0}) == 2.0f);
-    CHECK(sel.at<float32_t>({0, 1}) == 0.0f);
-    CHECK(sel.at<float32_t>({0, 2}) == 2.0f);
-    CHECK(sel.at<float32_t>({1, 0}) == 5.0f);
-    CHECK(sel.at<float32_t>({1, 2}) == 5.0f);
+    CHECK(eq(sel.at<float32_t>({0, 0}), 2.0f));
+    CHECK(eq(sel.at<float32_t>({0, 1}), 0.0f));
+    CHECK(eq(sel.at<float32_t>({0, 2}), 2.0f));
+    CHECK(eq(sel.at<float32_t>({1, 0}), 5.0f));
+    CHECK(eq(sel.at<float32_t>({1, 2}), 5.0f));
+
+    // Selecting along axis 0 picks whole rows.
+    Tensor ridx({1}, DType::Int64);
+    ridx.set<int64_t>({0}, 1);
+    ridx.sync();
+    auto rowsel = src.index_select(0, ridx); // {1,3} = row 1
+    CHECK(rowsel.is_same_shape(Tensor({1, 3})));
+    CHECK(eq(rowsel.at<float32_t>({0, 0}), 3.0f));
+    CHECK(eq(rowsel.at<float32_t>({0, 2}), 5.0f));
 
     // Duplicate + out-of-order indices are allowed and preserved in order.
     Tensor dup({2}, DType::Int64);
     dup.set<int64_t>({0}, 1);
     dup.set<int64_t>({1}, 1);
     dup.sync();
-    auto duped = src.index_select(1, dup); // {2,1}
-    CHECK(duped.is_same_shape(Tensor({2, 1})));
-    CHECK(duped.at<float32_t>({0}) == 1.0f);
-    CHECK(duped.at<float32_t>({1}) == 4.0f);
+    auto duped = src.index_select(1, dup); // {2,2}: both columns are col 1
+    CHECK(duped.is_same_shape(Tensor({2, 2})));
+    CHECK(eq(duped.at<float32_t>({0, 0}), 1.0f));
+    CHECK(eq(duped.at<float32_t>({0, 1}), 1.0f));
+    CHECK(eq(duped.at<float32_t>({1, 0}), 4.0f));
+    CHECK(eq(duped.at<float32_t>({1, 1}), 4.0f));
+
+    // Any plain integer dtype is accepted as the index tensor.
+    Tensor idx32({2}, DType::Int32);
+    idx32.set<int32_t>({0}, 1);
+    idx32.set<int32_t>({1}, 0);
+    idx32.sync();
+    auto sel32 = src.index_select(1, idx32); // {2,2} cols [1,0]
+    CHECK(sel32.is_same_shape(Tensor({2, 2})));
+    CHECK(eq(sel32.at<float32_t>({0, 0}), 1.0f));
+    CHECK(eq(sel32.at<float32_t>({0, 1}), 0.0f));
+
+    // An empty index tensor yields a zero-extent output along the axis.
+    Tensor empty_idx({0}, DType::Int64);
+    auto empty_sel = src.index_select(1, empty_idx);
+    CHECK(empty_sel.is_same_shape(Tensor({2, 0})));
+
+    // Non-contiguous input is rejected.
+    auto nc_view = src.slice({{0, 2}, {1, 3}});
+    threw = false;
+    try { [[maybe_unused]] auto bad = nc_view.index_select(1, idx); } catch (const BeanTensor::ErrorHandling::NotImplemented&) { threw = true; }
+    CHECK(threw);
+
+    // index_select error paths: axis, index rank, index dtype, out-of-bounds, negative.
+    threw = false;
+    try { [[maybe_unused]] auto bad = src.index_select(5, idx); } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    Tensor notrank1({2, 2}, DType::Int64);
+    try { [[maybe_unused]] auto bad = src.index_select(1, notrank1); } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    Tensor floatidx({2}, DType::Float32);
+    try { [[maybe_unused]] auto bad = src.index_select(1, floatidx); } catch (const BeanTensor::ErrorHandling::MismatchedDTypes&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    Tensor oobidx({1}, DType::Int64);
+    oobidx.set<int64_t>({0}, 3);
+    oobidx.sync();
+    try { [[maybe_unused]] auto bad = src.index_select(1, oobidx); } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    Tensor negidx({1}, DType::Int64);
+    negidx.set<int64_t>({0}, -1);
+    negidx.sync();
+    try { [[maybe_unused]] auto bad = src.index_select(1, negidx); } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) { threw = true; }
+    CHECK(threw);
 
     // ---- gather: same-rank integer index tensor ----
     Tensor gidx({2, 2}, DType::Int64);
@@ -1271,12 +1378,48 @@ static void test_indexing_cpu() {
     gidx.sync();
     auto gat = src.gather(1, gidx); // {2,2}
     CHECK(gat.is_same_shape(Tensor({2, 2})));
-    CHECK(gat.at<float32_t>({0, 0}) == 0.0f);
-    CHECK(gat.at<float32_t>({0, 1}) == 2.0f);
-    CHECK(gat.at<float32_t>({1, 0}) == 4.0f);
-    CHECK(gat.at<float32_t>({1, 1}) == 3.0f);
+    CHECK(eq(gat.at<float32_t>({0, 0}), 0.0f));
+    CHECK(eq(gat.at<float32_t>({0, 1}), 2.0f));
+    CHECK(eq(gat.at<float32_t>({1, 0}), 4.0f));
+    CHECK(eq(gat.at<float32_t>({1, 1}), 3.0f));
 
-    // ---- cat along axis 0 ----
+    // Smaller off-axis extents are allowed (PyTorch rule).
+    Tensor narrow({2, 1}, DType::Int64);
+    narrow.set<int64_t>({0, 0}, 0);
+    narrow.set<int64_t>({1, 0}, 2);
+    narrow.sync();
+    auto ngat = src.gather(1, narrow); // {2,1}
+    CHECK(ngat.is_same_shape(Tensor({2, 1})));
+    CHECK(eq(ngat.at<float32_t>({0, 0}), 0.0f));
+    CHECK(eq(ngat.at<float32_t>({1, 0}), 5.0f));
+
+    // gather error paths: axis, rank, off-axis extent, index dtype, bounds.
+    threw = false;
+    try { [[maybe_unused]] auto bad = src.gather(5, gidx); } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    Tensor drank({2}, DType::Int64);
+    try { [[maybe_unused]] auto bad = src.gather(1, drank); } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    Tensor dwide({3, 3}, DType::Int64);
+    try { [[maybe_unused]] auto bad = src.gather(1, dwide); } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) { threw = true; } // off-axis 3 > 2
+    CHECK(threw);
+    threw = false;
+    Tensor gfloat({2, 2}, DType::Float32);
+    try { [[maybe_unused]] auto bad = src.gather(1, gfloat); } catch (const BeanTensor::ErrorHandling::MismatchedDTypes&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    Tensor goob({2, 2}, DType::Int64);
+    goob.set<int64_t>({0, 0}, 3);
+    goob.sync();
+    try { [[maybe_unused]] auto bad = src.gather(1, goob); } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { [[maybe_unused]] auto bad = nc_view.gather(1, gidx); } catch (const BeanTensor::ErrorHandling::NotImplemented&) { threw = true; }
+    CHECK(threw);
+
+    // ---- cat along axis 0 and axis 1 ----
     Tensor a({2, 2}, DType::Float32);
     Tensor b({2, 2}, DType::Float32);
     for (auto i = size_t{0}; i < 4; ++i) {
@@ -1285,25 +1428,38 @@ static void test_indexing_cpu() {
     }
     a.sync();
     b.sync();
-    auto c0 = Tensor::cat({a, b}, 0); // {4,2}
+    auto pair = make_pair(std::move(a), std::move(b));
+    auto c0 = Tensor::cat(pair, 0); // {4,2}
     CHECK(c0.is_same_shape(Tensor({4, 2})));
-    CHECK(c0.at<float32_t>({2, 0}) == 10.0f); // first element of b
-    CHECK(c0.at<float32_t>({3, 1}) == 13.0f);
+    CHECK(eq(c0.at<float32_t>({2, 0}), 10.0f)); // first element of b
+    CHECK(eq(c0.at<float32_t>({3, 1}), 13.0f));
+    auto c1 = Tensor::cat(pair, 1); // {2,4}: rows are a's row then b's row
+    CHECK(c1.is_same_shape(Tensor({2, 4})));
+    CHECK(eq(c1.at<float32_t>({0, 2}), 10.0f));
+    CHECK(eq(c1.at<float32_t>({1, 3}), 13.0f));
 
-    // ---- error paths ----
+    // cat error paths: empty list, rank, dtype, off-axis shape, axis, contiguity.
     threw = false;
-    try { src.index_select(5, idx); } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) { threw = true; }
+    try { [[maybe_unused]] auto bad = Tensor::cat(std::vector<Tensor>{}, size_t{0}); } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) { threw = true; }
     CHECK(threw);
     threw = false;
-    Tensor notrank1({2, 2}, DType::Int64);
-    try { src.index_select(1, notrank1); } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) { threw = true; }
+    try { [[maybe_unused]] auto bad = Tensor::cat(make_pair(Tensor({2, 2}, DType::Float32), Tensor({2, 2, 1}, DType::Float32)), 0); } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) { threw = true; }
     CHECK(threw);
     threw = false;
-    Tensor floatidx({2}, DType::Float32);
-    try { src.index_select(1, floatidx); } catch (const BeanTensor::ErrorHandling::MismatchedDTypes&) { threw = true; }
+    try { [[maybe_unused]] auto bad = Tensor::cat(make_pair(Tensor({2, 2}, DType::Float32), Tensor({2, 2}, DType::Int32)), 0); } catch (const BeanTensor::ErrorHandling::MismatchedDTypes&) { threw = true; }
     CHECK(threw);
     threw = false;
-    try { Tensor::cat(std::vector<Tensor>{}, size_t{0}); } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) { threw = true; }
+    try { [[maybe_unused]] auto bad = Tensor::cat(make_pair(Tensor({2, 2}, DType::Float32), Tensor({3, 2}, DType::Float32)), 1); } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { [[maybe_unused]] auto bad = Tensor::cat(make_pair(Tensor({2, 2}, DType::Float32), Tensor({2, 2}, DType::Float32)), 5); } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try {
+        auto nca = grid.slice({{0, 2}, {1, 3}});
+        auto ncb = grid.slice({{0, 2}, {1, 3}});
+        [[maybe_unused]] auto bad = Tensor::cat(make_pair(std::move(nca), std::move(ncb)), 0);
+    } catch (const BeanTensor::ErrorHandling::NotImplemented&) { threw = true; }
     CHECK(threw);
 }
 
@@ -1363,14 +1519,20 @@ static void test_indexing_gpu() {
     }
     cpu_a.sync();
     cpu_b.sync();
-    auto cpu_c0 = Tensor::cat({cpu_a, cpu_b}, 0);
-    auto cpu_c1 = Tensor::cat({cpu_a, cpu_b}, 1);
-    Tensor gpu_a = cpu_a.clone(true);
+    std::vector<Tensor> cpu_pair;
+    cpu_pair.emplace_back(std::move(cpu_a));
+    cpu_pair.emplace_back(std::move(cpu_b));
+    auto cpu_c0 = Tensor::cat(cpu_pair, 0);
+    auto cpu_c1 = Tensor::cat(cpu_pair, 1);
+    Tensor gpu_a = cpu_pair[0].clone(true);
     gpu_a.to(Device::GPU);
-    Tensor gpu_b = cpu_b.clone(true);
+    Tensor gpu_b = cpu_pair[1].clone(true);
     gpu_b.to(Device::GPU);
-    auto gpu_c0 = Tensor::cat({gpu_a, gpu_b}, 0);
-    auto gpu_c1 = Tensor::cat({gpu_a, gpu_b}, 1);
+    std::vector<Tensor> gpu_pair;
+    gpu_pair.emplace_back(std::move(gpu_a));
+    gpu_pair.emplace_back(std::move(gpu_b));
+    auto gpu_c0 = Tensor::cat(gpu_pair, 0);
+    auto gpu_c1 = Tensor::cat(gpu_pair, 1);
     gpu_c0.to(Device::CPU);
     gpu_c1.to(Device::CPU);
     gpu_c0.sync();
@@ -1379,6 +1541,22 @@ static void test_indexing_gpu() {
     cpu_c1.sync();
     CHECK(cpu_c0.contents_to_string() == gpu_c0.contents_to_string());
     CHECK(cpu_c1.contents_to_string() == gpu_c1.contents_to_string());
+
+    // Device mismatch is rejected eagerly (before any backend copy).
+    auto gpu_one = cpu_pair[0].clone(true);
+    gpu_one.to(Device::GPU);
+    std::vector<Tensor> mixed;
+    mixed.emplace_back(cpu_pair[0].clone(true));
+    mixed.emplace_back(std::move(gpu_one));
+    auto threw = false;
+    try { [[maybe_unused]] auto bad = Tensor::cat(mixed, 0); } catch (const BeanTensor::ErrorHandling::MismatchedDevices&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { [[maybe_unused]] auto bad = cpu_pair[0].index_select(1, gpu_idx); } catch (const BeanTensor::ErrorHandling::MismatchedDevices&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { [[maybe_unused]] auto bad = cpu_src.gather(1, gpu_g); } catch (const BeanTensor::ErrorHandling::MismatchedDevices&) { threw = true; }
+    CHECK(threw);
 #else
     std::cout << "indexing GPU tests skipped (CPU-only build)\n";
 #endif

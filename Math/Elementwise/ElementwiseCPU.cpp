@@ -1,8 +1,8 @@
 /**
  * @file ElementwiseCPU.cpp
  * @author GreenBean
- * @brief CPU backend for elementwise arithmetic/comparison ops with broadcasting.
- * Hosts the Tensor::add/sub/mul/div/pow/exp/log/eq/ne method definitions
+ * @brief CPU backend for elementwise arithmetic ops with broadcasting.
+ * Hosts the Tensor::add/sub/mul/div/pow/exp/log method definitions
  * (mirrors how Tensor::bias_add lives in BiasAddCPU.cpp).
  * @version 0.1
  * @date 2026-10-22
@@ -282,30 +282,6 @@ namespace BeanTensor::Tensors::detail {
         }
 
         /**
-         * Writes 1/0 per element; NaN never compares equal and -0 equals +0
-         * (see values_equal).
-         * @brief Scalar range comparison with broadcast offsets (any dtype, Eq/Ne).
-         * @param out UInt8 output buffer.
-         * @param a Left operand buffer.
-         * @param b Right operand buffer.
-         * @param plan Broadcast execution plan.
-         * @param begin First element computed.
-         * @param end One past the last element computed.
-         */
-        template<typename T, ElementwiseOp Op>
-        void compare_range(uint8_t* out, const T* a, const T* b, const ElementwiseBcast& plan, const size_t begin, const size_t end) {
-            for (auto i = begin; i < end; ++i) {
-                const auto [ao, bo] = bcast_offsets(plan, i);
-                const auto equal = values_equal(a[ao], b[bo]);
-                if constexpr (Op == ElementwiseOp::Eq) {
-                    out[i] = equal ? uint8_t{1} : uint8_t{0};
-                } else {
-                    out[i] = equal ? uint8_t{0} : uint8_t{1};
-                }
-            }
-        }
-
-        /**
          * No plan needed: a is contiguous and the output shares its shape, so
          * both flat indices are i. The scalar rides along by value.
          * @brief Scalar range tensor-scalar op (any dtype, arithmetic ops).
@@ -319,26 +295,6 @@ namespace BeanTensor::Tensors::detail {
         void scalar_range(T* out, const T* a, const T scalar, const size_t begin, const size_t end) {
             for (auto i = begin; i < end; ++i) {
                 out[i] = apply_any<T, Op>(a[i], scalar);
-            }
-        }
-
-        /**
-         * @brief Scalar range tensor-scalar comparison (any dtype, Eq/Ne, UInt8 output).
-         * @param out UInt8 output buffer.
-         * @param a Input buffer.
-         * @param scalar Scalar already narrowed into T.
-         * @param begin First element computed.
-         * @param end One past the last element computed.
-         */
-        template<typename T, ElementwiseOp Op>
-        void compare_scalar_range(uint8_t* out, const T* a, const T scalar, const size_t begin, const size_t end) {
-            for (auto i = begin; i < end; ++i) {
-                const auto equal = values_equal(a[i], scalar);
-                if constexpr (Op == ElementwiseOp::Eq) {
-                    out[i] = equal ? uint8_t{1} : uint8_t{0};
-                } else {
-                    out[i] = equal ? uint8_t{0} : uint8_t{1};
-                }
             }
         }
 
@@ -393,24 +349,6 @@ namespace BeanTensor::Tensors::detail {
         }
 
         /**
-         * @brief Launch a broadcast comparison (UInt8 output) for element type T on the thread pool.
-         */
-        template<typename T, ElementwiseOp Op>
-        void launch_compare(const RawPtrs& raw, const ElementwiseBcast& plan, const Tensor& a, const Tensor& b, const Tensor& out) {
-            auto* out_ptr = static_cast<uint8_t*>(raw.out) + raw.out_off;
-            const auto* a_ptr = static_cast<const T*>(raw.a) + raw.a_off;
-            const auto* b_ptr = static_cast<const T*>(raw.b) + raw.b_off;
-            /**
-             * Forwards the captured elementwise pointers to the range kernel.
-             * @brief Elementwise comparison range worker.
-             * @param x First element computed.
-             * @param y One past the last element computed.
-             * @note Lambda subcall. Self-execution prohibited.
-             */
-            launch_elementwise([=](const size_t x, const size_t y) { compare_range<T, Op>(out_ptr, a_ptr, b_ptr, plan, x, y); }, raw.numel, a, b, out);
-        }
-
-        /**
          * The scalar is narrowed on the host at capture time and rides into the
          * worker BY VALUE (the futures outlive this call — a pointer to a stack
          * local would dangle).
@@ -428,23 +366,6 @@ namespace BeanTensor::Tensors::detail {
              * @note Lambda subcall. Self-execution prohibited.
              */
             launch_elementwise([out_ptr, a_ptr, narrowed = narrow_scalar<T>(scalar)](const size_t x, const size_t y) { scalar_range<T, Op>(out_ptr, a_ptr, narrowed, x, y); }, raw.numel, a, a, out);
-        }
-
-        /**
-         * @brief Launch a tensor-scalar comparison (UInt8 output) for element type T on the thread pool.
-         */
-        template<typename T, ElementwiseOp Op>
-        void launch_compare_scalar(const RawPtrs& raw, const float64_t scalar, const Tensor& a, const Tensor& out) {
-            auto* out_ptr = static_cast<uint8_t*>(raw.out) + raw.out_off;
-            const auto* a_ptr = static_cast<const T*>(raw.a) + raw.a_off;
-            /**
-             * Forwards the captured elementwise pointers to the range kernel.
-             * @brief Elementwise tensor-scalar comparison range worker.
-             * @param x First element computed.
-             * @param y One past the last element computed.
-             * @note Lambda subcall. Self-execution prohibited.
-             */
-            launch_elementwise([out_ptr, a_ptr, narrowed = narrow_scalar<T>(scalar)](const size_t x, const size_t y) { compare_scalar_range<T, Op>(out_ptr, a_ptr, narrowed, x, y); }, raw.numel, a, a, out);
         }
 
         /**
@@ -493,32 +414,6 @@ namespace BeanTensor::Tensors::detail {
         }
 
         /**
-         * @brief Dispatch a broadcast comparison (UInt8 output) on the input dtype.
-         */
-        template<ElementwiseOp Op>
-        void dispatch_compare(const DataTypes::DType& dtype, const RawPtrs& raw, const ElementwiseBcast& plan, const Tensor& a, const Tensor& b, const Tensor& out) {
-            using DType = DataTypes::DType;
-            switch (dtype) {
-                case DType::Float32: launch_compare<float32_t, Op>(raw, plan, a, b, out); break;
-                case DType::Float64: launch_compare<float64_t, Op>(raw, plan, a, b, out); break;
-                case DType::Float16: launch_compare<float16_t, Op>(raw, plan, a, b, out); break;
-                case DType::BFloat16: launch_compare<bfloat16_t, Op>(raw, plan, a, b, out); break;
-                case DType::Float16x2: launch_compare<float16x2_t, Op>(raw, plan, a, b, out); break;
-                case DType::BFloat16x2: launch_compare<bfloat16x2_t, Op>(raw, plan, a, b, out); break;
-                case DType::Int8: launch_compare<int8_t, Op>(raw, plan, a, b, out); break;
-                case DType::UInt8: launch_compare<uint8_t, Op>(raw, plan, a, b, out); break;
-                case DType::Int16: launch_compare<int16_t, Op>(raw, plan, a, b, out); break;
-                case DType::UInt16: launch_compare<uint16_t, Op>(raw, plan, a, b, out); break;
-                case DType::Int32: launch_compare<int32_t, Op>(raw, plan, a, b, out); break;
-                case DType::UInt32: launch_compare<uint32_t, Op>(raw, plan, a, b, out); break;
-                case DType::Int64: launch_compare<int64_t, Op>(raw, plan, a, b, out); break;
-                case DType::UInt64: launch_compare<uint64_t, Op>(raw, plan, a, b, out); break;
-                case DType::Int4x2: launch_compare<int4x2_t, Op>(raw, plan, a, b, out); break;
-                [[unlikely]] default: throw ErrorHandling::NotImplemented();
-            }
-        }
-
-        /**
          * @brief Dispatch a tensor-scalar arithmetic op on the input dtype.
          */
         template<ElementwiseOp Op>
@@ -545,32 +440,6 @@ namespace BeanTensor::Tensors::detail {
         }
 
         /**
-         * @brief Dispatch a tensor-scalar comparison (UInt8 output) on the input dtype.
-         */
-        template<ElementwiseOp Op>
-        void dispatch_compare_scalar(const DataTypes::DType& dtype, const RawPtrs& raw, const float64_t scalar, const Tensor& a, const Tensor& out) {
-            using DType = DataTypes::DType;
-            switch (dtype) {
-                case DType::Float32: launch_compare_scalar<float32_t, Op>(raw, scalar, a, out); break;
-                case DType::Float64: launch_compare_scalar<float64_t, Op>(raw, scalar, a, out); break;
-                case DType::Float16: launch_compare_scalar<float16_t, Op>(raw, scalar, a, out); break;
-                case DType::BFloat16: launch_compare_scalar<bfloat16_t, Op>(raw, scalar, a, out); break;
-                case DType::Float16x2: launch_compare_scalar<float16x2_t, Op>(raw, scalar, a, out); break;
-                case DType::BFloat16x2: launch_compare_scalar<bfloat16x2_t, Op>(raw, scalar, a, out); break;
-                case DType::Int8: launch_compare_scalar<int8_t, Op>(raw, scalar, a, out); break;
-                case DType::UInt8: launch_compare_scalar<uint8_t, Op>(raw, scalar, a, out); break;
-                case DType::Int16: launch_compare_scalar<int16_t, Op>(raw, scalar, a, out); break;
-                case DType::UInt16: launch_compare_scalar<uint16_t, Op>(raw, scalar, a, out); break;
-                case DType::Int32: launch_compare_scalar<int32_t, Op>(raw, scalar, a, out); break;
-                case DType::UInt32: launch_compare_scalar<uint32_t, Op>(raw, scalar, a, out); break;
-                case DType::Int64: launch_compare_scalar<int64_t, Op>(raw, scalar, a, out); break;
-                case DType::UInt64: launch_compare_scalar<uint64_t, Op>(raw, scalar, a, out); break;
-                case DType::Int4x2: launch_compare_scalar<int4x2_t, Op>(raw, scalar, a, out); break;
-                [[unlikely]] default: throw ErrorHandling::NotImplemented();
-            }
-        }
-
-        /**
          * Float kinds only — integer exp/log is rejected at the Tensor method,
          * so those dtypes fall into the default arm.
          * @brief Dispatch a unary op on the input dtype.
@@ -591,13 +460,12 @@ namespace BeanTensor::Tensors::detail {
     }
 
     /**
-     * Routes Eq/Ne to the comparison dispatch and everything else to the
-     * arithmetic dispatch. Work is chunked across the CPU thread pool and the
-     * futures land on all three tensors.
+     * Work is chunked across the CPU thread pool and the futures land on all
+     * three tensors.
      * @brief CPU tensor-tensor elementwise: out = a (op) b with broadcasting.
      * @param a Left operand, CPU resident, contiguous.
      * @param b Right operand, CPU resident, contiguous.
-     * @param out Output tensor, broadcast shape; UInt8 dtype for Eq/Ne, a's dtype otherwise.
+     * @param out Output tensor, broadcast shape, a's dtype.
      * @param op Operation selector.
      * @param plan Broadcast execution plan built by the Tensor method.
      */
@@ -612,8 +480,6 @@ namespace BeanTensor::Tensors::detail {
             case ElementwiseOp::Mul: dispatch_arith<ElementwiseOp::Mul>(a.dtype, raw, plan, a, b, out); break;
             case ElementwiseOp::Div: dispatch_arith<ElementwiseOp::Div>(a.dtype, raw, plan, a, b, out); break;
             case ElementwiseOp::Pow: dispatch_arith<ElementwiseOp::Pow>(a.dtype, raw, plan, a, b, out); break;
-            case ElementwiseOp::Eq: dispatch_compare<ElementwiseOp::Eq>(a.dtype, raw, plan, a, b, out); break;
-            case ElementwiseOp::Ne: dispatch_compare<ElementwiseOp::Ne>(a.dtype, raw, plan, a, b, out); break;
             [[unlikely]] default: throw ErrorHandling::UnReachableCode();
         }
     }
@@ -624,7 +490,7 @@ namespace BeanTensor::Tensors::detail {
      * @brief CPU tensor-scalar elementwise: out[i] = a[i] (op) scalar.
      * @param a Input tensor, CPU resident, contiguous.
      * @param scalar Scalar operand (float64_t, narrowed into a's dtype).
-     * @param out Output tensor, same shape as a; UInt8 dtype for Eq/Ne, a's dtype otherwise.
+     * @param out Output tensor, same shape as a, a's dtype.
      * @param op Operation selector.
      */
     void elementwise_scalar_cpu(const Tensor& a, const float64_t& scalar, Tensor& out, const ElementwiseOp op) {
@@ -638,8 +504,6 @@ namespace BeanTensor::Tensors::detail {
             case ElementwiseOp::Mul: dispatch_scalar<ElementwiseOp::Mul>(a.dtype, raw, scalar, a, out); break;
             case ElementwiseOp::Div: dispatch_scalar<ElementwiseOp::Div>(a.dtype, raw, scalar, a, out); break;
             case ElementwiseOp::Pow: dispatch_scalar<ElementwiseOp::Pow>(a.dtype, raw, scalar, a, out); break;
-            case ElementwiseOp::Eq: dispatch_compare_scalar<ElementwiseOp::Eq>(a.dtype, raw, scalar, a, out); break;
-            case ElementwiseOp::Ne: dispatch_compare_scalar<ElementwiseOp::Ne>(a.dtype, raw, scalar, a, out); break;
             [[unlikely]] default: throw ErrorHandling::UnReachableCode();
         }
     }
@@ -668,11 +532,11 @@ namespace BeanTensor::Tensors {
     /**
      * Validates dtype/device/contiguity, rejects integer pow, syncs both
      * operands, builds the broadcast plan, then routes to the CPU or GPU
-     * backend. Comparisons produce a UInt8 tensor of the broadcast shape.
+     * backend.
      * @brief Tensor-tensor elementwise op with broadcasting.
      * @param o Right operand, same dtype and device.
      * @param op Operation selector.
-     * @return New tensor with the broadcast shape.
+     * @return New tensor with the broadcast shape and the input dtype.
      */
     Tensor Tensor::elementwise_binary(const Tensor& o, const ElementwiseOp op) const {
         if (this->dtype != o.dtype) {
@@ -691,8 +555,7 @@ namespace BeanTensor::Tensors {
         o.sync();
         auto out_shape = std::vector<size_t>{};
         const auto plan = detail::compute_bcast_plan(this->shape, this->dims, this->ndim, o.shape, o.dims, o.ndim, out_shape);
-        const auto out_dtype = op == ElementwiseOp::Eq || op == ElementwiseOp::Ne ? DataTypes::DType::UInt8 : this->dtype;
-        auto out = Tensor(out_shape, out_dtype, this->device, false);
+        auto out = Tensor(out_shape, this->dtype, this->device, false);
         if (this->device == Device::CPU) {
             detail::elementwise_cpu(*this, o, out, op, plan);
         } else if (this->device == Device::GPU) {
@@ -705,8 +568,7 @@ namespace BeanTensor::Tensors {
 
     /**
      * Validates contiguity, rejects integer pow, syncs this tensor, then routes
-     * to the CPU or GPU backend. Comparisons produce a UInt8 tensor of this
-     * tensor's shape.
+     * to the CPU or GPU backend.
      * @brief Tensor-scalar elementwise op.
      * @param scalar Scalar operand (float64_t, narrowed into this tensor's dtype).
      * @param op Operation selector.
@@ -720,8 +582,7 @@ namespace BeanTensor::Tensors {
             throw ErrorHandling::NotImplemented();
         }
         sync();
-        const auto out_dtype = op == ElementwiseOp::Eq || op == ElementwiseOp::Ne ? DataTypes::DType::UInt8 : this->dtype;
-        auto out = Tensor(std::vector<size_t>(this->shape, this->shape + this->ndim), out_dtype, this->device, false);
+        auto out = Tensor(std::vector<size_t>(this->shape, this->shape + this->ndim), this->dtype, this->device, false);
         if (this->device == Device::CPU) {
             detail::elementwise_scalar_cpu(*this, scalar, out, op);
         } else if (this->device == Device::GPU) {
@@ -770,8 +631,4 @@ namespace BeanTensor::Tensors {
     Tensor Tensor::pow(const float64_t& scalar) const { return elementwise_scalar(scalar, ElementwiseOp::Pow); }
     Tensor Tensor::exp() const { return elementwise_unary(ElementwiseUnaryOp::Exp); }
     Tensor Tensor::log() const { return elementwise_unary(ElementwiseUnaryOp::Log); }
-    Tensor Tensor::eq(const Tensor& o) const { return elementwise_binary(o, ElementwiseOp::Eq); }
-    Tensor Tensor::eq(const float64_t& scalar) const { return elementwise_scalar(scalar, ElementwiseOp::Eq); }
-    Tensor Tensor::ne(const Tensor& o) const { return elementwise_binary(o, ElementwiseOp::Ne); }
-    Tensor Tensor::ne(const float64_t& scalar) const { return elementwise_scalar(scalar, ElementwiseOp::Ne); }
 }
