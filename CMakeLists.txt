@@ -153,6 +153,12 @@ set(CORE_SOURCES
         Tensor/DTypes.h
         Tensor/Tensor.h
         Tensor/Tensor.cpp
+        Math/Elementwise/Elementwise.h
+        Math/Elementwise/Elementwise.hpp
+        Math/Elementwise/ElementwiseShared.h
+        Math/Elementwise/ElementwiseCudaShared.h
+        Math/Elementwise/ElementwiseHipShared.h
+        Math/Elementwise/ElementwiseCPU.cpp
         Math/LinearAlgebra/MatMul/Matmul.h
         Math/LinearAlgebra/MatMul/Matmul.hpp
         Math/LinearAlgebra/MatMul/MatmulCPU.cpp
@@ -176,6 +182,13 @@ set(CORE_SOURCES
         Math/Reductions/Argmax/Argmax.h
         Math/Reductions/Argmax/Argmax.hpp
         Math/Reductions/Argmax/ArgmaxCPU.cpp
+        Math/Reductions/Mean/Mean.h
+        Math/Reductions/Mean/Mean.hpp
+        Math/Reductions/Mean/MeanCPU.cpp
+        Math/Compare/Compare.h
+        Math/Compare/Equal/Equal.h
+        Math/Compare/Equal/Equal.hpp
+        Math/Compare/Equal/EqualCPU.cpp
         Math/Shape/Reshape.cpp
         Math/Shape/Indexing/Indexing.h
         Math/Shape/Indexing/Indexing.hpp
@@ -254,10 +267,12 @@ set(CORE_SOURCES
 if (USE_CUDA)
     list(APPEND CORE_SOURCES
             Tensor/Ops/TensorOps.cu
+            Math/Elementwise/ElementwiseCUDA.cu
             Math/LinearAlgebra/MatMul/MatmulCUDA.cu
             Math/Optimization/SgdUpdate/SgdUpdateCUDA.cu
             Math/Reductions/Sum/SumCUDA.cu
             Math/Reductions/Argmax/ArgmaxCUDA.cu
+            Math/Compare/Equal/EqualCUDA.cu
             Math/LinearAlgebra/BiasAdd/BiasAddCUDA.cu
             Math/Activations/Relu/ReluCUDA.cu
             Math/Activations/SoftmaxCE/SoftmaxCECUDA.cu
@@ -271,10 +286,13 @@ if (USE_CUDA)
 elseif (USE_HIP)
     list(APPEND CORE_SOURCES
             Tensor/Ops/TensorOps.cpp
+            Math/Elementwise/ElementwiseHIP.cpp
             Math/LinearAlgebra/MatMul/MatmulHIP.cpp
             Math/Optimization/SgdUpdate/SgdUpdateHIP.cpp
             Math/Reductions/Sum/SumHIP.cpp
             Math/Reductions/Argmax/ArgmaxHIP.cpp
+            Math/Reductions/Mean/MeanHIP.cpp
+            Math/Compare/Equal/EqualHIP.cpp
             Math/LinearAlgebra/BiasAdd/BiasAddHIP.cpp
             Math/Activations/Relu/ReluHIP.cpp
             Math/Activations/SoftmaxCE/SoftmaxCEHIP.cpp
@@ -310,6 +328,7 @@ if(USE_HIP)
             Tensor/Tensor.cpp
             Tensor/Ops/TensorOps.cpp
             Math/LinearAlgebra/MatMul/MatmulCPU.cpp
+            Math/Elementwise/ElementwiseHIP.cpp
             Math/LinearAlgebra/MatMul/MatmulHIP.cpp
             Math/LinearAlgebra/MatMul/GemmAVX2.cpp
             Math/LinearAlgebra/MatMul/GemmAVX512.cpp
@@ -319,6 +338,10 @@ if(USE_HIP)
             Math/Reductions/Sum/SumHIP.cpp
             Math/Reductions/Argmax/ArgmaxCPU.cpp
             Math/Reductions/Argmax/ArgmaxHIP.cpp
+            Math/Reductions/Mean/MeanCPU.cpp
+            Math/Reductions/Mean/MeanHIP.cpp
+            Math/Compare/Equal/EqualCPU.cpp
+            Math/Compare/Equal/EqualHIP.cpp
             Math/Shape/Reshape.cpp
             Math/Optimization/SgdUpdate/SgdUpdateAVX2.cpp
             Math/Optimization/SgdUpdate/SgdUpdateAVX512.cpp
@@ -362,6 +385,7 @@ if(USE_HIP)
             Tensor/Tensor.cpp
             Tensor/Ops/TensorOps.cpp
             Math/LinearAlgebra/MatMul/MatmulCPU.cpp
+            Math/Elementwise/ElementwiseHIP.cpp
             Math/LinearAlgebra/MatMul/MatmulHIP.cpp
             Math/Optimization/SgdUpdate/SgdUpdateCPU.cpp
             Math/Optimization/SgdUpdate/SgdUpdateHIP.cpp
@@ -369,6 +393,10 @@ if(USE_HIP)
             Math/Reductions/Sum/SumHIP.cpp
             Math/Reductions/Argmax/ArgmaxCPU.cpp
             Math/Reductions/Argmax/ArgmaxHIP.cpp
+            Math/Reductions/Mean/MeanCPU.cpp
+            Math/Reductions/Mean/MeanHIP.cpp
+            Math/Compare/Equal/EqualCPU.cpp
+            Math/Compare/Equal/EqualHIP.cpp
             Math/Shape/Reshape.cpp
             Math/LinearAlgebra/BiasAdd/BiasAddCPU.cpp
             Math/LinearAlgebra/BiasAdd/BiasAddHIP.cpp
@@ -497,10 +525,12 @@ endif()
 if (USE_CUDA)
     set_source_files_properties(
             Tensor/Ops/TensorOps.cu
+            Math/Elementwise/ElementwiseCUDA.cu
             Math/LinearAlgebra/MatMul/MatmulCUDA.cu
             Math/Optimization/SgdUpdate/SgdUpdateCUDA.cu
             Math/Reductions/Sum/SumCUDA.cu
             Math/Reductions/Argmax/ArgmaxCUDA.cu
+            Math/Compare/Equal/EqualCUDA.cu
             Math/LinearAlgebra/BiasAdd/BiasAddCUDA.cu
             Math/Activations/Relu/ReluCUDA.cu
             Math/Activations/SoftmaxCE/SoftmaxCECUDA.cu
@@ -558,9 +588,7 @@ if(BUILD_TESTING)
     target_link_libraries(BeanTensorV5Tests PRIVATE BeanTensorV5Core)
     target_compile_options(BeanTensorV5Tests PRIVATE
             -O2
-            -mavx512f
-            -mavx512bf16
-            -mavx512dq
+            -mavx2
             -mf16c
     )
     add_test(NAME BeanTensorV5Tests COMMAND BeanTensorV5Tests)
@@ -578,9 +606,7 @@ if(BUILD_TESTING)
     target_link_libraries(BeanTensorV5MathTests PRIVATE BeanTensorV5Core)
     target_compile_options(BeanTensorV5MathTests PRIVATE
             -O2
-            -mavx512f
-            -mavx512bf16
-            -mavx512dq
+            -mavx2
             -mf16c
     )
     add_test(NAME BeanTensorV5MathTests COMMAND BeanTensorV5MathTests)
@@ -598,9 +624,7 @@ if(BUILD_TESTING)
     target_link_libraries(BeanTensorV5BasicMathTests PRIVATE BeanTensorV5Core)
     target_compile_options(BeanTensorV5BasicMathTests PRIVATE
             -O2
-            -mavx512f
-            -mavx512bf16
-            -mavx512dq
+            -mavx2
             -mf16c
     )
     add_test(NAME BeanTensorV5BasicMathTests COMMAND BeanTensorV5BasicMathTests)
@@ -618,9 +642,7 @@ if(BUILD_TESTING)
     target_link_libraries(BeanTensorV5ComplexMathTests PRIVATE BeanTensorV5Core)
     target_compile_options(BeanTensorV5ComplexMathTests PRIVATE
             -O2
-            -mavx512f
-            -mavx512bf16
-            -mavx512dq
+            -mavx2
             -mf16c
     )
     add_test(NAME BeanTensorV5ComplexMathTests COMMAND BeanTensorV5ComplexMathTests)
@@ -638,12 +660,46 @@ if(BUILD_TESTING)
     target_link_libraries(BeanTensorV5AutogradTests PRIVATE BeanTensorV5Core)
     target_compile_options(BeanTensorV5AutogradTests PRIVATE
             -O2
-            -mavx512f
-            -mavx512bf16
-            -mavx512dq
+            -mavx2
             -mf16c
     )
     add_test(NAME BeanTensorV5AutogradTests COMMAND BeanTensorV5AutogradTests)
+
+    add_executable(BeanTensorV5MetricsTests tests/metrics_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5MetricsTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5MetricsTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5MetricsTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5MetricsTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5MetricsTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5MetricsTests COMMAND BeanTensorV5MetricsTests)
+
+    add_executable(BeanTensorV5ElementwiseTests tests/elementwise_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5ElementwiseTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5ElementwiseTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5ElementwiseTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5ElementwiseTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5ElementwiseTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5ElementwiseTests COMMAND BeanTensorV5ElementwiseTests)
 endif()
 
 if(USE_HIP)

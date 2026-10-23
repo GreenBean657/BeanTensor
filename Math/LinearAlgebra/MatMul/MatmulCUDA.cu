@@ -126,23 +126,6 @@ namespace BeanTensor::Tensors::detail {
         }
 
         /**
-         * Truncate the int32 BLAS accumulators to int8 outputs. The cast is
-         * modular (C++20 narrowing), so this realizes the contract's
-         * "store: c = (T)acc" step exactly.
-         * @brief i32 -> i8 modular narrowing kernel.
-         * @param src int32 accumulators (numel elements, device).
-         * @param dst int8 output (numel elements, device).
-         * @param numel Total output elements across all batches.
-         */
-        __global__ void narrow_i32_to_i8_kernel(const int32_t* __restrict__ src, int8_t* __restrict__ dst, const size_t numel) {
-            const size_t tid = threadIdx.x + blockIdx.x * blockDim.x;
-            const size_t stride = blockDim.x * gridDim.x;
-            for (size_t e = tid; e < numel; e += stride) {
-                dst[e] = static_cast<int8_t>(src[e]);
-            }
-        }
-
-        /**
          * Tiled integer GEMM for the dtypes cuBLAS cannot do natively. Each
          * 16×16 block computes one C tile: A/B are staged through shared
          * memory in 16-wide k-chunks (out-of-range lanes zero-filled, which
@@ -332,46 +315,8 @@ namespace BeanTensor::Tensors::detail {
         }
 
         /**
-         * gemm_ex with 8-bit inputs and 32-bit output under 32-bit integer compute, into worker-local int32 scratch,
-         * then a narrowing kernel realizes the contract's mod-2^8 store. Same row-major-via-column-major aliasing as the float path.
-         * @brief Int8 strided-batched GEMM via cuBLAS i32 compute.
-         * @param a_data Row-major (batch x)m x k left operand (device).
-         * @param b_data Row-major (batch x)k x n right operand (device).
-         * @param c_data Row-major (batch x)m x n output (device).
-         * @param batch Batch count (1 for rank-2).
-         * @param m Rows of a/c.
-         * @param k Inner dimension.
-         * @param n Columns of b/c.
-         */
-        __host__ void launch_gemm_i8_cublas(const void* a_data, const void* b_data, void* c_data,
-                                   const size_t batch, const size_t m, const size_t k, const size_t n) {
-            const auto c_elems = batch * m * n;
-            int32_t* scratch = nullptr;
-            CUDA_CHECK_ERROR(cudaMalloc(&scratch, c_elems * sizeof(int32_t)));
-            constexpr int32_t alpha = 1;
-            constexpr int32_t beta = 0;
-            CUBLAS_CHECK_ERROR(cublasGemmStridedBatchedEx(get_cublas_handle(), CUBLAS_OP_N, CUBLAS_OP_N,
-                                                          static_cast<int32_t>(n), static_cast<int32_t>(m), static_cast<int32_t>(k), &alpha,
-                                                          b_data, CUDA_R_8I, static_cast<int32_t>(n), static_cast<int64_t>(k * n),
-                                                          a_data, CUDA_R_8I, static_cast<int32_t>(k), static_cast<int64_t>(m * k),
-                                                          &beta,
-                                                          scratch, CUDA_R_32I, static_cast<int32_t>(n), static_cast<int64_t>(m * n),
-                                                          static_cast<int32_t>(batch),
-                                                          CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT));
-            if (c_elems > 0) {
-                constexpr auto threads = size_t{256};
-                const auto grid = (c_elems + threads - 1) / threads;
-                narrow_i32_to_i8_kernel<<<grid, threads>>>(scratch, static_cast<int8_t*>(c_data), c_elems);
-            }
-            CUDA_CHECK_ERROR(cudaGetLastError());
-            // cudaFree implicitly synchronizes the device, so the GEMM/narrow
-            // chain above has finished before the scratch is released.
-            CUDA_CHECK_ERROR(cudaFree(scratch));
-        }
-
-        /**
          * Grid maps x -> column tiles, y -> row tiles, z -> batch. Empty products return without launching.
-         * @brief Fallback integer GEMM launcher (non-int8 dtypes).
+         * @brief Fallback integer GEMM launcher (all integer dtypes).
          * @param a_data Row-major (batch x)m x k left operand (device).
          * @param b_data Row-major (batch x)k x n right operand (device).
          * @param c_data Row-major (batch x)m x n output (device).
@@ -482,7 +427,11 @@ namespace BeanTensor::Tensors::detail {
         }
 
         /**
-         * Everything except Int8, which rides cuBLAS i32 compute.
+         * Every integer dtype rides the tiled fallback kernels: cuBLAS has no
+         * native signed-int8 path here — GemmStridedBatchedEx with CUDA_R_8I
+         * inputs under CUBLAS_COMPUTE_32I returns CUBLAS_STATUS_NOT_SUPPORTED
+         * on Ada (sm_89) — and the tiled kernel's wrapping uint32 accumulate
+         * is bit-identical to i32-compute-then-mod-2^8-narrow anyway.
          * @brief Dtype probe for the tiled integer fallback kernels.
          * @param dtype Dtype to probe.
          * @return T/F - the dtype is served by the tiled fallback kernels.
@@ -490,6 +439,7 @@ namespace BeanTensor::Tensors::detail {
         __host__ bool dtype_uses_int_fallback(const DataTypes::DType dtype) {
             using DType = DataTypes::DType;
             switch (dtype) {
+                case DType::Int8:
                 case DType::UInt8:
                 case DType::Int16:
                 case DType::UInt16:
@@ -505,8 +455,8 @@ namespace BeanTensor::Tensors::detail {
         }
 
         /**
-         * Floats ride cuBLAS directly, packed dtypes ride the lane-plane path, Int8 rides i32 compute plus narrowing,
-         * and the remaining integers use the tiled fallback kernel.
+         * Floats ride cuBLAS directly, packed dtypes ride the lane-plane path,
+         * and the integers use the tiled fallback kernel.
          * @brief Dtype support probe for the CUDA matmul path.
          * @param dtype Dtype to probe.
          * @return T/F - a CUDA matmul path exists for the dtype.
@@ -590,7 +540,7 @@ namespace BeanTensor::Tensors::detail {
                     break;
                 }
                 case DataTypes::DType::Int8: {
-                    launch_gemm_i8_cublas(a_data, b_data, c_data, batch, m, k, n);
+                    launch_gemm_int_fallback<int8_t>(a_data, b_data, c_data, batch, m, k, n);
                     break;
                 }
                 case DataTypes::DType::UInt8: {

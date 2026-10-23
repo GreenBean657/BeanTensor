@@ -888,7 +888,7 @@ static void run_gpu_int_case(const DType dtype, const size_t m, const size_t k, 
 }
 
 static void test_matmul_gpu_int() {
-    run_gpu_int_case<int8_t>(DType::Int8, 33, 65, 17, 61);   // BLAS i8->i32 + truncate
+    run_gpu_int_case<int8_t>(DType::Int8, 33, 65, 17, 61);   // fallback kernel
     run_gpu_int_case<uint8_t>(DType::UInt8, 33, 65, 17, 62); // fallback kernel
     run_gpu_int_case<int16_t>(DType::Int16, 33, 65, 17, 63);
     run_gpu_int_case<uint16_t>(DType::UInt16, 33, 65, 17, 64);

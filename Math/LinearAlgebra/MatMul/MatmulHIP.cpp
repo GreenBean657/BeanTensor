@@ -131,25 +131,7 @@ namespace BeanTensor::Tensors::detail {
         }
 
         /**
-         * rocBLAS i8 GEMM widens the output to int32, but matmul's contract is
-         * an int8 output, so the strided-batched result lands in scratch and
-         * this kernel narrows it. static_cast<int8_t> is modular (C++20), the
-         * same low-8-bits truncation the CPU integer kernels perform on store.
-         * @brief Narrow int32 GEMM accumulators to int8 (mod 2^8).
-         * @param src Int32 accumulators (numel elements, device).
-         * @param dst Int8 output (numel elements, device).
-         * @param numel Total elements across all batches.
-         */
-        __global__ void narrow_i32_to_i8_kernel(const int32_t* __restrict__ src, int8_t* __restrict__ dst, const size_t numel) {
-            const size_t tid = threadIdx.x + blockIdx.x * blockDim.x;
-            const size_t stride = blockDim.x * gridDim.x;
-            for (size_t e = tid; e < numel; e += stride) {
-                dst[e] = static_cast<int8_t>(src[e]);
-            }
-        }
-
-        /**
-         * Integer GEMM for the dtypes rocBLAS cannot do (everything but int8):
+         * Integer GEMM for the dtypes rocBLAS cannot do (all integer dtypes):
          * exact modular (two's-complement wrap) arithmetic. Each product is
          * formed in the widened unsigned twin of T (uint32_t for <=32-bit T,
          * uint64_t for 64-bit T) and accumulated with wrapping adds; the store
@@ -272,46 +254,8 @@ namespace BeanTensor::Tensors::detail {
         }
 
         /**
-         * gemm_ex with 8-bit inputs and 32-bit output under 32-bit integer compute, into worker-local int32 scratch,
-         * then a narrowing kernel realizes the contract's mod-2^8 store. Same row-major-via-column-major aliasing as the float path.
-         * @brief Int8 strided-batched GEMM via rocBLAS i32 compute.
-         * @param a_data Row-major (batch x)m x k left operand (device).
-         * @param b_data Row-major (batch x)k x n right operand (device).
-         * @param c_data Row-major (batch x)m x n output (device).
-         * @param batch Batch count (1 for rank-2).
-         * @param m Rows of a/c.
-         * @param k Inner dimension.
-         * @param n Columns of b/c.
-         */
-        __host__ void launch_gemm_i8_rocblas(const void* a_data, const void* b_data, void* c_data,
-                                    const size_t batch, const size_t m, const size_t k, const size_t n) {
-            const auto c_elems = batch * m * n;
-            if (c_elems == 0) {
-                return;
-            }
-            int32_t* scratch = nullptr;
-            HIP_CHECK_ERROR(hipMalloc(&scratch, c_elems * sizeof(int32_t)));
-            // compute_type i32 -> alpha/beta are int32 scalars.
-            constexpr int32_t alpha = 1;
-            constexpr int32_t beta = 0;
-            ROCBLAS_CHECK_ERROR(rocblas_gemm_strided_batched_ex(get_rocblas_handle(), rocblas_operation_none, rocblas_operation_none,
-                                                                static_cast<int32_t>(n), static_cast<int32_t>(m), static_cast<int32_t>(k), &alpha,
-                                                                b_data, rocblas_datatype_i8_r, static_cast<int32_t>(n), static_cast<int64_t>(k * n),
-                                                                a_data, rocblas_datatype_i8_r, static_cast<int32_t>(k), static_cast<int64_t>(m * k),
-                                                                &beta,
-                                                                scratch, rocblas_datatype_i32_r, static_cast<int32_t>(n), static_cast<int64_t>(m * n),
-                                                                scratch, rocblas_datatype_i32_r, static_cast<int32_t>(n), static_cast<int64_t>(m * n),
-                                                                static_cast<int32_t>(batch),
-                                                                rocblas_datatype_i32_r, rocblas_gemm_algo_standard, 0, 0));
-            constexpr size_t threads = 256;
-            narrow_i32_to_i8_kernel<<<(c_elems + threads - 1) / threads, threads>>>(scratch, static_cast<int8_t*>(c_data), c_elems);
-            HIP_CHECK_ERROR(hipGetLastError());
-            HIP_CHECK_ERROR(hipFree(scratch));
-        }
-
-        /**
          * Grid maps x -> column tiles, y -> row tiles, z -> batch. Empty products return without launching.
-         * @brief Fallback integer GEMM launcher (non-int8 dtypes).
+         * @brief Fallback integer GEMM launcher (all integer dtypes).
          * @param a_data Row-major (batch x)m x k left operand (device).
          * @param b_data Row-major (batch x)k x n right operand (device).
          * @param c_data Row-major (batch x)m x n output (device).
@@ -490,8 +434,8 @@ namespace BeanTensor::Tensors::detail {
         }
 
         /**
-         * Floats ride rocBLAS directly, packed dtypes ride the lane-plane path, Int8 rides i32 compute plus narrowing,
-         * and the remaining integers use the tiled fallback kernel.
+         * Floats ride rocBLAS directly, packed dtypes ride the lane-plane path,
+         * and the integers use the tiled fallback kernel.
          * @brief Dtype support probe for the HIP matmul path.
          * @param dtype Dtype to probe.
          * @return T/F - a HIP matmul path exists for the dtype.
@@ -521,7 +465,10 @@ namespace BeanTensor::Tensors::detail {
         }
 
         /**
-         * Everything except Int8, which rides rocBLAS i32 compute.
+         * Every integer dtype rides the tiled fallback kernels, keeping the HIP
+         * backend a line-for-line twin of the CUDA one: the tiled kernel's
+         * wrapping uint32 accumulate is bit-identical to i32-compute-then-
+         * mod-2^8-narrow for every element.
          * @brief Dtype probe for the tiled integer fallback kernels.
          * @param dtype Dtype to probe.
          * @return T/F - the dtype is served by the tiled fallback kernels.
@@ -529,6 +476,7 @@ namespace BeanTensor::Tensors::detail {
         __host__ bool dtype_uses_int_fallback(const DataTypes::DType dtype) {
             using DType = DataTypes::DType;
             switch (dtype) {
+                case DType::Int8:
                 case DType::UInt8:
                 case DType::Int16:
                 case DType::UInt16:
@@ -599,7 +547,7 @@ namespace BeanTensor::Tensors::detail {
                     break;
                 }
                 case DataTypes::DType::Int8: {
-                    launch_gemm_i8_rocblas(a_data, b_data, c_data, batch, m, k, n);
+                    launch_gemm_int_fallback<int8_t>(a_data, b_data, c_data, batch, m, k, n);
                     break;
                 }
                 case DataTypes::DType::UInt8: {

@@ -61,7 +61,7 @@ namespace BeanTensor::Tensors::detail {
                     out[i] = dev_float_eq(static_cast<float64_t>(__bfloat162float(a[i])), static_cast<float64_t>(__bfloat162float(b[i]))) ? uint8_t{1} : uint8_t{0};
                 } else if constexpr (std::is_same_v<T, float16x2_t>) {
                     const auto lo = dev_float_eq(static_cast<float64_t>(__half2float(__low2half(a[i]))), static_cast<float64_t>(__half2float(__low2half(b[i]))));
-                    const auto hi = dev_float_eq(static_cast<float64_t>(__half2float(__high2half(a[i]))), static_cast<float64_t>(__high2half(b[i])));
+                    const auto hi = dev_float_eq(static_cast<float64_t>(__half2float(__high2half(a[i]))), static_cast<float64_t>(__half2float(__high2half(b[i]))));
                     out[i] = (lo && hi) ? uint8_t{1} : uint8_t{0};
                 } else if constexpr (std::is_same_v<T, bfloat16x2_t>) {
                     const auto lo = dev_float_eq(static_cast<float64_t>(__bfloat162float(__low2bfloat16(a[i]))), static_cast<float64_t>(__bfloat162float(__low2bfloat16(b[i]))));

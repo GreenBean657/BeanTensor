@@ -2,9 +2,9 @@
  * @file ElementwiseShared.h
  * @author GreenBean
  * @brief Host-side helpers shared across the elementwise backends: float-kind probe,
- * scalar narrowing into a tensor dtype (the PERMISSIVE convert contract), IEEE
- * equality without -Wfloat-equal, and broadcast offset decomposition. Reuses the
- * half/packed/int4 lane helpers and the threaded launcher from LinearAlgebraShared.h.
+ * scalar narrowing into a tensor dtype (the PERMISSIVE convert contract), and
+ * broadcast offset decomposition. Reuses the half/packed/int4 lane helpers and
+ * the threaded launcher from LinearAlgebraShared.h.
  * @version 0.1
  * @date 2026-10-22
  */
@@ -91,38 +91,6 @@ namespace BeanTensor::Tensors::detail::elementwise_shared {
                 return std::numeric_limits<T>::lowest();
             }
             return static_cast<T>(t);
-        }
-    }
-
-    /**
-     * Float compares use <= && >= instead of == so -Werror=float-equal stays
-     * happy while keeping IEEE semantics exactly: false when either side is NaN,
-     * true for -0/+0. Packed dtypes are equal iff BOTH lanes are equal; int4x2
-     * iff both nibbles are equal.
-     * @brief IEEE element equality for any dtype.
-     * @param a Left element.
-     * @param b Right element.
-     * @return True when a and b compare equal.
-     */
-    template<typename T>
-    [[nodiscard]] inline bool values_equal(const T& a, const T& b) {
-        if constexpr (std::is_same_v<T, float32_t> || std::is_same_v<T, float64_t>) {
-            return a <= b && a >= b;
-        } else if constexpr (std::is_same_v<T, float16_t> || std::is_same_v<T, bfloat16_t>) {
-            const auto wa = linearalgebra_shared::widen_lane(a);
-            const auto wb = linearalgebra_shared::widen_lane(b);
-            return wa <= wb && wa >= wb;
-        } else if constexpr (DataTypes::requires_unpack_v<T>) {
-            using H = linearalgebra_shared::packed_lane_t<T>;
-            const auto a_bits = Intrinsics::detail::bit_cast_memcpy<uint32_t>(a);
-            const auto b_bits = Intrinsics::detail::bit_cast_memcpy<uint32_t>(b);
-            return values_equal(linearalgebra_shared::lane_lo<H>(a_bits), linearalgebra_shared::lane_lo<H>(b_bits))
-                && values_equal(linearalgebra_shared::lane_hi<H>(a_bits), linearalgebra_shared::lane_hi<H>(b_bits));
-        } else if constexpr (std::is_same_v<T, int4x2_t>) {
-            return linearalgebra_shared::int4_lo(a) == linearalgebra_shared::int4_lo(b)
-                && linearalgebra_shared::int4_hi(a) == linearalgebra_shared::int4_hi(b);
-        } else {
-            return a == b;
         }
     }
 

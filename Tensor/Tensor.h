@@ -26,8 +26,11 @@
 #endif
 
 #include "Ops/TensorOps.h"
+#include "Math/Elementwise/Elementwise.h" // IWYU pragma: keep
 #include "Math/LinearAlgebra/LinearAlgebra.h" // IWYU pragma: keep
 #include "Math/Reductions/Reductions.h" // IWYU pragma: keep
+#include "Math/Reductions/Mean/Mean.h" // IWYU pragma: keep
+#include "Math/Compare/Compare.h" // IWYU pragma: keep
 #include "Math/Activations/Activations.h" // IWYU pragma: keep
 #include "Math/Optimization/Optimization.h" // IWYU pragma: keep
 #include "Math/Autograd/Autograd.h" // IWYU pragma: keep
@@ -217,6 +220,11 @@ namespace BeanTensor::Tensors {
          * conversions of different tensors overlap on the thread pool.
          * Packed dtypes (Float16x2/BFloat16x2) preserve numel/shape: unpacked->packed
          * duplicates the value into both lanes, packed->unpacked converts the first lane.
+         * Mask semantics: the UInt8 0/1 mask produced by equal() casts to float
+         * through the generic integer->float pathway, so false -> 0.0 and
+         * true -> 1.0 exactly (0 and 1 are representable in every float
+         * dtype, so no clamp error can occur); accuracy =
+         * equal(pred, labels).convert_dtype(Float32).mean() is therefore exact.
          * @param new_dtype New DType of this tensor.
          * @param method Clamp tolerance for unsafe conversions.
          * @throws std::range_error At sync(): values clamped/invalid under a non-PERMISSIVE method.
@@ -290,10 +298,11 @@ namespace BeanTensor::Tensors {
         [[nodiscard]] Tensor slice(const std::vector<std::pair<size_t, size_t>>&);
 
         /**
-         * Split into equal view chunks along an axis — the lazy inverse of
-         * cat: cat(split(axis, n), axis) reproduces this tensor. Each chunk
-         * is a slice view (leading-axis chunks are contiguous; inner-axis
-         * chunks are not). Synchronous and metadata-only, like slice.
+         * Split into equal view chunks along an axis. Each chunk is a slice
+         * view (leading-axis chunks are contiguous; inner-axis chunks are
+         * not, so they are rejected by cat and every other op requiring
+         * contiguous operands — only a leading-axis split feeds straight
+         * back into cat). Synchronous and metadata-only, like slice.
          * @brief Split into equal slice views along an axis.
          * @param axis Axis to split along.
          * @param sections Number of chunks; must be nonzero and divide shape[axis].
@@ -481,6 +490,26 @@ namespace BeanTensor::Tensors {
         [[nodiscard]] Tensor sum() const;
 
         /**
+         * Arithmetic mean of every element, reduced to a shape-{1} tensor of
+         * this tensor's dtype and device. Accumulation: fp32 in fp32, fp64 in
+         * fp64, fp16/bf16 widened to fp32 (RNE narrow on store), packed x2
+         * dtypes per-lane fp32, integers in fp64 and narrowed by
+         * truncate-toward-zero with clamping to the dtype range (a NaN mean
+         * stores 0, as there is no integer NaN; values past 2^53 in magnitude
+         * can lose low bits). Float reduction order is backend-defined, so
+         * float means are not guaranteed bit-identical between CPU/SIMD/GPU
+         * tiers. Blocks before returning (the merge happens on the caller
+         * thread). Mean consumes the UInt8 0/1 masks equal() produces
+         * directly, e.g. accuracy = equal(pred, labels) cast to Float32,
+         * then mean().
+         * @brief Full-tensor mean reduction.
+         * @return Shape-{1} tensor holding the mean.
+         * @throws ErrorHandling::IndexOutOfRange Tensor is empty.
+         * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
+         */
+        [[nodiscard]] Tensor mean() const;
+
+        /**
          * Flat index of the maximum element. PyTorch-compatible NaN rule: NaN
          * beats every non-NaN value, so the FIRST NaN's index is returned when
          * one is present; otherwise the first strict maximum wins ties.
@@ -509,6 +538,31 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
          */
         [[nodiscard]] Tensor argmax(const size_t axis) const;
+
+        /**
+         * Elementwise equality mask, out of place: out[i] = this[i] == other[i]
+         * ? 1 : 0, as a UInt8 tensor of this tensor's shape and device (DType
+         * has no Bool; UInt8 is the smallest dtype with full
+         * conversion/reduction support, so the mask feeds convert_dtype() and
+         * mean() directly). Float comparison follows IEEE == on widened fp64
+         * keys: NaN never equals anything (not even NaN), and -0.0 equals
+         * 0.0. Packed dtypes (Float16x2/BFloat16x2) widen both lanes and are
+         * equal only when both lanes are; Int4x2 compares raw bytes.
+         * Both operands must share shape, dtype and device and be contiguous.
+         * The compute is queued asynchronously — failures materialize at
+         * out.sync() — but the returned tensor is moved out, and the move
+         * drains pending work, so equal effectively blocks before returning
+         * (same as matmul()); a drained failure is re-queued on the result as
+         * a poisoned future and still surfaces at its next sync().
+         * @brief Elementwise equality mask (UInt8 0/1).
+         * @param other Right operand, same shape/dtype/device.
+         * @return UInt8 tensor, same shape/device as this.
+         * @throws ErrorHandling::MismatchedShapes Shapes differ.
+         * @throws ErrorHandling::MismatchedDTypes Dtypes differ.
+         * @throws ErrorHandling::MismatchedDevices Devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand.
+         */
+        [[nodiscard]] Tensor equal(const Tensor& other) const;
 
         /**
          * Add a rank-1 bias vector to every row of this tensor, out of place:
@@ -583,6 +637,173 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::IndexOutOfRange A target index is out of bounds (at sync()).
          */
         [[nodiscard]] Tensor softmax_ce(const Tensor&) const;
+
+        /**
+         * Broadcasting semantics (identical for add/sub/mul/div/pow): the two
+         * operand shapes are right-aligned and compared per dimension under
+         * NumPy rules — each dim pair must be equal or one of them must be 1;
+         * the output dim is the max. This covers the scalar case (a rank-1
+         * shape-{1} operand, or the float64_t scalar overloads), the
+         * same-shape case, and the per-row/bias cases ([1,n] against [m,n],
+         * [m,1] against [m,n], [1,1] against anything). A dim pair that is
+         * unequal with neither side 1 is not broadcastable and throws
+         * ErrorHandling::MismatchedShapes. A size-1 dim is materialized by
+         * re-reading that operand's single element (stride 0), never by a
+         * physical copy.
+         *
+         * Dtype/conversion rules: there is NO implicit dtype promotion —
+         * tensor-tensor ops require both operands to share this tensor's
+         * dtype (ErrorHandling::MismatchedDTypes otherwise) and produce an
+         * output of that same dtype. The scalar overloads take a float64_t
+         * scalar that is narrowed ONCE into this tensor's dtype under the
+         * PERMISSIVE convert contract (Math/Autograd/GradDType.h): floats
+         * round RNE (halfs through an fp32 intermediate), floats-to-ints
+         * truncate toward zero and clamp to the dtype range with NaN -> 0,
+         * packed dtypes duplicate the narrowed value into both lanes, and
+         * int4x2 clamps to [-8, 7] per nibble (both nibbles).
+         *
+         * Compute contract: fp32/fp64 compute in their storage width with a
+         * single rounding; fp16/bf16 (and the lanes of Float16x2/BFloat16x2)
+         * widen to fp32, compute, and narrow RNE through the same unaccel
+         * pathway as the conversion dispatcher (BF16 flush-to-zero on fp32
+         * subnormal inputs, fp16 overflow clamps to +/-65504, NaN/Inf per the
+         * ConversionClampMethod flag semantics); integer add/sub/mul wrap
+         * modularly through the unsigned twin (int4x2 wraps per nibble);
+         * integer div truncates toward zero with division by zero yielding 0
+         * and min/-1 yielding min (wrap) — never UB; float div is IEEE
+         * (x/0 -> +/-inf, 0/0 -> NaN). pow requires a float-kind dtype
+         * (integer pow throws ErrorHandling::NotImplemented) and is the
+         * backend libm's pow (std::pow on CPU, powf/pow on GPU).
+         *
+         * Async contract: the compute queues onto the thread pool and errors
+         * materialize at out.sync() — but the returned tensor is moved out,
+         * and the move drains pending work, so these ops effectively block
+         * before returning (same as bias_add()). A failure drained by that
+         * move is re-queued on the result as a poisoned future and still
+         * surfaces at its next sync().
+         * @brief Elementwise add with NumPy-style broadcasting.
+         * @param o Right operand, same dtype and device, contiguous.
+         * @return New tensor, the broadcast shape, this tensor's dtype.
+         * @throws ErrorHandling::MismatchedShapes Operands are not broadcast-compatible.
+         * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
+         * @throws ErrorHandling::MismatchedDevices Operand devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand.
+         */
+        [[nodiscard]] Tensor add(const Tensor&) const;
+        /**
+         * Tensor-scalar add: out[i] = this[i] + scalar, scalar narrowed into
+         * this tensor's dtype. Broadcasting/compute/async contracts: see the
+         * tensor-tensor add doc block above.
+         * @brief Elementwise add of a scalar.
+         * @param scalar Scalar operand (float64_t).
+         * @return New tensor, same shape/dtype/device as this.
+         */
+        [[nodiscard]] Tensor add(const float64_t&) const;
+        /**
+         * @brief Elementwise subtract with NumPy-style broadcasting.
+         * @param o Right operand (the subtrahend), same dtype and device, contiguous.
+         * @return New tensor, the broadcast shape, this tensor's dtype.
+         * @throws ErrorHandling::MismatchedShapes Operands are not broadcast-compatible.
+         * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
+         * @throws ErrorHandling::MismatchedDevices Operand devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand.
+         */
+        [[nodiscard]] Tensor sub(const Tensor&) const;
+        /**
+         * Tensor-scalar subtract: out[i] = this[i] - scalar, scalar narrowed
+         * into this tensor's dtype. Contracts: see the tensor-tensor add doc
+         * block above.
+         * @brief Elementwise subtract of a scalar.
+         * @param scalar Scalar operand (float64_t).
+         * @return New tensor, same shape/dtype/device as this.
+         */
+        [[nodiscard]] Tensor sub(const float64_t&) const;
+        /**
+         * @brief Elementwise multiply with NumPy-style broadcasting.
+         * @param o Right operand, same dtype and device, contiguous.
+         * @return New tensor, the broadcast shape, this tensor's dtype.
+         * @throws ErrorHandling::MismatchedShapes Operands are not broadcast-compatible.
+         * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
+         * @throws ErrorHandling::MismatchedDevices Operand devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand.
+         */
+        [[nodiscard]] Tensor mul(const Tensor&) const;
+        /**
+         * Tensor-scalar multiply: out[i] = this[i] * scalar, scalar narrowed
+         * into this tensor's dtype. Contracts: see the tensor-tensor add doc
+         * block above.
+         * @brief Elementwise multiply by a scalar.
+         * @param scalar Scalar operand (float64_t).
+         * @return New tensor, same shape/dtype/device as this.
+         */
+        [[nodiscard]] Tensor mul(const float64_t&) const;
+        /**
+         * Division edge semantics: float div is IEEE (x/0 -> +/-inf, 0/0 ->
+         * NaN); integer div truncates toward zero, division by zero yields 0,
+         * and min/-1 yields min (wrap) — never UB.
+         * @brief Elementwise divide with NumPy-style broadcasting.
+         * @param o Right operand (the divisor), same dtype and device, contiguous.
+         * @return New tensor, the broadcast shape, this tensor's dtype.
+         * @throws ErrorHandling::MismatchedShapes Operands are not broadcast-compatible.
+         * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
+         * @throws ErrorHandling::MismatchedDevices Operand devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand.
+         */
+        [[nodiscard]] Tensor div(const Tensor&) const;
+        /**
+         * Tensor-scalar divide: out[i] = this[i] / scalar, scalar narrowed
+         * into this tensor's dtype. Division edge semantics: see the
+         * tensor-tensor div doc block above.
+         * @brief Elementwise divide by a scalar.
+         * @param scalar Scalar operand (float64_t).
+         * @return New tensor, same shape/dtype/device as this.
+         */
+        [[nodiscard]] Tensor div(const float64_t&) const;
+        /**
+         * pow requires a float-kind dtype (Float16/BFloat16/Float16x2/
+         * BFloat16x2/Float32/Float64); integer pow throws
+         * ErrorHandling::NotImplemented. Float-kind bases/exponents compute
+         * per the widening contract: halfs widen to fp32, std::pow, narrow
+         * RNE. IEEE edge semantics come from the backend libm (e.g. negative
+         * base with non-integer exponent -> NaN, 0^0 -> 1).
+         * @brief Elementwise power with NumPy-style broadcasting.
+         * @param o Right operand (the exponent), same dtype and device, contiguous.
+         * @return New tensor, the broadcast shape, this tensor's dtype.
+         * @throws ErrorHandling::MismatchedShapes Operands are not broadcast-compatible.
+         * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
+         * @throws ErrorHandling::MismatchedDevices Operand devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand, or integer dtype.
+         */
+        [[nodiscard]] Tensor pow(const Tensor&) const;
+        /**
+         * Tensor-scalar power: out[i] = this[i]^scalar, scalar narrowed into
+         * this tensor's dtype; integer dtypes are rejected (same contract as
+         * the tensor-tensor pow).
+         * @brief Elementwise power with a scalar exponent.
+         * @param scalar Scalar exponent (float64_t).
+         * @return New tensor, same shape/dtype/device as this.
+         * @throws ErrorHandling::NotImplemented Integer dtype.
+         */
+        [[nodiscard]] Tensor pow(const float64_t&) const;
+        /**
+         * Float kinds only — integer exp throws ErrorHandling::NotImplemented.
+         * fp16/bf16 (and packed lanes) widen to fp32, std::exp, narrow RNE;
+         * fp32/fp64 exp in their storage width. Overflow yields +inf.
+         * @brief Elementwise exponential.
+         * @return New tensor, same shape/dtype/device as this.
+         * @throws ErrorHandling::NotImplemented Non-contiguous tensor, or integer dtype.
+         */
+        [[nodiscard]] Tensor exp() const;
+        /**
+         * Float kinds only — integer log throws ErrorHandling::NotImplemented.
+         * fp16/bf16 (and packed lanes) widen to fp32, std::log, narrow RNE;
+         * fp32/fp64 log in their storage width. IEEE edges come from the
+         * library: log(0) is -inf, log of a negative is NaN.
+         * @brief Elementwise natural logarithm.
+         * @return New tensor, same shape/dtype/device as this.
+         * @throws ErrorHandling::NotImplemented Non-contiguous tensor, or integer dtype.
+         */
+        [[nodiscard]] Tensor log() const;
 
         /**
          * Bounds-checked strided element access.
@@ -867,6 +1088,35 @@ namespace BeanTensor::Tensors {
         void accumulate_grad(Tensor&& delta);
 
         /**
+         * Shared implementation of the tensor-tensor arithmetic ops
+         * (add/sub/mul/div/pow); the public methods are thin wrappers. See
+         * Tensor::add for the full broadcasting/dtype/async contract.
+         * @brief Tensor-tensor elementwise op with broadcasting.
+         * @param o Right operand, same dtype and device.
+         * @param op Operation selector.
+         * @return New tensor with the broadcast shape and the input dtype.
+         */
+        [[nodiscard]] Tensor elementwise_binary(const Tensor&, ElementwiseOp) const;
+        /**
+         * Shared implementation of the tensor-scalar arithmetic ops; the
+         * public methods are thin wrappers. See Tensor::add for the full
+         * scalar-narrowing/async contract.
+         * @brief Tensor-scalar elementwise op.
+         * @param scalar Scalar operand (float64_t, narrowed into this tensor's dtype).
+         * @param op Operation selector.
+         * @return New tensor shaped like this.
+         */
+        [[nodiscard]] Tensor elementwise_scalar(const float64_t&, ElementwiseOp) const;
+        /**
+         * Shared implementation of the unary elementwise ops (exp/log); the
+         * public methods are thin wrappers. See Tensor::exp for the contract.
+         * @brief Unary elementwise op (exp/log).
+         * @param op Operation selector.
+         * @return New tensor shaped like this.
+         */
+        [[nodiscard]] Tensor elementwise_unary(ElementwiseUnaryOp) const;
+
+        /**
          * Attach a computation-graph node to this tensor (an op output).
          * No-op when no input requires gradients. Sets requires_grad,
          * is_leaf=false, parents/n_parents, and allocates the Node; _inputs
@@ -896,6 +1146,10 @@ namespace BeanTensor::Tensors {
         friend void detail::argmax_gpu(const Tensor&, uint64_t&);
         friend void detail::argmax_axis_cpu(const Tensor&, Tensor&, size_t);
         friend void detail::argmax_axis_gpu(const Tensor&, Tensor&, size_t);
+        friend void detail::mean_cpu(const Tensor&, Tensor&);
+        friend void detail::mean_gpu(const Tensor&, Tensor&);
+        friend void detail::equal_cpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::equal_gpu(const Tensor&, const Tensor&, Tensor&);
         friend void detail::bias_add_cpu(const Tensor&, const Tensor&, Tensor&);
         friend void detail::bias_add_gpu(const Tensor&, const Tensor&, Tensor&);
         friend void detail::relu_cpu(const Tensor&, const Tensor&);
@@ -922,6 +1176,12 @@ namespace BeanTensor::Tensors {
         friend void detail::gather_gpu(const Tensor&, const Tensor&, Tensor&, size_t);
         friend void detail::cat_cpu(const std::vector<Tensor>&, Tensor&, size_t);
         friend void detail::cat_gpu(const std::vector<Tensor>&, Tensor&, size_t);
+        friend void detail::elementwise_cpu(const Tensor&, const Tensor&, Tensor&, ElementwiseOp, const detail::ElementwiseBcast&);
+        friend void detail::elementwise_gpu(const Tensor&, const Tensor&, Tensor&, ElementwiseOp, const detail::ElementwiseBcast&);
+        friend void detail::elementwise_scalar_cpu(const Tensor&, const float64_t&, Tensor&, ElementwiseOp);
+        friend void detail::elementwise_scalar_gpu(const Tensor&, const float64_t&, Tensor&, ElementwiseOp);
+        friend void detail::elementwise_unary_cpu(const Tensor&, Tensor&, ElementwiseUnaryOp);
+        friend void detail::elementwise_unary_gpu(const Tensor&, Tensor&, ElementwiseUnaryOp);
         friend void Intrinsics::detail::launch_conv_cpu(Tensor& t, const DataTypes::DType& new_dtype, ConversionClampMethod method);
 
     };

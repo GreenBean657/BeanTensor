@@ -202,7 +202,7 @@ namespace BeanTensor::Tensors::detail {
         [[nodiscard]] uint64_t argmax_int_typed(const T* data, const size_t numel, const Tensor& t) {
             const auto threads = static_cast<size_t>(IncludedCPUFeatures().threads);
             std::vector<std::pair<T, uint64_t>> partials(threads, {T{0}, 0});
-            std::vector<char> has(threads, 0);
+            std::vector<uint8_t> has(threads, 0);
             drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) {
                 has[slot] = argmax_range_int<T>(data, b, e, partials[slot].first, partials[slot].second) ? 1 : 0;
             }, t));
