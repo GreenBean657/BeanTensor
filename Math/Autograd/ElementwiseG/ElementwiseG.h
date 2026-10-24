@@ -7,12 +7,11 @@
  * an out-shaped delta back over the broadcast dims of each operand.
  * The trampolines match Node::_backward_fn's signature; the trailing DType is
  * the calling backward()'s assigned grad dtype.
- * @version 0.1
+ * @version 0.2
  * @date 2026-10-23
  */
 #pragma once
 
-#include <bit>
 #include <cstddef>
 
 #include "Math/Elementwise/Elementwise.h"
@@ -20,69 +19,70 @@
 
 namespace BeanTensor::Tensors {
     class Tensor;
+    struct Node;
     namespace detail {
 
         /**
          * @brief Backward trampoline for tensor-tensor add.
          */
-        void add_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        void add_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         /**
          * @brief Backward trampoline for tensor-tensor sub.
          */
-        void sub_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        void sub_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         /**
          * @brief Backward trampoline for tensor-tensor mul.
          */
-        void mul_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        void mul_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         /**
          * @brief Backward trampoline for tensor-tensor div.
          */
-        void div_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        void div_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         /**
          * @brief Backward trampoline for tensor-tensor pow.
          */
-        void pow_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        void pow_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         /**
          * @brief Backward trampoline for tensor-scalar add.
          */
-        void add_scalar_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        void add_scalar_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         /**
          * @brief Backward trampoline for tensor-scalar sub.
          */
-        void sub_scalar_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        void sub_scalar_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         /**
          * @brief Backward trampoline for tensor-scalar mul.
          */
-        void mul_scalar_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        void mul_scalar_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         /**
          * @brief Backward trampoline for tensor-scalar div.
          */
-        void div_scalar_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        void div_scalar_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         /**
          * @brief Backward trampoline for tensor-scalar pow.
          */
-        void pow_scalar_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        void pow_scalar_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         /**
          * @brief Backward trampoline for unary exp.
          */
-        void exp_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        void exp_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         /**
          * @brief Backward trampoline for unary log.
          */
-        void log_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        void log_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
 
         /**
          * @brief Shared trampoline body for the tensor-tensor elementwise backward nodes (impl detail — friended by Tensor).
          */
-        void ew_binary_g_node_impl(Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseOp);
+        void ew_binary_g_node_impl(Node*, Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseOp);
         /**
          * @brief Shared trampoline body for the tensor-scalar elementwise backward nodes (impl detail — friended by Tensor).
          */
-        void ew_scalar_g_node_impl(Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseOp);
+        void ew_scalar_g_node_impl(Node*, Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseOp);
         /**
          * @brief Shared trampoline body for the unary elementwise backward nodes (impl detail — friended by Tensor).
          */
-        void ew_unary_g_node_impl(Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseUnaryOp);
+        void ew_unary_g_node_impl(Node*, Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseUnaryOp);
 
         /**
          * Deep copy of op in dst (boundary-cast under the single
@@ -151,38 +151,6 @@ namespace BeanTensor::Tensors {
          */
         void bcast_sum_to_gpu(const Tensor&, const Tensor&, Tensor&);
 
-        // --------------------------- tensor-scalar payload channel ---------------------------
-
-        /**
-         * The _backward_fn signature hands a trampoline the output grad and
-         * the input array — never the Node — so a tensor-scalar forward op
-         * has no field through which to persist its float64_t operand. The
-         * scalar is therefore bit-cast into Node::_inputs[1]: the slot is
-         * never dereferenced (it is not a Tensor), _n_inputs stays 1 so
-         * backward()'s graph walk never follows it, and it travels with the
-         * node through tensor moves. The *_scalar_g_node trampolines recover
-         * it with scalar_payload_value. (The proper channel would be a
-         * Node* parameter on _backward_fn, which is a cross-mission change.)
-         * @brief Encode a scalar operand as the (never-dereferenced) second input slot.
-         * @param v Scalar operand of a tensor-scalar forward op.
-         * @return The scalar's bit pattern as a Tensor*.
-         */
-        [[nodiscard]] inline Tensor* scalar_payload(const float64_t v) {
-            static_assert(sizeof(float64_t) == sizeof(Tensor*), "scalar payload requires double-width pointers");
-            return std::bit_cast<Tensor*>(v);
-        }
-
-        /**
-         * Inverse of scalar_payload: recovers the float64_t operand a
-         * tensor-scalar forward op stored in Node::_inputs[1].
-         * @brief Decode the scalar payload from the second input slot.
-         * @param p The stored payload (never dereferenced).
-         * @return The original scalar operand.
-         */
-        [[nodiscard]] inline float64_t scalar_payload_value(const Tensor* const p) {
-            static_assert(sizeof(float64_t) == sizeof(Tensor*), "scalar payload requires double-width pointers");
-            return std::bit_cast<float64_t>(static_cast<const void*>(p));
-        }
     }
 }
 

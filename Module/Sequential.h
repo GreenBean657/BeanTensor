@@ -3,7 +3,7 @@
  * @author GreenBean
  * @brief Ordered container module: an append/insert/replace/remove registry
  * of named child modules whose forward chains outputs through in order.
- * @version 0.1
+ * @version 0.2
  * @date 2026-10-23
  */
 #pragma once
@@ -32,18 +32,18 @@ namespace BeanTensor::Modules {
         // registry's raw Tensor pointers (Adam keys on parameter addresses).
         Sequential(const Sequential&) = delete;
         Sequential& operator=(const Sequential&) = delete;
-        Sequential(Sequential&&) = default;
+        Sequential(Sequential&&)  noexcept = default;
         Sequential& operator=(Sequential&&) = default;
         ~Sequential() override = default;
 
         /**
          * Feed x through every child in registry order. An empty Sequential
          * has no layers to forward through and throws
-         * ErrorHandling::NotImplemented.
+         * ErrorHandling::EmptyModule.
          * @brief Chain outputs through all children.
          * @param x Input tensor.
          * @return The last child's output.
-         * @throws ErrorHandling::NotImplemented The registry is empty.
+         * @throws ErrorHandling::EmptyModule The registry is empty.
          */
         [[nodiscard]] Tensors::Tensor forward(const Tensors::Tensor& x) override;
 
@@ -59,7 +59,7 @@ namespace BeanTensor::Modules {
          * @param module_name Registry name; empty auto-names to the next index.
          * @param module The child module (adopted).
          * @return This container, for chaining.
-         * @throws ErrorHandling::IndexOutOfRange The name is already taken.
+         * @throws ErrorHandling::NameError The name is already taken.
          */
         Sequential& append(std::string module_name, std::unique_ptr<Module> module);
 
@@ -70,7 +70,8 @@ namespace BeanTensor::Modules {
          * @param module_name Registry name; empty auto-names to the next index.
          * @param module The child module (adopted).
          * @return This container, for chaining.
-         * @throws ErrorHandling::IndexOutOfRange pos out of range, or the name is already taken.
+         * @throws ErrorHandling::IndexOutOfRange pos out of range.
+         * @throws ErrorHandling::NameError The name is already taken.
          */
         Sequential& insert(size_t pos, std::string module_name, std::unique_ptr<Module> module);
 
@@ -105,6 +106,11 @@ namespace BeanTensor::Modules {
          * @return size() == 0.
          */
         [[nodiscard]] bool empty() const;
+        /**
+         * @brief Memory usage.
+         * @return The total memory usage of the registry.
+         */
+        [[nodiscard]] size_t bytes() const;
 
         /**
          * @brief Child at a registry position.
@@ -126,15 +132,15 @@ namespace BeanTensor::Modules {
          * @brief Child registered under a name.
          * @param module_name Registry name to look up.
          * @return The child module.
-         * @throws ErrorHandling::IndexOutOfRange No child holds that name.
+         * @throws ErrorHandling::NameError No child holds that name.
          */
-        [[nodiscard]] Module& at(const std::string& module_name);
+        [[nodiscard]] Module& at(const std::string& module_name) const;
 
         /**
          * @brief Position of the child registered under a name.
          * @param module_name Registry name to look up.
          * @return The child's registry position.
-         * @throws ErrorHandling::IndexOutOfRange No child holds that name.
+         * @throws ErrorHandling::NameError No child holds that name.
          */
         [[nodiscard]] size_t index_of(const std::string& module_name) const;
 

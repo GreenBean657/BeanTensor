@@ -3,8 +3,8 @@
  * @author GreenBean
  * @brief CPU backend for relu backward (relu_g), plus the relu backward
  * trampoline (relu_g_node).
- * @version 0.1
- * @date 2026-10-20
+ * @version 0.2
+ * @date 2026-10-23
  */
 #include <type_traits>
 #include <vector>
@@ -344,7 +344,7 @@ namespace BeanTensor::Tensors::detail {
      * @param grad_dtype The calling backward()'s assigned gradient dtype.
      * @throws ErrorHandling::UnReachableCode if n_inputs is not 1 or the device is neither CPU nor GPU.
      */
-    void relu_g_node(const Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+    void relu_g_node(Node*, const Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
         if (n_inputs != 1) [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }

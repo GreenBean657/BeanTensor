@@ -18,7 +18,7 @@
  * register, masked tails like the binary bodies) and the per-nibble Int4x2
  * wrap kernels (unsigned-nibble byte-lane arithmetic masked to 4 bits
  * reproduces the scalar signed wrap bit-for-bit).
- * @version 0.2
+ * @version 0.3
  * @date 2026-10-23
  */
 #include <immintrin.h>
@@ -38,36 +38,65 @@ namespace BeanTensor::Math::Elementwise {
         // --------------------------- vector op selectors ---------------------------
 
         /**
-         * Compile-time map from the elementwise op selector to the fp32 vector instruction.
+         * Applies the fp_binop NaN contract to a computed lane vector: where x is NaN
+         * the quieted x wins, otherwise where y is NaN the quieted y wins. Mask selects,
+         * so the choice never depends on how the compiler orders the instruction's
+         * operands. Non-NaN lanes keep r.
+         * @brief fp32 NaN-contract select.
+         */
+        [[nodiscard]] __m512 f32_nan_select(const __m512 x, const __m512 y, const __m512 r) {
+            const auto quiet = _mm512_castsi512_ps(_mm512_set1_epi32(0x00400000));
+            const auto x_nan = _mm512_cmp_ps_mask(x, x, _CMP_UNORD_Q);
+            const auto y_nan = _mm512_cmp_ps_mask(y, y, _CMP_UNORD_Q);
+            const auto pick = _mm512_mask_blend_ps(x_nan, _mm512_or_ps(y, quiet), _mm512_or_ps(x, quiet));
+            return _mm512_mask_blend_ps(static_cast<__mmask16>(x_nan | y_nan), r, pick);
+        }
+
+        /**
+         * fp64 twin of f32_nan_select (quiet bit 51).
+         * @brief fp64 NaN-contract select.
+         */
+        [[nodiscard]] __m512d f64_nan_select(const __m512d x, const __m512d y, const __m512d r) {
+            const auto quiet = _mm512_castsi512_pd(_mm512_set1_epi64(static_cast<int64_t>(uint64_t{1} << 51)));
+            const auto x_nan = _mm512_cmp_pd_mask(x, x, _CMP_UNORD_Q);
+            const auto y_nan = _mm512_cmp_pd_mask(y, y, _CMP_UNORD_Q);
+            const auto pick = _mm512_mask_blend_pd(x_nan, _mm512_or_pd(y, quiet), _mm512_or_pd(x, quiet));
+            return _mm512_mask_blend_pd(static_cast<__mmask8>(x_nan | y_nan), r, pick);
+        }
+
+        /**
+         * Compile-time map from the elementwise op selector to the fp32 vector instruction,
+         * under the fp_binop NaN contract.
          * @brief fp32 vector op.
          */
         template<ElementwiseOp Op>
         [[nodiscard]] __m512 f32_vec_op(const __m512 x, const __m512 y) {
             if constexpr (Op == ElementwiseOp::Add) {
-                return _mm512_add_ps(x, y);
+                return f32_nan_select(x, y, _mm512_add_ps(x, y));
             } else if constexpr (Op == ElementwiseOp::Sub) {
-                return _mm512_sub_ps(x, y);
+                return f32_nan_select(x, y, _mm512_sub_ps(x, y));
             } else if constexpr (Op == ElementwiseOp::Mul) {
-                return _mm512_mul_ps(x, y);
+                return f32_nan_select(x, y, _mm512_mul_ps(x, y));
             } else {
-                return _mm512_div_ps(x, y);
+                return f32_nan_select(x, y, _mm512_div_ps(x, y));
             }
         }
 
         /**
-         * Compile-time map from the elementwise op selector to the fp64 vector instruction.
+         * Compile-time map from the elementwise op selector to the fp64 vector instruction,
+         * under the fp_binop NaN contract.
          * @brief fp64 vector op.
          */
         template<ElementwiseOp Op>
         [[nodiscard]] __m512d f64_vec_op(const __m512d x, const __m512d y) {
             if constexpr (Op == ElementwiseOp::Add) {
-                return _mm512_add_pd(x, y);
+                return f64_nan_select(x, y, _mm512_add_pd(x, y));
             } else if constexpr (Op == ElementwiseOp::Sub) {
-                return _mm512_sub_pd(x, y);
+                return f64_nan_select(x, y, _mm512_sub_pd(x, y));
             } else if constexpr (Op == ElementwiseOp::Mul) {
-                return _mm512_mul_pd(x, y);
+                return f64_nan_select(x, y, _mm512_mul_pd(x, y));
             } else {
-                return _mm512_div_pd(x, y);
+                return f64_nan_select(x, y, _mm512_div_pd(x, y));
             }
         }
 
@@ -198,16 +227,7 @@ namespace BeanTensor::Math::Elementwise {
                 Intrinsics::detail::bit_cast_memcpy<float16_t>(x));
             const auto wy = Intrinsics::detail::unaccel_fp16_to_fp32_untracked(
                 Intrinsics::detail::bit_cast_memcpy<float16_t>(y));
-            float32_t w;
-            if constexpr (Op == ElementwiseOp::Add) {
-                w = wx + wy;
-            } else if constexpr (Op == ElementwiseOp::Sub) {
-                w = wx - wy;
-            } else if constexpr (Op == ElementwiseOp::Mul) {
-                w = wx * wy;
-            } else {
-                w = wx / wy;
-            }
+            const auto w = Math::Elementwise::fp_binop<float32_t, Op>(wx, wy);
             return Intrinsics::detail::bit_cast_memcpy<uint16_t>(
                 Intrinsics::detail::unaccel_fp32_to_fp16_untracked(w));
         }
@@ -222,16 +242,7 @@ namespace BeanTensor::Math::Elementwise {
                 Intrinsics::detail::bit_cast_memcpy<bfloat16_t>(x));
             const auto wy = Intrinsics::detail::unaccel_bf16_to_fp32(
                 Intrinsics::detail::bit_cast_memcpy<bfloat16_t>(y));
-            float32_t w;
-            if constexpr (Op == ElementwiseOp::Add) {
-                w = wx + wy;
-            } else if constexpr (Op == ElementwiseOp::Sub) {
-                w = wx - wy;
-            } else if constexpr (Op == ElementwiseOp::Mul) {
-                w = wx * wy;
-            } else {
-                w = wx / wy;
-            }
+            const auto w = Math::Elementwise::fp_binop<float32_t, Op>(wx, wy);
             return Intrinsics::detail::bit_cast_memcpy<uint16_t>(
                 Intrinsics::detail::unaccel_fp32_to_bf16_untracked(w));
         }

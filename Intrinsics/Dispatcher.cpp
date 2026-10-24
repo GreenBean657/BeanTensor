@@ -2,8 +2,8 @@
  * @file Dispatcher.cpp
  * @author GreenBean
  * @brief CPU dtype conversion dispatcher definitions.
- * @version 0.1
- * @date 2026-10-18
+ * @version 0.2
+ * @date 2026-10-23
  */
 #include "Dispatcher.h"
 
@@ -43,12 +43,12 @@ namespace BeanTensor::Intrinsics::detail {
         auto flag = std::make_shared<std::atomic<bool>>(false);
 
         // Runtime-gated AVX512 fast paths.
-        // has_feature() combines the compile-time macro with __builtin_cpu_supports.
-        const bool avx512_bf16 = IncludedCPUFeatures().has_feature(CPUFeatureSetType_AVX512BF16);
-        const bool avx512_f = IncludedCPUFeatures().has_feature(CPUFeatureSetType_AVX512F);
-        const auto avx512_dq = IncludedCPUFeatures().has_feature(CPUFeatureSetType_AVX512DQ);
-        const auto avx2 = IncludedCPUFeatures().has_feature(CPUFeatureSetType_AVX2);
-        const auto avx2_f16c = avx2 && IncludedCPUFeatures().has_feature(CPUFeatureSetType_F16C);
+        // dispatch_has_feature() lives in DispatchFeatures.cpp, which carries the ISA flags this file must not.
+        const bool avx512_bf16 = dispatch_has_feature(CPUFeatureSetType_AVX512BF16);
+        const bool avx512_f = dispatch_has_feature(CPUFeatureSetType_AVX512F);
+        const auto avx512_dq = dispatch_has_feature(CPUFeatureSetType_AVX512DQ);
+        const auto avx2 = dispatch_has_feature(CPUFeatureSetType_AVX2);
+        const auto avx2_f16c = avx2 && dispatch_has_feature(CPUFeatureSetType_F16C);
         if (avx512_bf16 && t.dtype == DType::Float32 && new_dtype == DType::BFloat16) {
             auto f = avx512_fp32_to_bf16(static_cast<const float32_t*>(t.data),
                                          static_cast<bfloat16_t*>(t.convert_buffer), t.numel, *flag, method);

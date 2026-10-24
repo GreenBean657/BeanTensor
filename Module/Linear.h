@@ -30,7 +30,7 @@ namespace BeanTensor::Modules {
      * convention, built on Tensor::random.
      * @brief Fully connected layer (matmul + bias_add).
      */
-    class Linear : public Module {
+    class Linear final : public Module {
     public:
         /**
          * Construct and register the parameters, then initialize them.
@@ -67,17 +67,17 @@ namespace BeanTensor::Modules {
          * @brief Input feature count.
          * @return in_features.
          */
-        [[nodiscard]] size_t in_features() const;
+        [[nodiscard]] size_t in_features() const noexcept;
         /**
          * @brief Output feature count.
          * @return out_features.
          */
-        [[nodiscard]] size_t out_features() const;
+        [[nodiscard]] size_t out_features() const noexcept;
         /**
          * @brief Whether the layer carries a bias parameter.
          * @return has_bias.
          */
-        [[nodiscard]] bool has_bias() const;
+        [[nodiscard]] bool has_bias() const noexcept;
 
     private:
         size_t in_features_;

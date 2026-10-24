@@ -995,6 +995,7 @@ static void test_ew_binary_gradients(Device);
 static void test_ew_one_side(Device);
 static void test_ew_broadcast_reduce(Device);
 static void test_ew_scalar_gradients(Device);
+static void test_ew_scalar_chain_gradients(Device);
 static void test_ew_exp_log_gradients(Device);
 static void test_ew_accumulation(Device);
 
@@ -1016,6 +1017,7 @@ static void run_device_suite(const Device dev) {
     test_ew_one_side(dev);
     test_ew_broadcast_reduce(dev);
     test_ew_scalar_gradients(dev);
+    test_ew_scalar_chain_gradients(dev);
     test_ew_exp_log_gradients(dev);
     test_ew_accumulation(dev);
 }
@@ -1509,6 +1511,74 @@ static void test_ew_broadcast_reduce(const Device dev) {
         }
         CHECK(bad == 0);
     }
+    // Div broadcast reduction (dy = 2 via the .mul(c) root):
+    // da = sum over broadcast dims of dy/b, db = sum over broadcast dims of -dy*a/b^2.
+    const auto run_div_broadcast = [&]<typename T>(const DType dt, const float64_t eps) {
+        {
+            // {2,3} / {3}: right operand broadcast, db[j] sums over rows.
+            Tensor a({2, 3}, dt, dev, true);
+            Tensor b({3}, dt, dev, true);
+            Tensor c({2, 3}, dt, dev, false);
+            for (auto i = size_t{0}; i < 6; ++i) {
+                a.set<T>({i / 3, i % 3}, static_cast<T>(1 + i));
+                c.set<T>({i / 3, i % 3}, static_cast<T>(2.0));
+            }
+            b.set<T>({0}, static_cast<T>(2.0));
+            b.set<T>({1}, static_cast<T>(3.0));
+            b.set<T>({2}, static_cast<T>(4.0));
+            auto p = a.div(b);
+            auto root = p.mul(c);
+            root.backward(dt);
+            const auto want_da = std::vector{1.0, 2.0 / 3.0, 0.5}; // 2 / b[j]
+            const auto want_db = std::vector{-2.5, -14.0 / 9.0, -1.125}; // -2 * sum_i a[i,j] / b[j]^2
+            auto bad = size_t{0};
+            for (auto j = size_t{0}; j < 3; ++j) {
+                if (!near64(b.gradient().at<T>({j}), want_db[j], eps)) {
+                    ++bad;
+                }
+                for (auto i = size_t{0}; i < 2; ++i) {
+                    if (!near64(a.gradient().at<T>({i, j}), want_da[j], eps)) {
+                        ++bad;
+                    }
+                }
+            }
+            CHECK(bad == 0);
+        }
+        {
+            // {3} / {2,3}: left operand broadcast, da[j] sums over rows.
+            Tensor a({3}, dt, dev, true);
+            Tensor b({2, 3}, dt, dev, true);
+            Tensor c({2, 3}, dt, dev, false);
+            a.set<T>({0}, static_cast<T>(2.0));
+            a.set<T>({1}, static_cast<T>(3.0));
+            a.set<T>({2}, static_cast<T>(4.0));
+            for (auto i = size_t{0}; i < 6; ++i) {
+                b.set<T>({i / 3, i % 3}, static_cast<T>(1 + i));
+                c.set<T>({i / 3, i % 3}, static_cast<T>(2.0));
+            }
+            auto p = a.div(b);
+            auto root = p.mul(c);
+            root.backward(dt);
+            const auto want_da = std::vector{2.5, 1.4, 1.0}; // sum_i 2 / b[i,j]
+            const auto want_db = std::vector{-4.0, -1.5, -8.0 / 9.0, -0.25, -0.24, -2.0 / 9.0}; // -2 * a[j] / b[i,j]^2
+            auto bad = size_t{0};
+            for (auto i = size_t{0}; i < 2; ++i) {
+                for (auto j = size_t{0}; j < 3; ++j) {
+                    if (!near64(b.gradient().at<T>({i, j}), want_db[i * 3 + j], eps)) {
+                        ++bad;
+                    }
+                }
+            }
+            for (auto j = size_t{0}; j < 3; ++j) {
+                if (!near64(a.gradient().at<T>({j}), want_da[j], eps)) {
+                    ++bad;
+                }
+            }
+            CHECK(bad == 0);
+        }
+    };
+    run_div_broadcast.operator()<float64_t>(DType::Float64, 1e-12);
+    run_div_broadcast.operator()<float32_t>(DType::Float32, 1e-5);
 }
 
 static void test_ew_scalar_gradients(const Device dev) {
@@ -1545,6 +1615,36 @@ static void test_ew_scalar_gradients(const Device dev) {
     run(ElementwiseOp::Mul, 3.0, std::vector{6.0, 6.0, 6.0});            // dx = dy*s
     run(ElementwiseOp::Div, 2.0, std::vector{1.0, 1.0, 1.0});            // dx = dy/s
     run(ElementwiseOp::Pow, 2.0, std::vector{4.0, 8.0, 16.0});           // dx = dy*s*x^(s-1)
+}
+
+static void test_ew_scalar_chain_gradients(const Device dev) {
+    // Two tensor-scalar nodes in one graph: each backward must read its own
+    // stored scalar, so a lost or swapped scalar changes the result.
+    // mul chain: dx = (-4) * 2.5 = -10.  div chain: dx = (1 / 4) * (1 / -0.5) = -0.5.
+    {
+        Tensor x({3}, DType::Float64, dev, true);
+        for (auto i = size_t{0}; i < 3; ++i) {
+            x.set<float64_t>({i}, 1.0 + static_cast<float64_t>(i));
+        }
+        auto y = x.mul(2.5);
+        auto z = y.mul(-4.0);
+        z.backward(DType::Float64);
+        for (auto i = size_t{0}; i < 3; ++i) {
+            CHECK(near64(x.gradient().at<float64_t>({i}), -10.0, 1e-12));
+        }
+    }
+    {
+        Tensor x({3}, DType::Float64, dev, true);
+        for (auto i = size_t{0}; i < 3; ++i) {
+            x.set<float64_t>({i}, 1.0 + static_cast<float64_t>(i));
+        }
+        auto y = x.div(-0.5);
+        auto z = y.div(4.0);
+        z.backward(DType::Float64);
+        for (auto i = size_t{0}; i < 3; ++i) {
+            CHECK(near64(x.gradient().at<float64_t>({i}), -0.5, 1e-12));
+        }
+    }
 }
 
 static void test_ew_exp_log_gradients(const Device dev) {

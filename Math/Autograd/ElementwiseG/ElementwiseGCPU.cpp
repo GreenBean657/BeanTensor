@@ -10,7 +10,7 @@
  * hand it to ew_deliver_delta, which sum-reduces it over the operand's
  * broadcast dims (bcast_sum_to) and boundary-casts it into grad_dtype per the
  * single conversion rule (GradDType.h).
- * @version 0.1
+ * @version 0.2
  * @date 2026-10-23
  */
 #include <optional>
@@ -446,7 +446,7 @@ namespace BeanTensor::Tensors::detail {
      * @param op Operation selector (Add/Sub/Mul/Div/Pow).
      * @throws ErrorHandling::UnReachableCode if n_inputs is not 2.
      */
-    void ew_binary_g_node_impl(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype, const ElementwiseOp op) {
+    void ew_binary_g_node_impl(Node*, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype, const ElementwiseOp op) {
         if (n_inputs != 2) [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
@@ -472,16 +472,18 @@ namespace BeanTensor::Tensors::detail {
         // An operand that requires grad must be copied (graph-clean) before
         // it feeds the composed products — borrowing it would wire throwaway
         // nodes onto them. An operand that does not require grad cannot wire
-        // anything and is borrowed as-is.
+        // anything, but it still has to be in the compute dtype: the composed
+        // products are dtype-strict, so a borrowed operand whose dtype differs
+        // from the assigned grad dtype would throw MismatchedDTypes.
         auto a_copy = std::optional<Tensor>{};
         auto b_copy = std::optional<Tensor>{};
         const Tensor* ag = &a;
         const Tensor* bg = &b;
-        if (uses_operands && a.requires_grad) {
+        if (uses_operands && (a.requires_grad || a.dtype != work)) {
             a_copy = ew_operand_copy(a, work);
             ag = &*a_copy;
         }
-        if (uses_operands && b.requires_grad) {
+        if (uses_operands && (b.requires_grad || b.dtype != work)) {
             b_copy = ew_operand_copy(b, work);
             bg = &*b_copy;
         }
@@ -496,19 +498,20 @@ namespace BeanTensor::Tensors::detail {
     }
 
     /**
-     * inputs are (a) with the forward scalar bit-cast into inputs[1]
-     * (scalar_payload — never dereferenced, never walked). The tensor-scalar
-     * ops preserve the operand shape, so the composed delta is accumulated
-     * directly after the same compute-dtype selection as the binary path.
+     * inputs are (a); the forward scalar is read from the owning node's
+     * _scalar. The tensor-scalar ops preserve the operand shape, so the
+     * composed delta is accumulated directly after the same compute-dtype
+     * selection as the binary path.
      * @brief Shared trampoline body for the tensor-scalar elementwise backward nodes.
+     * @param node Owning node; supplies the tensor-scalar operand in node->_scalar.
      * @param output_grad Gradient of this node's output tensor, in grad_dtype.
-     * @param inputs Input slot 0 is the operand; slot 1 carries the scalar payload.
+     * @param inputs Input slot 0 is the operand.
      * @param n_inputs Number of walked entries in inputs (always 1 here).
      * @param grad_dtype The calling backward()'s assigned gradient dtype.
      * @param op Operation selector (Add/Sub/Mul/Div/Pow).
      * @throws ErrorHandling::UnReachableCode if n_inputs is not 1.
      */
-    void ew_scalar_g_node_impl(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype, const ElementwiseOp op) {
+    void ew_scalar_g_node_impl(Node* node, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype, const ElementwiseOp op) {
         if (n_inputs != 1) [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
@@ -516,7 +519,7 @@ namespace BeanTensor::Tensors::detail {
         if (!a.requires_grad) {
             return;
         }
-        const auto s = scalar_payload_value(inputs[1]);
+        const auto s = node->_scalar;
         output_grad->sync();
         const auto work = op == ElementwiseOp::Pow && !is_float_kind(grad_dtype)
             ? DataTypes::DType::Float32
@@ -556,7 +559,7 @@ namespace BeanTensor::Tensors::detail {
      * @param op Operation selector (Exp/Log).
      * @throws ErrorHandling::UnReachableCode if n_inputs is not 1.
      */
-    void ew_unary_g_node_impl(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype, const ElementwiseUnaryOp op) {
+    void ew_unary_g_node_impl(Node*, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype, const ElementwiseUnaryOp op) {
         if (n_inputs != 1) [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
@@ -588,52 +591,52 @@ namespace BeanTensor::Tensors::detail {
         ew_deliver_delta(std::move(dx), x, grad_dtype, grad_dtype);
     }
 
-    void add_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
-        ew_binary_g_node_impl(output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Add);
+    void add_g_node(Node* node, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+        ew_binary_g_node_impl(node, output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Add);
     }
 
-    void sub_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
-        ew_binary_g_node_impl(output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Sub);
+    void sub_g_node(Node* node, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+        ew_binary_g_node_impl(node, output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Sub);
     }
 
-    void mul_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
-        ew_binary_g_node_impl(output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Mul);
+    void mul_g_node(Node* node, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+        ew_binary_g_node_impl(node, output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Mul);
     }
 
-    void div_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
-        ew_binary_g_node_impl(output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Div);
+    void div_g_node(Node* node, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+        ew_binary_g_node_impl(node, output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Div);
     }
 
-    void pow_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
-        ew_binary_g_node_impl(output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Pow);
+    void pow_g_node(Node* node, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+        ew_binary_g_node_impl(node, output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Pow);
     }
 
-    void add_scalar_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
-        ew_scalar_g_node_impl(output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Add);
+    void add_scalar_g_node(Node* node, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+        ew_scalar_g_node_impl(node, output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Add);
     }
 
-    void sub_scalar_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
-        ew_scalar_g_node_impl(output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Sub);
+    void sub_scalar_g_node(Node* node, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+        ew_scalar_g_node_impl(node, output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Sub);
     }
 
-    void mul_scalar_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
-        ew_scalar_g_node_impl(output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Mul);
+    void mul_scalar_g_node(Node* node, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+        ew_scalar_g_node_impl(node, output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Mul);
     }
 
-    void div_scalar_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
-        ew_scalar_g_node_impl(output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Div);
+    void div_scalar_g_node(Node* node, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+        ew_scalar_g_node_impl(node, output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Div);
     }
 
-    void pow_scalar_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
-        ew_scalar_g_node_impl(output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Pow);
+    void pow_scalar_g_node(Node* node, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+        ew_scalar_g_node_impl(node, output_grad, inputs, n_inputs, grad_dtype, ElementwiseOp::Pow);
     }
 
-    void exp_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
-        ew_unary_g_node_impl(output_grad, inputs, n_inputs, grad_dtype, ElementwiseUnaryOp::Exp);
+    void exp_g_node(Node* node, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+        ew_unary_g_node_impl(node, output_grad, inputs, n_inputs, grad_dtype, ElementwiseUnaryOp::Exp);
     }
 
-    void log_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
-        ew_unary_g_node_impl(output_grad, inputs, n_inputs, grad_dtype, ElementwiseUnaryOp::Log);
+    void log_g_node(Node* node, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+        ew_unary_g_node_impl(node, output_grad, inputs, n_inputs, grad_dtype, ElementwiseUnaryOp::Log);
     }
 }
 

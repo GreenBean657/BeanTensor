@@ -4,8 +4,8 @@
  * @brief Backward trampoline for matmul (gemm_g_node). No dedicated backend:
  * dA = dOut * B^T and dB = A^T * dOut reuse the existing matmul path, with
  * the transposes materialized by transpose_last2_cpu/gpu.
- * @version 0.1
- * @date 2026-10-20
+ * @version 0.2
+ * @date 2026-10-23
  */
 #include <algorithm>
 #include <vector>
@@ -32,7 +32,7 @@ namespace BeanTensor::Tensors::detail {
      * @param grad_dtype The calling backward()'s assigned gradient dtype.
      * @throws ErrorHandling::UnReachableCode if n_inputs is not 2 or the device is neither CPU nor GPU.
      */
-    void gemm_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+    void gemm_g_node(Node*, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
         if (n_inputs != 2) [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }

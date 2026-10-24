@@ -9,8 +9,9 @@
  * conveniences over the whole tree, and a human-readable std::ostream tree
  * printer (terminal only — serialization to .bt files comes later). Also
  * declares mse_loss, the module-facing entry point to the MSE loss
- * (Math/Loss/Loss.h) for forward/backward training loops.
- * @version 0.1
+ * (Math/Loss/Loss.h), and softmax_cross_entropy, the module-facing entry
+ * point to Tensor::softmax_ce, for forward/backward training loops.
+ * @version 0.3.4
  * @date 2026-10-23
  */
 #pragma once
@@ -19,6 +20,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <string>
 #include <utility>
@@ -56,7 +58,26 @@ namespace BeanTensor::Modules {
      */
     class Module {
     public:
-        virtual ~Module() = default;
+        Module() = default;
+        /**
+         * The optimizer keys Adam state by parameter address, and an address can
+         * be reused once this module is gone. So destruction drops the Adam state
+         * of every parameter in the subtree first. A moved-from module has an
+         * empty registry, so its destructor drops nothing.
+         * @brief Destroy the module and forget its parameters' optimizer state.
+         */
+        virtual ~Module();
+        Module(const Module&) = delete;
+        Module& operator=(const Module&) = delete;
+        Module(Module&&) noexcept = default;
+        /**
+         * Forgets the optimizer state of this module's current parameters before
+         * taking the other module's registry, so the replaced parameters do not
+         * leave stale state behind.
+         * @brief Move-assign the registry, dropping this module's old optimizer state.
+         * @return This module.
+         */
+        Module& operator=(Module&& other) noexcept;
 
         /**
          * Run the module. Implementations chain tensor ops
@@ -83,7 +104,7 @@ namespace BeanTensor::Modules {
          * @brief Direct parameter access by registration name.
          * @param param_name Registration name given at add_parameter time.
          * @return The parameter tensor.
-         * @throws ErrorHandling::IndexOutOfRange No own parameter holds that name.
+         * @throws ErrorHandling::NameError No own parameter holds that name.
          */
         [[nodiscard]] Tensors::Tensor& parameter(const std::string& param_name);
         /**
@@ -91,7 +112,7 @@ namespace BeanTensor::Modules {
          * @brief Direct parameter access by registration name (const).
          * @param param_name Registration name given at add_parameter time.
          * @return The parameter tensor.
-         * @throws ErrorHandling::IndexOutOfRange No own parameter holds that name.
+         * @throws ErrorHandling::NameError No own parameter holds that name.
          */
         [[nodiscard]] const Tensors::Tensor& parameter(const std::string& param_name) const;
 
@@ -102,10 +123,33 @@ namespace BeanTensor::Modules {
          * @brief Read the accumulated gradient of a named own parameter.
          * @param param_name Registration name of the parameter.
          * @return The parameter's gradient tensor.
-         * @throws ErrorHandling::IndexOutOfRange No own parameter holds that name.
+         * @throws ErrorHandling::NameError No own parameter holds that name.
          * @throws ErrorHandling::NoGradient The parameter has no accumulated gradient yet.
          */
         [[nodiscard]] Tensors::Tensor& grad(const std::string& param_name);
+
+        /**
+         * Gradient dtype of one own parameter: parameter(name).grad_dtype().
+         * @brief Gradient dtype of a named own parameter.
+         * @param param_name Registration name of the parameter.
+         * @return The gradient buffer's dtype, or std::nullopt when none is held yet.
+         * @throws ErrorHandling::NameError No own parameter holds that name.
+         */
+        [[nodiscard]] std::optional<DataTypes::DType> grad_dtype(const std::string& param_name) const;
+
+        /**
+         * Pins or changes the gradient dtype of every parameter in the subtree
+         * (Tensor::set_grad_dtype on each named parameter). Every parameter is
+         * validated before any is changed, so a refused narrowing leaves the whole
+         * tree untouched.
+         * @brief Set the gradient dtype of all parameters in the subtree.
+         * @param dt Dtype each parameter's gradient buffer must have.
+         * @param narrowing Reject (default) refuses a narrowing change; Allow converts it.
+         * @throws ErrorHandling::NoGradient a parameter does not require grad.
+         * @throws ErrorHandling::NonLeafGradDType a parameter owns a graph node.
+         * @throws ErrorHandling::NarrowingGradConversion narrowing refused under Reject.
+         */
+        void set_grad_dtype(DataTypes::DType dt, DataTypes::GradNarrowing narrowing = DataTypes::GradNarrowing::Reject);
 
         /**
          * Flattened, ordered view of every parameter in the subtree:
@@ -124,6 +168,38 @@ namespace BeanTensor::Modules {
          * @return (qualified name, const parameter) pairs in registry order.
          */
         [[nodiscard]] std::vector<std::pair<std::string, const Tensors::Tensor*>> named_parameters() const;
+
+        /**
+         * Total parameter count over the subtree: element_count() summed over
+         * named_parameters(). Gradients and optimizer state are not included.
+         * @brief Number of scalar parameters in the subtree.
+         * @return Parameter element count.
+         */
+        [[nodiscard]] size_t parameter_count() const;
+        /**
+         * Total parameter bytes over the subtree: byte_count() summed over
+         * named_parameters(), so each parameter counts at its own dtype. Gradients
+         * and optimizer state are not included.
+         * @brief Bytes held by the parameters in the subtree.
+         * @return Parameter byte count.
+         */
+        [[nodiscard]] size_t parameter_bytes() const;
+        /**
+         * Gradient bytes over the subtree: grad_byte_count() summed over
+         * named_parameters(). Zero for a parameter with no gradient held
+         * (before backward(), or after zero_grad()).
+         * @brief Bytes held by the accumulated gradients in the subtree.
+         * @return Gradient byte count.
+         */
+        [[nodiscard]] size_t parameter_grad_bytes() const;
+        /**
+         * Adam moment-state bytes over the subtree: adam_state_byte_count()
+         * summed over named_parameters(). Zero for parameters Adam has not
+         * stepped.
+         * @brief Bytes held by the Adam moment state in the subtree.
+         * @return Optimizer-state byte count.
+         */
+        [[nodiscard]] size_t optimizer_state_bytes() const;
 
         /**
          * Drop every accumulated parameter gradient in the subtree
@@ -145,7 +221,7 @@ namespace BeanTensor::Modules {
          * @param beta2 Second-moment decay.
          * @param epsilon Denominator epsilon.
          */
-        void adam_step(float64_t lr, float64_t beta1, float64_t beta2, float64_t epsilon);
+        void adam_step(float64_t lr, float64_t beta1, float64_t beta2, float64_t epsilon) const;
 
         /**
          * Human-readable tree dump, one line per parameter/child, children
@@ -164,7 +240,7 @@ namespace BeanTensor::Modules {
          * @brief Add a named parameter to this module's registry.
          * @param param_name Registration name; must be unique among this module's parameters.
          * @param tensor The parameter tensor (moved into the registry).
-         * @throws ErrorHandling::IndexOutOfRange The name is empty or already taken.
+         * @throws ErrorHandling::NameError The name is empty or already taken.
          */
         void add_parameter(std::string param_name, Tensors::Tensor tensor);
 
@@ -173,7 +249,7 @@ namespace BeanTensor::Modules {
          * @brief Add a named child module (append).
          * @param module_name Registry name; must be unique among this module's children. Empty auto-names to the next index.
          * @param module The child module (adopted).
-         * @throws ErrorHandling::IndexOutOfRange The name is already taken.
+         * @throws ErrorHandling::NameError The name is already taken.
          */
         void add_module(std::string module_name, std::unique_ptr<Module> module);
         /**
@@ -182,7 +258,8 @@ namespace BeanTensor::Modules {
          * @param pos Insertion position; must be <= the child count.
          * @param module_name Registry name; must be unique among this module's children. Empty auto-names to the next index.
          * @param module The child module (adopted).
-         * @throws ErrorHandling::IndexOutOfRange pos out of range, or the name is already taken.
+         * @throws ErrorHandling::IndexOutOfRange pos out of range.
+         * @throws ErrorHandling::NameError The name is already taken.
          */
         void insert_module(size_t pos, std::string module_name, std::unique_ptr<Module> module);
         /**
@@ -239,10 +316,13 @@ namespace BeanTensor::Modules {
          * @brief Index of the child registered under a name.
          * @param module_name Name to look up.
          * @return The child's registry position.
-         * @throws ErrorHandling::IndexOutOfRange No child holds that name.
+         * @throws ErrorHandling::NameError No child holds that name.
          */
         [[nodiscard]] size_t module_index_of(const std::string& module_name) const;
 
+        /**
+         * @brief Entry in the parameters registry.
+         */
         struct ParameterEntry {
             std::string name;
             std::unique_ptr<Tensors::Tensor> tensor;
@@ -275,20 +355,26 @@ namespace BeanTensor::Modules {
         template<typename Ptr>
         void collect_named_parameters(const std::string& prefix,
                                       std::vector<std::pair<std::string, Ptr>>& out) const {
-            for (const auto& entry : this->parameters) {
-                out.emplace_back(prefix + entry.name, entry.tensor.get());
+            for (const auto&[name, tensor] : this->parameters) {
+                out.emplace_back(prefix + name, tensor.get());
             }
-            for (const auto& entry : this->modules) {
-                entry.module->collect_named_parameters<Ptr>(prefix + entry.name + ".", out);
+            for (const auto&[name, module] : this->modules) {
+                module->collect_named_parameters<Ptr>(prefix + name + ".", out);
             }
         }
 
         /**
          * @brief Reject a child name that is already registered.
          * @param module_name Name to check.
-         * @throws ErrorHandling::IndexOutOfRange The name is taken.
+         * @throws ErrorHandling::NameError The name is taken.
          */
         void require_unique_module_name(const std::string& module_name) const;
+
+        /**
+         * Drops the Adam moment state of every parameter in the subtree.
+         * @brief Forget the optimizer state of the subtree's parameters.
+         */
+        void forget_optimizer_state() const;
     };
 
     /**
@@ -299,6 +385,21 @@ namespace BeanTensor::Modules {
      * @return The stream, for chaining.
      */
     std::ostream& operator<<(std::ostream& os, const Module& module);
+
+    /**
+     * Human-readable byte count: "512 B" below 1 KiB, otherwise one decimal in
+     * KB, MB or GB (base 1024).
+     * @brief Format a byte count with a binary unit suffix.
+     * @return Formatted string.
+     */
+    [[nodiscard]] std::string format_bytes(size_t);
+
+    /**
+     * Thousands-separated count, e.g. "101,770".
+     * @brief Format an element or parameter count with commas.
+     * @return Formatted string.
+     */
+    [[nodiscard]] std::string format_count(size_t);
 
     /**
      * Module-facing loss entry point for training loops:
@@ -313,4 +414,16 @@ namespace BeanTensor::Modules {
      * @return Shape-{1} tensor holding the mean loss, in pred's dtype/device.
      */
     [[nodiscard]] Tensors::Tensor mse_loss(const Tensors::Tensor& pred, const Tensors::Tensor& target);
+
+    /**
+     * Module-facing classification loss entry point for training loops:
+     * loss = softmax_cross_entropy(net.forward(x), labels); loss.backward(...).
+     * Thin forwarder to Tensor::softmax_ce on the logits: logits must be
+     * rank-2 {rows, classes}, labels rank-1 integer class indices of length
+     * rows. Only the logits can receive a gradient (dlogits = (softmax -
+     * onehot) / rows); labels never require one.
+     * @brief Mean softmax cross-entropy for module training loops.
+     * @return Shape-{1} tensor holding the mean loss, in the logits' dtype/device.
+     */
+    [[nodiscard]] Tensors::Tensor softmax_cross_entropy(const Tensors::Tensor&, const Tensors::Tensor&);
 }

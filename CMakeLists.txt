@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 4.2)
 
-option(USE_HIP "Build with AMD ROCM" ON)
-option(USE_CUDA "Build with NVIDIA CUDA" OFF)
+option(USE_HIP "Build with AMD ROCM" OFF)
+option(USE_CUDA "Build with NVIDIA CUDA" ON)
 option(USE_STRIX_HALO "Build with Xilinx StrixHalo NPU backend" OFF)
 
 if (USE_HIP AND USE_CUDA)
@@ -150,6 +150,7 @@ set(CORE_SOURCES
         Intrinsics/AVX512/DTypeConversions.cpp
         Intrinsics/Dispatcher.h
         Intrinsics/Dispatcher.cpp
+        Intrinsics/DispatchFeatures.cpp
         Tensor/DTypes.h
         Tensor/Tensor.h
         Tensor/Tensor.cpp
@@ -283,6 +284,8 @@ set(CORE_SOURCES
         Module/Module.cpp
         Module/Linear.h
         Module/Linear.cpp
+        Module/Relu.h
+        Module/Relu.cpp
         Module/Sequential.h
         Module/Sequential.cpp
         Helpers/Bits.h
@@ -434,6 +437,7 @@ if(USE_HIP)
             Math/Autograd/ElementwiseG/ElementwiseGHIP.cpp
             Module/Module.cpp
             Module/Linear.cpp
+            Module/Relu.cpp
             Module/Sequential.cpp
             PROPERTIES LANGUAGE HIP
     )
@@ -485,16 +489,16 @@ if(USE_HIP)
             Math/Autograd/ElementwiseG/ElementwiseGHIP.cpp
             Module/Module.cpp
             Module/Linear.cpp
+            Module/Relu.cpp
             Module/Sequential.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native"
     )
-    # The conversion dispatcher's IncludedCPUFeatures() copy needs every ISA flag
-    # it gates on (AVX512F/BF16/DQ, AVX2, F16C); without them its #if defined()
-    # guards in Helpers/Hardware.h are all false and the AVX512/AVX2 conversion
-    # fast paths never dispatch. Same clobber rule as the AVX512 kernels above:
-    # offload arch + host flags in ONE COMPILE_OPTIONS property.
+    # Only the feature gate carries the ISA union: IncludedCPUFeatures()'s #if
+    # defined() guards in Helpers/Hardware.h need every flag they check. Dispatcher.cpp
+    # stays flag-free, since its scalar fallback must never be emitted with AVX codegen.
+    # Same clobber rule as the AVX512 kernels above: offload arch + host flags in ONE COMPILE_OPTIONS property.
     set_source_files_properties(
-            Intrinsics/Dispatcher.cpp
+            Intrinsics/DispatchFeatures.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512bw;-mavx512bf16;-mavx512dq;-mavx512vnni;-mavx2;-mfma;-mf16c"
     )
     # AVX512 kernels: HIP offload arch + host AVX512 codegen combined (the
@@ -568,12 +572,11 @@ else()
             Intrinsics/AVX512/DTypeConversions.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bf16;-mavx512dq;-mf16c"
     )
-    # The conversion dispatcher gates its AVX512/AVX2 fast paths on
-    # IncludedCPUFeatures(), whose #if defined() guards in Helpers/Hardware.h
-    # only see flags the dispatcher's own TU was compiled with — it needs the
-    # full union or the fast paths silently never dispatch.
+    # Only the feature gate carries the ISA union: IncludedCPUFeatures()'s #if
+    # defined() guards in Helpers/Hardware.h need every flag they check. Dispatcher.cpp
+    # stays flag-free, since its scalar fallback must never be emitted with AVX codegen.
     set_source_files_properties(
-            Intrinsics/Dispatcher.cpp
+            Intrinsics/DispatchFeatures.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512bf16;-mavx512dq;-mavx512vnni;-mavx2;-mfma;-mf16c"
     )
     # Same split as the HIP branch: GEMM AVX512 kernels get -mavx512bw and
@@ -848,6 +851,42 @@ if(BUILD_TESTING)
             -mf16c
     )
     add_test(NAME BeanTensorV5ModuleTests COMMAND BeanTensorV5ModuleTests)
+
+    add_executable(BeanTensorV5DTypeGuardTests tests/tensor_dtype_guard_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5DTypeGuardTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5DTypeGuardTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5DTypeGuardTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5DTypeGuardTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5DTypeGuardTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5DTypeGuardTests COMMAND BeanTensorV5DTypeGuardTests)
+
+    add_executable(BeanTensorV5GradDTypeTests tests/grad_dtype_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5GradDTypeTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5GradDTypeTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5GradDTypeTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5GradDTypeTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5GradDTypeTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5GradDTypeTests COMMAND BeanTensorV5GradDTypeTests)
 endif()
 
 if(USE_HIP)
