@@ -3,8 +3,8 @@
  * @author GreenBean
  * @brief Entry point for softmax cross-entropy backward (cpu vs gpu):
  * dlogits = (softmax(logits) - onehot(target)) * dloss / rows.
- * @version 0.1.1
- * @date 2026-10-20
+ * @version 0.1.2
+ * @date 2026-10-23
  */
 #pragma once
 
@@ -12,6 +12,7 @@
 
 namespace BeanTensor::Tensors {
     class Tensor;
+    struct Node;
     namespace detail {
 
         /**
@@ -25,14 +26,15 @@ namespace BeanTensor::Tensors {
 
         /**
          * @brief Backward trampoline for softmax_ce; matches Node::_backward_fn's
-         * signature. The trailing DType is the calling backward()'s assigned grad dtype.
+         * signature. The leading Node* is the owning node; the trailing DType is the
+         * calling backward()'s assigned grad dtype.
          */
-        void softmax_ce_g_node(const Tensor*, Tensor**, size_t, DataTypes::DType);
+        void softmax_ce_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
         /**
          * @brief Signature bridge between wire_node (mutable output_grad) and
          * softmax_ce_g_node (const output_grad).
          */
-        void softmax_ce_g_bridge(Tensor*, Tensor**, size_t, DataTypes::DType);
+        void softmax_ce_g_bridge(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
     }
 }
 

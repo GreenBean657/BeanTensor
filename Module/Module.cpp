@@ -4,13 +4,18 @@
  * @brief Implementation of the Module base class registry (named parameters
  * and named child modules), named/manual-gradient parameter access,
  * subtree-wide zero_grad/adam_step, the ostream tree printer, and the
- * mse_loss forwarder to BeanTensor::Loss::mse.
- * @version 0.1
+ * mse_loss forwarder to BeanTensor::Loss::mse, the softmax_cross_entropy
+ * forwarder to Tensor::softmax_ce, and the subtree-wide gradient-dtype
+ * setter (validate-all-then-apply) with its per-parameter getter.
+ * @version 0.3.5
  * @date 2026-10-23
  */
 #include "Module/Module.h"
 
+#include <iomanip>
 #include <ostream>
+#include <sstream>
+#include <string>
 #include <utility>
 
 #include "Math/Loss/Loss.h"
@@ -30,25 +35,39 @@ namespace BeanTensor::Modules {
     }
 
     Tensors::Tensor& Module::parameter(const std::string& param_name) {
-        for (auto& entry : this->parameters) {
-            if (entry.name == param_name) {
-                return *entry.tensor;
+        for (auto&[name, tensor] : this->parameters) {
+            if (name == param_name) {
+                return *tensor;
             }
         }
-        throw ErrorHandling::IndexOutOfRange();
+        throw ErrorHandling::NameError("no parameter named '" + param_name + "'");
     }
 
     const Tensors::Tensor& Module::parameter(const std::string& param_name) const {
-        for (const auto& entry : this->parameters) {
-            if (entry.name == param_name) {
-                return *entry.tensor;
+        for (const auto&[name, tensor] : this->parameters) {
+            if (name == param_name) {
+                return *tensor;
             }
         }
-        throw ErrorHandling::IndexOutOfRange();
+        throw ErrorHandling::NameError("no parameter named '" + param_name + "'");
     }
 
     Tensors::Tensor& Module::grad(const std::string& param_name) {
         return this->parameter(param_name).gradient();
+    }
+
+    std::optional<DataTypes::DType> Module::grad_dtype(const std::string& param_name) const {
+        return this->parameter(param_name).grad_dtype();
+    }
+
+    void Module::set_grad_dtype(const DataTypes::DType dt, const DataTypes::GradNarrowing narrowing) {
+        const auto params = this->named_parameters();
+        for (const auto&[name, tensor] : params) {
+            tensor->validate_grad_dtype(dt, narrowing);
+        }
+        for (const auto&[name, tensor] : params) {
+            tensor->set_grad_dtype(dt, narrowing);
+        }
     }
 
     std::vector<std::pair<std::string, Tensors::Tensor*>> Module::named_parameters() {
@@ -63,23 +82,59 @@ namespace BeanTensor::Modules {
         return out;
     }
 
-    void Module::zero_grad() {
-        for (auto& entry : this->parameters) {
-            entry.tensor->zero_grad();
+    size_t Module::parameter_count() const {
+        auto total = size_t{0};
+        for (const auto&[_, snd] : this->named_parameters()) {
+            total += snd->element_count();
         }
-        for (auto& entry : this->modules) {
-            entry.module->zero_grad();
+        return total;
+    }
+
+    size_t Module::parameter_bytes() const {
+        auto total = size_t{0};
+        for (const auto&[_, snd] : this->named_parameters()) {
+            total += snd->byte_count();
+        }
+        return total;
+    }
+
+    void Module::forget_optimizer_state() const {
+        for (const auto& entry : this->named_parameters()) {
+            entry.second->forget_adam_state();
         }
     }
 
-    void Module::adam_step(const float64_t lr, const float64_t beta1, const float64_t beta2, const float64_t epsilon) {
-        for (auto& entry : this->parameters) {
-            if (entry.tensor->has_grad()) {
-                entry.tensor->adam_step(lr, beta1, beta2, epsilon);
+    Module::~Module() {
+        this->forget_optimizer_state();
+    }
+
+    Module& Module::operator=(Module&& other) noexcept {
+        if (this != &other) {
+            this->forget_optimizer_state();
+            this->parameters = std::move(other.parameters);
+            this->modules = std::move(other.modules);
+            this->forward_cache = std::move(other.forward_cache);
+        }
+        return *this;
+    }
+
+    void Module::zero_grad() {
+        for (auto&[name, tensor] : this->parameters) {
+            tensor->zero_grad();
+        }
+        for (auto&[name, module] : this->modules) {
+            module->zero_grad();
+        }
+    }
+
+    void Module::adam_step(const float64_t lr, const float64_t beta1, const float64_t beta2, const float64_t epsilon) const {
+        for (const auto&[name, tensor] : this->parameters) {
+            if (tensor->has_grad()) {
+                tensor->adam_step(lr, beta1, beta2, epsilon);
             }
         }
-        for (auto& entry : this->modules) {
-            entry.module->adam_step(lr, beta1, beta2, epsilon);
+        for (const auto&[name, module] : this->modules) {
+            module->adam_step(lr, beta1, beta2, epsilon);
         }
     }
 
@@ -87,15 +142,18 @@ namespace BeanTensor::Modules {
         // Header at the CURRENT stream position (the caller wrote any line
         // indent / "[name] " prefix); only the body and closing brace indent.
         os << this->name() << " {\n";
-        for (const auto& entry : this->parameters) {
+        for (const auto&[name, tensor] : this->parameters) {
             write_indent(os, indent + 1);
-            os << entry.name << ": " << DataTypes::dtype_to_string(entry.tensor->get_dtype())
-               << " " << entry.tensor->shape_to_string() << "\n";
+            os << name << ": " << DataTypes::dtype_to_string(tensor->get_dtype())
+               << " " << tensor->shape_to_string()
+               << "  " << format_bytes(tensor->byte_count())
+               << "  grad " << format_bytes(tensor->grad_byte_count())
+               << "  adam " << format_bytes(tensor->adam_state_byte_count()) << "\n";
         }
-        for (const auto& entry : this->modules) {
+        for (const auto&[name, module] : this->modules) {
             write_indent(os, indent + 1);
-            os << "[" << entry.name << "] ";
-            entry.module->print(os, indent + 1);
+            os << "[" << name << "] ";
+            module->print(os, indent + 1);
         }
         write_indent(os, indent);
         os << "}\n";
@@ -103,20 +161,87 @@ namespace BeanTensor::Modules {
 
     std::ostream& operator<<(std::ostream& os, const Module& module) {
         module.print(os, 0);
+        os << "total: " << format_count(module.parameter_count()) << " parameters\n"
+           << "  weights " << format_bytes(module.parameter_bytes())
+           << ", grads " << format_bytes(module.parameter_grad_bytes())
+           << ", Adam state " << format_bytes(module.optimizer_state_bytes()) << "\n";
         return os;
+    }
+
+    std::string format_count(const size_t count) {
+        const auto digits = std::to_string(count);
+        auto out = std::string{};
+        for (auto i = size_t{0}; i < digits.size(); ++i) {
+            if (
+                const auto separator = i > 0 && (digits.size() - i) % 3 == 0;
+                separator
+            ) {
+                out.push_back(',');
+            }
+            out.push_back(digits[i]);
+        }
+        return out;
+    }
+
+    std::string format_bytes(const size_t bytes) {
+        constexpr float64_t kKibi = 1024;
+        const auto value = static_cast<float64_t>(bytes);
+        auto out = std::ostringstream();
+        if (
+            const auto plain = value < kKibi;
+            plain
+        ) {
+            out << bytes << " B";
+            return out.str();
+        }
+        out << std::fixed << std::setprecision(1);
+        if (
+            const auto kb = value < kKibi * kKibi;
+            kb
+        ) {
+            out << value / kKibi << " KB";
+        } else if (
+            const auto mb = value < kKibi * kKibi * kKibi;
+            mb
+        ) {
+            out << value / (kKibi * kKibi) << " MB";
+        } else {
+            out << value / (kKibi * kKibi * kKibi) << " GB";
+        }
+        return out.str();
+    }
+
+    size_t Module::parameter_grad_bytes() const {
+        auto total = size_t{0};
+        for (const auto& entry : this->named_parameters()) {
+            total += entry.second->grad_byte_count();
+        }
+        return total;
+    }
+
+    size_t Module::optimizer_state_bytes() const {
+        auto total = size_t{0};
+        for (const auto& entry : this->named_parameters()) {
+            total += entry.second->adam_state_byte_count();
+        }
+        return total;
     }
 
     Tensors::Tensor mse_loss(const Tensors::Tensor& pred, const Tensors::Tensor& target) {
         return Loss::mse(pred, target);
     }
 
+    Tensors::Tensor softmax_cross_entropy(const Tensors::Tensor& logits, const Tensors::Tensor& targets) {
+        return logits.softmax_ce(targets);
+    }
+
     void Module::add_parameter(std::string param_name, Tensors::Tensor tensor) {
         if (param_name.empty()) {
-            throw ErrorHandling::IndexOutOfRange();
+            throw ErrorHandling::NameError("parameter name is empty");
         }
-        for (const auto& entry : this->parameters) {
-            if (entry.name == param_name) {
-                throw ErrorHandling::IndexOutOfRange();
+        for (const auto&[name, _] : this->parameters) {
+            if (name == param_name) {
+                throw ErrorHandling::NameError("parameter name already taken: '" + param_name + "'");
             }
         }
         auto slot = std::make_unique<Tensors::Tensor>(std::move(tensor));
@@ -157,7 +282,7 @@ namespace BeanTensor::Modules {
         if (pos >= this->modules.size()) {
             throw ErrorHandling::IndexOutOfRange();
         }
-        auto it = this->modules.begin() + static_cast<std::ptrdiff_t>(pos);
+        const auto it = this->modules.begin() + static_cast<std::ptrdiff_t>(pos);
         auto removed = std::move(it->module);
         this->modules.erase(it);
         return removed;
@@ -176,13 +301,13 @@ namespace BeanTensor::Modules {
                 return i;
             }
         }
-        throw ErrorHandling::IndexOutOfRange();
+        throw ErrorHandling::NameError("no child module named '" + module_name + "'");
     }
 
     void Module::require_unique_module_name(const std::string& module_name) const {
-        for (const auto& entry : this->modules) {
-            if (entry.name == module_name) {
-                throw ErrorHandling::IndexOutOfRange();
+        for (const auto&[name, module] : this->modules) {
+            if (name == module_name) {
+                throw ErrorHandling::NameError("child module name already taken: '" + module_name + "'");
             }
         }
     }

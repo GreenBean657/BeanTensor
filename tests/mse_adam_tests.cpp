@@ -7,11 +7,15 @@
 // reference mirror, constant-gradient trajectory, convergence on a quadratic
 // via the mse -> backward -> adam_step loop, error paths, mixed grad dtype),
 // and — when a backend + device exist — the same checks on the GPU plus
-// CPU/GPU parity.
+// CPU/GPU parity. Storage-dtype coverage: mse backward on fp16/bf16 (narrowing
+// store), packed x2 (per-lane, packed grad dtype), every integer width
+// (truncation toward zero, unsigned clamp, int8 clamp); Adam trajectories on
+// fp16/bf16/packed x2 against an fp64 mirror.
 #include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -31,6 +35,8 @@ using BeanTensor::Tensors::Tensor;
 using BeanTensor::Tensors::Device;
 using BeanTensor::float16_t;
 using BeanTensor::float16x2_t;
+using BeanTensor::bfloat16_t;
+using BeanTensor::bfloat16x2_t;
 using BeanTensor::float32_t;
 using BeanTensor::float64_t;
 using DType = BeanTensor::DataTypes::DType;
@@ -311,6 +317,162 @@ static void test_mse_target_requires_grad(const Device dev) {
 }
 
 // =====================================================================
+// mse backward: storage-dtype coverage (fp16/bf16, packed x2, integers)
+// =====================================================================
+
+// --- storage-lane helpers for the 16-bit float kinds (fp16, bf16) ---
+
+static bfloat16_t narrow_bf16(const float32_t v) {
+    return idet::unaccel_fp32_to_bf16_untracked(v);
+}
+
+static float32_t widen_bf16(const bfloat16_t v) {
+    return idet::unaccel_bf16_to_fp32(v);
+}
+
+template<typename H>
+static H narrow_lane(const float32_t v) {
+    if constexpr (std::is_same_v<H, float16_t>) {
+        return narrow_half(v);
+    } else {
+        return narrow_bf16(v);
+    }
+}
+
+template<typename H>
+static float32_t widen_lane(const H v) {
+    if constexpr (std::is_same_v<H, float16_t>) {
+        return widen_half(v);
+    } else {
+        return widen_bf16(v);
+    }
+}
+
+// Value after one round trip through storage dtype H (one RNE store).
+template<typename H>
+static float64_t round_lane(const float64_t v) {
+    return static_cast<float64_t>(widen_lane(narrow_lane<H>(static_cast<float32_t>(v))));
+}
+
+// Packed x2 element: lo lane in bits [15:0], hi lane in bits [31:16].
+template<typename P>
+using lane_t = std::conditional_t<std::is_same_v<P, float16x2_t>, float16_t, bfloat16_t>;
+
+template<typename P>
+static P pack_x2(const float32_t lo, const float32_t hi) {
+    const auto lo_bits = idet::bit_cast_memcpy<uint16_t>(narrow_lane<lane_t<P>>(lo));
+    const auto hi_bits = idet::bit_cast_memcpy<uint16_t>(narrow_lane<lane_t<P>>(hi));
+    return idet::bit_cast_memcpy<P>(static_cast<uint32_t>(lo_bits) | (static_cast<uint32_t>(hi_bits) << 16));
+}
+
+template<typename P>
+static float32_t lane_x2(const P v, const bool hi) {
+    const auto bits = idet::bit_cast_memcpy<uint32_t>(v);
+    const auto lane_bits = static_cast<uint16_t>(hi ? (bits >> 16) : (bits & 0xFFFFu));
+    return widen_lane(idet::bit_cast_memcpy<lane_t<P>>(lane_bits));
+}
+
+// Logical lane k of a packed tensor: storage element k/2, hi lane when k is odd.
+template<typename P>
+static float32_t packed_lane(Tensor& t, const size_t k) {
+    return lane_x2(t.at<P>({k / 2}), k % 2 == 1);
+}
+
+// fp16/bf16 leaf: the stored lane values are the reference inputs, so the only
+// error left is the single RNE store of the gradient into H. Tolerances are
+// relative: bf16 keeps 8 mantissa bits (rel 2^-8), fp16 keeps 11 (rel 2^-11).
+template<typename H>
+static void test_mse_g_narrow_float(const DType dt, const float64_t rel_tol) {
+    const auto pv = std::vector<float32_t>{1.3f, -2.7f, 0.45f, 3.1f};
+    const auto tv = std::vector<float32_t>{0.1f, 0.2f, -0.6f, 1.0f};
+    auto pred = Tensor({4}, dt, Device::CPU, true);
+    auto target = Tensor({4}, dt, Device::CPU, false);
+    for (auto i = size_t{0}; i < 4; ++i) {
+        pred.set<H>({i}, narrow_lane<H>(pv[i]));
+        target.set<H>({i}, narrow_lane<H>(tv[i]));
+    }
+    auto loss = pred.mse(target);
+    loss.backward(DType::Float32);
+    CHECK(pred.gradient().get_dtype() == DType::Float32);
+    CHECK(!target.has_grad());
+    for (auto i = size_t{0}; i < 4; ++i) {
+        // d/dpred = 2*(pred - target)/4, read from the stored lane values.
+        const auto p = static_cast<float64_t>(widen_lane(pred.at<H>({i})));
+        const auto t = static_cast<float64_t>(widen_lane(target.at<H>({i})));
+        const auto want = 0.5 * (p - t);
+        CHECK(near64(pred.gradient().at<float32_t>({i}), want, rel_tol * std::fabs(want) + 1e-6));
+    }
+}
+
+// Packed x2 leaf: two storage elements hold four logical lanes (n_logical = 4).
+// The grad dtype must be the packed dtype: an unpacked grad keeps only the low
+// lane (GradDType rule), so the hi lanes would be lost.
+template<typename P>
+static void test_mse_g_packed(const DType dt, const float64_t rel_tol) {
+    const auto pv = std::vector<float32_t>{1.3f, -2.7f, 0.45f, 3.1f};
+    const auto tv = std::vector<float32_t>{0.1f, 0.2f, -0.6f, 1.0f};
+    auto pred = Tensor({2}, dt, Device::CPU, true);
+    auto target = Tensor({2}, dt, Device::CPU, false);
+    for (auto i = size_t{0}; i < 2; ++i) {
+        pred.set<P>({i}, pack_x2<P>(pv[2 * i], pv[2 * i + 1]));
+        target.set<P>({i}, pack_x2<P>(tv[2 * i], tv[2 * i + 1]));
+    }
+    auto loss = pred.mse(target);
+    loss.backward(dt);
+    CHECK(pred.gradient().get_dtype() == dt);
+    for (auto k = size_t{0}; k < 4; ++k) {
+        const auto p = static_cast<float64_t>(packed_lane<P>(pred, k));
+        const auto t = static_cast<float64_t>(packed_lane<P>(target, k));
+        const auto want = 0.5 * (p - t);
+        CHECK(near64(packed_lane<P>(pred.gradient(), k), want, rel_tol * std::fabs(want) + 1e-6));
+    }
+}
+
+// Integer leaf, n_logical = 4: d/dpred = (pred - target)/2 in fp64, stored into
+// the integer dtype. Diffs are 3, -1, 4, 0: the -0.5 truncates toward zero to 0
+// for signed types and clamps to 0 for unsigned types, so one expectation holds
+// for every width.
+template<typename I>
+static void test_mse_g_int(const DType dt) {
+    const auto pv = std::vector<int64_t>{3, 2, 9, 0};
+    const auto tv = std::vector<int64_t>{0, 3, 5, 0};
+    const auto want = std::vector<float32_t>{1.0f, 0.0f, 2.0f, 0.0f};
+    auto pred = Tensor({4}, dt, Device::CPU, true);
+    auto target = Tensor({4}, dt, Device::CPU, false);
+    for (auto i = size_t{0}; i < 4; ++i) {
+        pred.set<I>({i}, static_cast<I>(pv[i]));
+        target.set<I>({i}, static_cast<I>(tv[i]));
+    }
+    auto loss = pred.mse(target);
+    loss.backward(DType::Float32);
+    CHECK(pred.gradient().get_dtype() == DType::Float32);
+    for (auto i = size_t{0}; i < 4; ++i) {
+        CHECK(near64(pred.gradient().at<float32_t>({i}), want[i], 0.0));
+    }
+}
+
+// Int8 clamp: (127 - (-128)) / 2 = 127.5 clamps to the int8 max, and
+// (-128 - 127) / 2 = -127.5 is above the int8 min, so it truncates to -127.
+static void test_mse_g_int8_clamp() {
+    auto pred = Tensor({4}, DType::Int8, Device::CPU, true);
+    auto target = Tensor({4}, DType::Int8, Device::CPU, false);
+    pred.set<int8_t>({0}, 127);
+    pred.set<int8_t>({1}, -128);
+    pred.set<int8_t>({2}, 0);
+    pred.set<int8_t>({3}, 0);
+    target.set<int8_t>({0}, -128);
+    target.set<int8_t>({1}, 127);
+    target.set<int8_t>({2}, 0);
+    target.set<int8_t>({3}, 0);
+    auto loss = pred.mse(target);
+    loss.backward(DType::Float32);
+    CHECK(near64(pred.gradient().at<float32_t>({0}), 127.0, 0.0));
+    CHECK(near64(pred.gradient().at<float32_t>({1}), -127.0, 0.0));
+    CHECK(near64(pred.gradient().at<float32_t>({2}), 0.0, 0.0));
+    CHECK(near64(pred.gradient().at<float32_t>({3}), 0.0, 0.0));
+}
+
+// =====================================================================
 // Adam
 // =====================================================================
 
@@ -465,6 +627,67 @@ static void test_adam_errors(const Device dev) {
     }
 }
 
+// Half/bf16 Adam: w, g, m and v are stored in H with fp32 compute, so each step
+// re-rounds the weight. The fp64 mirror re-rounds its weights to H after every
+// step too, which leaves about one storage ulp of slack for the rounding of the
+// moments and of the fp32 update. fp16 ulp at |w| in [1, 2) is 2^-10; bf16 is 2^-7.
+template<typename H>
+static void test_adam_narrow_float(const DType dt, const float64_t abs_tol) {
+    const auto w0 = std::vector<float32_t>{0.5f, -0.25f, 1.0f, -1.5f};
+    const auto gv = std::vector<float32_t>{1.0f, -2.0f, 0.5f, 3.0f};
+    auto w = Tensor({4}, dt, Device::CPU);
+    auto g = Tensor({4}, dt, Device::CPU);
+    auto ref_w = std::vector<float64_t>(4, 0.0);
+    auto ref_g = std::vector<float64_t>(4, 0.0);
+    auto ref_m = std::vector<float64_t>(4, 0.0);
+    auto ref_v = std::vector<float64_t>(4, 0.0);
+    for (auto i = size_t{0}; i < 4; ++i) {
+        w.set<H>({i}, narrow_lane<H>(w0[i]));
+        g.set<H>({i}, narrow_lane<H>(gv[i]));
+        ref_w[i] = static_cast<float64_t>(widen_lane(w.at<H>({i})));
+        ref_g[i] = static_cast<float64_t>(widen_lane(g.at<H>({i})));
+    }
+    for (auto t = uint64_t{1}; t <= 3; ++t) {
+        w.adam_update(g, 0.05, 0.9, 0.999, 1e-8);
+        w.sync();
+        for (auto i = size_t{0}; i < 4; ++i) {
+            ref_w[i] = round_lane<H>(ref_adam_step(ref_w[i], ref_m[i], ref_v[i], ref_g[i], 0.05, 0.9, 0.999, t, 1e-8));
+            CHECK(near64(widen_lane(w.at<H>({i})), ref_w[i], abs_tol));
+        }
+    }
+}
+
+// Packed x2 Adam: two storage elements hold four logical lanes. Each lane runs
+// the same recurrence independently, so the fp64 mirror runs per lane, with the
+// same storage-ulp slack as the scalar half/bf16 case.
+template<typename P>
+static void test_adam_packed(const DType dt, const float64_t abs_tol) {
+    const auto w0 = std::vector<float32_t>{0.5f, -0.25f, 1.0f, -1.5f};
+    const auto gv = std::vector<float32_t>{1.0f, -2.0f, 0.5f, 3.0f};
+    auto w = Tensor({2}, dt, Device::CPU);
+    auto g = Tensor({2}, dt, Device::CPU);
+    for (auto i = size_t{0}; i < 2; ++i) {
+        w.set<P>({i}, pack_x2<P>(w0[2 * i], w0[2 * i + 1]));
+        g.set<P>({i}, pack_x2<P>(gv[2 * i], gv[2 * i + 1]));
+    }
+    auto ref_w = std::vector<float64_t>(4, 0.0);
+    auto ref_g = std::vector<float64_t>(4, 0.0);
+    auto ref_m = std::vector<float64_t>(4, 0.0);
+    auto ref_v = std::vector<float64_t>(4, 0.0);
+    for (auto k = size_t{0}; k < 4; ++k) {
+        ref_w[k] = static_cast<float64_t>(packed_lane<P>(w, k));
+        ref_g[k] = static_cast<float64_t>(packed_lane<P>(g, k));
+    }
+    for (auto t = uint64_t{1}; t <= 3; ++t) {
+        w.adam_update(g, 0.05, 0.9, 0.999, 1e-8);
+        w.sync();
+        for (auto k = size_t{0}; k < 4; ++k) {
+            ref_w[k] = round_lane<lane_t<P>>(ref_adam_step(ref_w[k], ref_m[k], ref_v[k], ref_g[k], 0.05, 0.9, 0.999, t, 1e-8));
+            CHECK(near64(packed_lane<P>(w, k), ref_w[k], abs_tol));
+        }
+    }
+}
+
 // =====================================================================
 // GPU parity
 // =====================================================================
@@ -600,6 +823,26 @@ int main() {
     test_adam_convergence_quadratic(Device::CPU);
     test_adam_fp64_convergence(Device::CPU);
     test_adam_errors(Device::CPU);
+    // Storage-dtype coverage. Half/bf16 MSE backward: one RNE store per
+    // gradient, so 2^-11 (fp16) and 2^-8 (bf16) relative tolerances.
+    test_mse_g_narrow_float<float16_t>(DType::Float16, 2e-3);
+    test_mse_g_narrow_float<bfloat16_t>(DType::BFloat16, 1e-2);
+    test_mse_g_packed<float16x2_t>(DType::Float16x2, 2e-3);
+    test_mse_g_packed<bfloat16x2_t>(DType::BFloat16x2, 1e-2);
+    test_mse_g_int<int8_t>(DType::Int8);
+    test_mse_g_int<uint8_t>(DType::UInt8);
+    test_mse_g_int<int16_t>(DType::Int16);
+    test_mse_g_int<uint16_t>(DType::UInt16);
+    test_mse_g_int<int32_t>(DType::Int32);
+    test_mse_g_int<uint32_t>(DType::UInt32);
+    test_mse_g_int<int64_t>(DType::Int64);
+    test_mse_g_int<uint64_t>(DType::UInt64);
+    test_mse_g_int8_clamp();
+    // Half/bf16/packed Adam trajectories vs the fp64 mirror (one storage ulp of slack).
+    test_adam_narrow_float<float16_t>(DType::Float16, 2e-3);
+    test_adam_narrow_float<bfloat16_t>(DType::BFloat16, 2e-2);
+    test_adam_packed<float16x2_t>(DType::Float16x2, 2e-3);
+    test_adam_packed<bfloat16x2_t>(DType::BFloat16x2, 2e-2);
 #if defined(USE_HIP) || defined(USE_CUDA)
     if (gpu_available()) {
         test_mse_gpu();

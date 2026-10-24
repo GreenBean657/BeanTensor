@@ -2,8 +2,8 @@
  * @file BiasAddG.h
  * @author GreenBean
  * @brief Entry point for bias_add backward (cpu vs gpu): dbias = column sum of dy.
- * @version 0.1
- * @date 2026-10-20
+ * @version 0.2
+ * @date 2026-10-23
  */
 #pragma once
 
@@ -11,6 +11,7 @@
 
 namespace BeanTensor::Tensors {
     class Tensor;
+    struct Node;
     namespace detail {
 
         /**
@@ -24,9 +25,10 @@ namespace BeanTensor::Tensors {
 
         /**
          * @brief Backward trampoline for bias_add; matches Node::_backward_fn's
-         * signature. The trailing DType is the calling backward()'s assigned grad dtype.
+         * signature. The leading Node* is the owning node; the trailing DType is the
+         * calling backward()'s assigned grad dtype.
          */
-        void bias_add_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
+        void bias_add_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
     }
 }
 

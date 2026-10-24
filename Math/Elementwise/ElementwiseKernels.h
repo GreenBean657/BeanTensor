@@ -17,17 +17,67 @@
  * decomposition onto these kernels in ElementwiseCPU.cpp), Pow, and integer
  * div (x86 SIMD has no integer division; div-by-zero/min-over-(-1) semantics
  * stay scalar by design).
- * @version 0.2
+ * @version 0.3
  * @date 2026-10-23
  */
 #pragma once
 
+#include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
+#include "Math/Elementwise/Elementwise.h"
 #include "Tensor/DTypes.h"
 
 namespace BeanTensor::Math::Elementwise {
+    /**
+     * Sets the quiet bit and keeps the payload. Only meaningful on a NaN.
+     * Internal linkage: the AVX2/AVX512 translation units compile this header with
+     * their ISA flags, so each TU keeps its own copy and no weak symbol is shared
+     * with the scalar paths.
+     * @brief Quiets a floating-point NaN.
+     * @param v A NaN of type F.
+     * @return The same NaN with the quiet bit set.
+     */
+    template<typename F>
+    [[nodiscard]] static F quiet_nan(const F v) {
+        if constexpr (std::is_same_v<F, float32_t>) {
+            return std::bit_cast<float32_t>(std::bit_cast<uint32_t>(v) | (uint32_t{1} << 22));
+        } else {
+            return std::bit_cast<float64_t>(std::bit_cast<uint64_t>(v) | (uint64_t{1} << 51));
+        }
+    }
+
+    /**
+     * Single-rounding IEEE add/sub/mul/div under one NaN contract: a NaN operand
+     * propagates quieted, and when both operands are NaN the first operand's payload
+     * wins (the x86 rule for the SSE/AVX arithmetic instructions). The SIMD kernels
+     * apply the same select explicitly, so every path returns the same bits on every
+     * host compiler. Non-NaN inputs use the plain IEEE op.
+     * @brief Scalar fp32/fp64 binary op under the elementwise NaN contract.
+     * @param a The left operand.
+     * @param b The right operand.
+     * @return The op result under the NaN contract.
+     */
+    template<typename F, Tensors::ElementwiseOp Op>
+    [[nodiscard]] static F fp_binop(const F a, const F b) {
+        static_assert(Op != Tensors::ElementwiseOp::Pow, "fp_binop covers add/sub/mul/div only");
+        if (std::isnan(a) || std::isnan(b)) {
+            return quiet_nan<F>(std::isnan(a) ? a : b);
+        }
+        if constexpr (Op == Tensors::ElementwiseOp::Add) {
+            return a + b;
+        } else if constexpr (Op == Tensors::ElementwiseOp::Sub) {
+            return a - b;
+        } else if constexpr (Op == Tensors::ElementwiseOp::Mul) {
+            return a * b;
+        } else {
+            return a / b;
+        }
+    }
+
     /**
      * Cached through IncludedCPUFeatures(); callers gate every AVX2 kernel on this.
      * @brief Runtime probe: are the AVX2+F16C elementwise kernels safe to execute?

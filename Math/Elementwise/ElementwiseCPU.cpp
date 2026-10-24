@@ -16,9 +16,8 @@
  * Autograd: the tensor-tensor and tensor-scalar wrappers attach the matching
  * ElementwiseG node to the output whenever an input has requires_grad=true
  * (Math/Autograd/ElementwiseG), so elementwise chains join the computation
- * graph; the tensor-scalar ops persist the scalar as a bit-cast payload in
- * Node::_inputs[1] (scalar_payload — never dereferenced, never walked).
- * @version 0.4
+ * graph; the tensor-scalar ops persist the scalar in Node::_scalar.
+ * @version 0.6
  * @date 2026-10-23
  */
 #include <algorithm>
@@ -89,21 +88,16 @@ namespace BeanTensor::Tensors::detail {
         // --------------------------- arithmetic applies ---------------------------
 
         /**
-         * Single-rounding native op; Div is IEEE (x/0 -> inf/nan), Pow is std::pow.
+         * Single-rounding native op under the shared NaN contract (fp_binop); Div is
+         * IEEE (x/0 -> inf/nan), Pow is std::pow.
          * @brief Scalar binary apply (fp32/fp64).
          */
         template<typename T, ElementwiseOp Op>
         [[nodiscard]] T apply_native(const T a, const T b) {
-            if constexpr (Op == ElementwiseOp::Add) {
-                return a + b;
-            } else if constexpr (Op == ElementwiseOp::Sub) {
-                return a - b;
-            } else if constexpr (Op == ElementwiseOp::Mul) {
-                return a * b;
-            } else if constexpr (Op == ElementwiseOp::Div) {
-                return a / b;
-            } else {
+            if constexpr (Op == ElementwiseOp::Pow) {
                 return std::pow(a, b);
+            } else {
+                return Math::Elementwise::fp_binop<T, Op>(a, b);
             }
         }
 
@@ -116,16 +110,10 @@ namespace BeanTensor::Tensors::detail {
         [[nodiscard]] H apply_half(const H& a, const H& b) {
             const auto wa = widen_lane(a);
             const auto wb = widen_lane(b);
-            if constexpr (Op == ElementwiseOp::Add) {
-                return narrow_lane<H>(wa + wb);
-            } else if constexpr (Op == ElementwiseOp::Sub) {
-                return narrow_lane<H>(wa - wb);
-            } else if constexpr (Op == ElementwiseOp::Mul) {
-                return narrow_lane<H>(wa * wb);
-            } else if constexpr (Op == ElementwiseOp::Div) {
-                return narrow_lane<H>(wa / wb);
-            } else {
+            if constexpr (Op == ElementwiseOp::Pow) {
                 return narrow_lane<H>(std::pow(wa, wb));
+            } else {
+                return narrow_lane<H>(Math::Elementwise::fp_binop<float32_t, Op>(wa, wb));
             }
         }
 
@@ -1432,9 +1420,8 @@ namespace BeanTensor::Tensors {
             [[unlikely]] default: throw ErrorHandling::UnReachableCode();
         }
         if (out.node != nullptr) {
-            // Persist the scalar for the backward trampoline (never
-            // dereferenced, never walked: _n_inputs stays 1).
-            out.node->_inputs[1] = detail::scalar_payload(scalar);
+            // The tensor-scalar backward trampolines read the operand from the node.
+            out.node->_scalar = scalar;
         }
         return out;
     }

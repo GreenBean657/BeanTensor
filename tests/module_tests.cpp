@@ -2,12 +2,15 @@
 // Covers: Module registry (named parameter access, named_parameters
 // flattening, manual gradient access via Tensor::grad), Linear
 // (forward = matmul + bias_add, bias-free variant, init bounds),
-// Sequential (chained forward, empty = identity clone, layer injection:
+// Sequential (chained forward, empty forward throws EmptyModule, layer injection:
 // append/insert/replace/remove mutate the registry AND forward),
 // mse_loss -> backward -> Module::adam_step training loop (graph tensors
-// kept alive across the loop), operator<< tree output, error paths, and —
+// kept alive across the loop), operator<< tree output, error paths, Relu
+// (forward + gradient gating), softmax_cross_entropy (value and logit
+// gradient vs an fp64 reference, and a softmax-trained classifier), and —
 // when a backend + device exist — forward/backward on the GPU with
 // CPU/GPU gradient parity.
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -21,6 +24,7 @@
 #include "Helpers/Errors.h"
 #include "Module/Linear.h"
 #include "Module/Module.h"
+#include "Module/Relu.h"
 #include "Module/Sequential.h"
 #include "Tensor/Tensor.h"
 
@@ -78,7 +82,7 @@ static void set_linear_params(Module& lin, const size_t n_in, const size_t n_out
         for (auto j = size_t{0}; j < n_out; ++j) {
             b.set<float32_t>({j}, static_cast<float32_t>(0.1 * static_cast<float64_t>(j) - 0.2));
         }
-    } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) {
+    } catch (const BeanTensor::ErrorHandling::NameError&) {
         // bias-free layer: nothing to set
     }
 }
@@ -174,7 +178,7 @@ static void test_linear_no_bias(const Device dev) {
     auto threw = false;
     try {
         static_cast<void>(lin.parameter("bias"));
-    } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) {
+    } catch (const BeanTensor::ErrorHandling::NameError&) {
         threw = true;
     }
     CHECK(threw);
@@ -277,7 +281,7 @@ static void test_sequential_empty(const Device dev) {
     try {
         auto bad = net.forward(x);
         static_cast<void>(bad);
-    } catch (const BeanTensor::ErrorHandling::NotImplemented&) {
+    } catch (const BeanTensor::ErrorHandling::EmptyModule&) {
         threw = true;
     }
     CHECK(threw);
@@ -358,7 +362,7 @@ static void test_registry_errors() {
     auto threw = false;
     try {
         net.append("a", std::make_unique<Linear>(2, 2, DType::Float32, Device::CPU, false, 12));
-    } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) {
+    } catch (const BeanTensor::ErrorHandling::NameError&) {
         threw = true;
     }
     CHECK(threw);
@@ -379,14 +383,14 @@ static void test_registry_errors() {
     threw = false;
     try {
         static_cast<void>(net.at("nope"));
-    } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) {
+    } catch (const BeanTensor::ErrorHandling::NameError&) {
         threw = true;
     }
     CHECK(threw);
     threw = false;
     try {
         static_cast<void>(net.index_of("nope"));
-    } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) {
+    } catch (const BeanTensor::ErrorHandling::NameError&) {
         threw = true;
     }
     CHECK(threw);
@@ -402,7 +406,7 @@ static void test_registry_errors() {
     threw = false;
     try {
         static_cast<void>(lin.parameter("nope"));
-    } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) {
+    } catch (const BeanTensor::ErrorHandling::NameError&) {
         threw = true;
     }
     CHECK(threw);
@@ -574,6 +578,238 @@ static void test_print() {
     CHECK(s2.find("weight: Float32 {2, 3}") != std::string::npos);
 }
 
+// =====================================================================
+// Relu and softmax_cross_entropy
+// =====================================================================
+
+static void test_relu_forward(const Device dev) {
+    // Forward keeps positives and zeroes the rest; backward gates the
+    // gradient through x > 0 (relu_G: dx = x > 0 ? dy : 0). With
+    // mse_loss against zeros, dy = 2*y/numel = y/3 for numel 6, so the
+    // expected x-gradient is relu(x)/3.
+    auto relu = BeanTensor::Modules::Relu();
+    auto x = Tensor({2, 3}, DType::Float32, dev, true);
+    auto target = Tensor({2, 3}, DType::Float32, dev, false);
+    target.set_zero();
+    const auto xv = std::vector<float64_t>{1.0, -2.0, 0.5, -0.25, 3.0, 0.0};
+    for (auto i = size_t{0}; i < 6; ++i) {
+        x.set<float32_t>({i / 3, i % 3}, static_cast<float32_t>(xv[i]));
+    }
+    auto y = relu.forward(x);
+    auto loss = BeanTensor::Modules::mse_loss(y, target);
+    loss.backward(DType::Float32);
+    loss.sync();
+    for (auto i = size_t{0}; i < 6; ++i) {
+        const auto expect_y = xv[i] > 0.0 ? xv[i] : 0.0;
+        CHECK(near64(y.at<float32_t>({i / 3, i % 3}), expect_y, 1e-6));
+        CHECK(x.has_grad());
+        CHECK(near64(x.gradient().at<float32_t>({i / 3, i % 3}), expect_y / 3.0, 1e-6));
+    }
+    CHECK(relu.name() == "Relu");
+    CHECK(relu.named_parameters().empty());
+}
+
+static void test_softmax_cross_entropy(const Device dev) {
+    // loss = mean over rows of (logsumexp(x_r) - x_r[label_r]); backward
+    // fills dlogits = (softmax(x) - onehot(label)) / rows. Checked against
+    // an fp64 reference computed here.
+    const auto rows = size_t{2};
+    const auto classes = size_t{3};
+    auto logits = Tensor({rows, classes}, DType::Float32, dev, true);
+    auto labels = Tensor({rows}, DType::Int64, dev, false);
+    const auto lv = std::vector<float64_t>{0.5, -1.0, 2.0, 1.5, 0.0, -0.5};
+    const auto label_of = std::vector<size_t>{2, 0};
+    for (auto i = size_t{0}; i < rows * classes; ++i) {
+        logits.set<float32_t>({i / classes, i % classes}, static_cast<float32_t>(lv[i]));
+    }
+    for (auto r = size_t{0}; r < rows; ++r) {
+        labels.set<int64_t>({r}, static_cast<int64_t>(label_of[r]));
+    }
+
+    auto ref_loss = float64_t{0.0};
+    auto ref_grad = std::vector<float64_t>(rows * classes);
+    for (auto r = size_t{0}; r < rows; ++r) {
+        auto m = lv[r * classes];
+        for (auto c = size_t{0}; c < classes; ++c) {
+            m = std::max(m, lv[r * classes + c]);
+        }
+        auto denom = float64_t{0.0};
+        for (auto c = size_t{0}; c < classes; ++c) {
+            denom += std::exp(lv[r * classes + c] - m);
+        }
+        ref_loss += (m + std::log(denom) - lv[r * classes + label_of[r]]) / static_cast<float64_t>(rows);
+        for (auto c = size_t{0}; c < classes; ++c) {
+            const auto p = std::exp(lv[r * classes + c] - m) / denom;
+            const auto onehot = c == label_of[r] ? float64_t{1.0} : float64_t{0.0};
+            ref_grad[r * classes + c] = (p - onehot) / static_cast<float64_t>(rows);
+        }
+    }
+
+    auto loss = BeanTensor::Modules::softmax_cross_entropy(logits, labels);
+    loss.backward(DType::Float32);
+    loss.sync();
+    CHECK(near64(loss.at<float32_t>({0}), ref_loss, 1e-5));
+    CHECK(logits.has_grad());
+    for (auto i = size_t{0}; i < rows * classes; ++i) {
+        CHECK(near64(logits.gradient().at<float32_t>({i / classes, i % classes}), ref_grad[i], 1e-5));
+    }
+}
+
+static void test_softmax_training_loop(const Device dev) {
+    // Three well-separated 2-D clusters, four samples each, classified by
+    // Linear(2,8) -> Relu -> Linear(8,3) trained with softmax_cross_entropy
+    // and Module::adam_step. Graph tensors stay alive across the loop.
+    const auto n = size_t{12};
+    const auto cx = std::vector<float64_t>{-1.0, 1.0, 0.0};
+    const auto cy = std::vector<float64_t>{-1.0, -1.0, 1.0};
+    auto x = Tensor({n, 2}, DType::Float32, dev, false);
+    auto labels = Tensor({n}, DType::Int64, dev, false);
+    for (auto i = size_t{0}; i < n; ++i) {
+        const auto c = i / 4;
+        const auto jitter_x = 0.1 * static_cast<float64_t>(i % 4) - 0.15;
+        const auto jitter_y = 0.1 * static_cast<float64_t>(i % 2) - 0.05;
+        x.set<float32_t>({i, 0}, static_cast<float32_t>(cx[c] + jitter_x));
+        x.set<float32_t>({i, 1}, static_cast<float32_t>(cy[c] + jitter_y));
+        labels.set<int64_t>({i}, static_cast<int64_t>(c));
+    }
+
+    auto net = Sequential();
+    net.append("fc1", std::make_unique<Linear>(2, 8, DType::Float32, dev, true, 41));
+    net.append("relu", std::make_unique<BeanTensor::Modules::Relu>());
+    net.append("fc2", std::make_unique<Linear>(8, 3, DType::Float32, dev, true, 42));
+    auto first = float64_t{0.0};
+    for (auto step = size_t{0}; step < 300; ++step) {
+        auto out = net.forward(x);
+        auto loss = BeanTensor::Modules::softmax_cross_entropy(out, labels);
+        if (step == 0) {
+            first = static_cast<float64_t>(loss.at<float32_t>({0}));
+        }
+        loss.backward(DType::Float32);
+        net.adam_step(0.05, 0.9, 0.999, 1e-8);
+        net.zero_grad();
+    }
+    auto out = net.forward(x);
+    auto loss = BeanTensor::Modules::softmax_cross_entropy(out, labels);
+    loss.sync();
+    const auto fin = static_cast<float64_t>(loss.at<float32_t>({0}));
+    CHECK(fin < first);
+    CHECK(fin < 0.05);
+    auto predictions = out.argmax(1);
+    for (auto i = size_t{0}; i < n; ++i) {
+        CHECK(predictions.at<int64_t>({i}) == static_cast<int64_t>(i / 4));
+    }
+}
+
+// =====================================================================
+// Byte and element counts
+// =====================================================================
+
+static void test_byte_counts(const Device dev) {
+    // Tensor level: element_count is the product of the shape, byte_count is
+    // elements times the dtype's element size.
+    auto t64 = Tensor({2, 3}, DType::Float64, dev, false);
+    CHECK(t64.element_count() == 6);
+    CHECK(t64.byte_count() == 48);
+    auto ti = Tensor({5}, DType::Int64, dev, false);
+    CHECK(ti.element_count() == 5);
+    CHECK(ti.byte_count() == 40);
+    // Module level: each parameter counts at its own dtype.
+    // Linear(3,4, Float64, bias): weight 12 + bias 4 = 16 params x 8 B = 128 B.
+    // Linear(4,2, Float32, no bias): weight 8 params x 4 B = 32 B.
+    auto net = Sequential();
+    net.append("l1", std::make_unique<Linear>(3, 4, DType::Float64, dev, true, 51));
+    net.append("l2", std::make_unique<Linear>(4, 2, DType::Float32, dev, false, 52));
+    CHECK(net.parameter_count() == 24);
+    CHECK(net.parameter_bytes() == 160);
+    CHECK(net[0].parameter_count() == 16);
+    CHECK(net[0].parameter_bytes() == 128);
+    CHECK(net[1].parameter_count() == 8);
+    CHECK(net[1].parameter_bytes() == 32);
+    // A container with no children holds no parameters.
+    const auto empty = Sequential();
+    CHECK(empty.parameter_count() == 0);
+    CHECK(empty.parameter_bytes() == 0);
+}
+
+static void test_memory_accounting() {
+    // Linear(3,4, Float64, bias): 16 parameters x 8 B. A gradient exists only
+    // after backward(), Adam state only after adam_step(), and zero_grad()
+    // frees the gradient while leaving the Adam moments in place.
+    // First, a module that is stepped and then destroyed. Its optimizer state
+    // must go with it, so a later module that reuses those addresses starts
+    // with none (regression: the Adam map is keyed by parameter address).
+    {
+        auto gone = Sequential();
+        gone.append("l1", std::make_unique<Linear>(3, 4, DType::Float64, Device::CPU, true, 71));
+        auto gx = Tensor({2, 3}, DType::Float64, Device::CPU, false);
+        gx.set_one();
+        auto gt = Tensor({2, 4}, DType::Float64, Device::CPU, false);
+        gt.set_zero();
+        auto gout = gone.forward(gx);
+        auto gloss = BeanTensor::Modules::mse_loss(gout, gt);
+        gloss.backward(DType::Float64);
+        gone.adam_step(0.01, 0.9, 0.999, 1e-8);
+        CHECK(gone.optimizer_state_bytes() == 256);
+    }
+    auto net = Sequential();
+    net.append("l1", std::make_unique<Linear>(3, 4, DType::Float64, Device::CPU, true, 61));
+    CHECK(net.parameter_grad_bytes() == 0);
+    CHECK(net.optimizer_state_bytes() == 0);
+    auto x = Tensor({2, 3}, DType::Float64, Device::CPU, false);
+    x.set_one();
+    auto target = Tensor({2, 4}, DType::Float64, Device::CPU, false);
+    target.set_zero();
+    auto out = net.forward(x);
+    auto loss = BeanTensor::Modules::mse_loss(out, target);
+    loss.backward(DType::Float64);
+    CHECK(net.parameter_grad_bytes() == 128);
+    CHECK(net.optimizer_state_bytes() == 0);
+    net.adam_step(0.01, 0.9, 0.999, 1e-8);
+    // First and second moments: 2 x 128 B.
+    CHECK(net.optimizer_state_bytes() == 256);
+    net.zero_grad();
+    CHECK(net.parameter_grad_bytes() == 0);
+    CHECK(net.optimizer_state_bytes() == 256);
+
+    // Formatting: thousands separators and binary units.
+    CHECK(BeanTensor::Modules::format_count(0) == "0");
+    CHECK(BeanTensor::Modules::format_count(999) == "999");
+    CHECK(BeanTensor::Modules::format_count(1000) == "1,000");
+    CHECK(BeanTensor::Modules::format_count(101770) == "101,770");
+    CHECK(BeanTensor::Modules::format_bytes(0) == "0 B");
+    CHECK(BeanTensor::Modules::format_bytes(1023) == "1023 B");
+    CHECK(BeanTensor::Modules::format_bytes(1536) == "1.5 KB");
+    CHECK(BeanTensor::Modules::format_bytes(203540) == "198.8 KB");
+    CHECK(BeanTensor::Modules::format_bytes(size_t{1048576}) == "1.0 MB");
+    CHECK(BeanTensor::Modules::format_bytes(size_t{3} * size_t{1024} * size_t{1024} * size_t{1024}) == "3.0 GB");
+}
+
+static void test_argmax_lanes() {
+    // Float32 values convert to Float16x2 with both lanes equal, so each element
+    // holds one value twice. Ties go to the first lane: class 2j.
+    auto logits = Tensor({2, 3}, DType::Float32, Device::CPU, false);
+    const auto v = std::vector<float64_t>{0.1, 0.5, 0.3, 0.9, 0.2, 0.2};
+    for (auto i = size_t{0}; i < v.size(); ++i) {
+        logits.set<float32_t>({i / 3, i % 3}, static_cast<float32_t>(v[i]));
+    }
+    logits.convert_dtype(DType::Float16x2);
+    logits.sync();
+    auto classes = logits.argmax_lanes(1);
+    CHECK(classes.get_dtype() == DType::Int64);
+    CHECK(classes.at<int64_t>({0}) == 2);
+    CHECK(classes.at<int64_t>({1}) == 0);
+    // Non-packed input is refused rather than read as lanes.
+    auto plain = Tensor({2, 3}, DType::Float32, Device::CPU, false);
+    auto threw = false;
+    try {
+        auto bad = plain.argmax_lanes(1);
+        static_cast<void>(bad);
+    } catch (const BeanTensor::ErrorHandling::MismatchedDTypes&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 int main() {
     test_linear_forward(Device::CPU);
     test_linear_no_bias(Device::CPU);
@@ -585,6 +821,12 @@ int main() {
     test_backward_grads(Device::CPU);
     test_training_loop(Device::CPU);
     test_print();
+    test_relu_forward(Device::CPU);
+    test_softmax_cross_entropy(Device::CPU);
+    test_softmax_training_loop(Device::CPU);
+    test_byte_counts(Device::CPU);
+    test_memory_accounting();
+    test_argmax_lanes();
 #if defined(USE_HIP) || defined(USE_CUDA)
     if (gpu_available()) {
         test_linear_forward(Device::GPU);
@@ -593,6 +835,9 @@ int main() {
         test_sequential_empty(Device::GPU);
         test_backward_grads(Device::GPU);
         test_training_loop(Device::GPU);
+        test_relu_forward(Device::GPU);
+        test_softmax_cross_entropy(Device::GPU);
+        test_softmax_training_loop(Device::GPU);
     } else {
         std::cout << "GPU not available — skipping GPU module tests\n";
     }

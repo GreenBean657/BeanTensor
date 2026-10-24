@@ -16,7 +16,7 @@
  * and phase 2's additions: tensor-scalar splat kernels (plain and
  * scalar-on-the-left) exercised directly and end to end, row-decomposition
  * broadcast dispatch, and the per-nibble Int4x2 kernels.
- * @version 0.4
+ * @version 0.5
  * @date 2026-10-23
  */
 #include <cmath>
@@ -1609,15 +1609,12 @@ static T bits_to(const uint64_t bits) {
     }
 }
 
-// Scalar reference mirroring apply_native (fp32/fp64) and apply_int's
-// unsigned-twin wrap arithmetic (integers) — the exact contracts the kernels hold.
+// Scalar reference for the fp32/fp64 NaN contract (ew::fp_binop, the same helper
+// apply_native calls) and apply_int's unsigned-twin wrap arithmetic (integers).
 template<typename T, ElementwiseOp Op>
 static T simd_ref_op(const T a, const T b) {
     if constexpr (std::is_same_v<T, float32_t> || std::is_same_v<T, float64_t>) {
-        if constexpr (Op == ElementwiseOp::Add) { return a + b; }
-        else if constexpr (Op == ElementwiseOp::Sub) { return a - b; }
-        else if constexpr (Op == ElementwiseOp::Mul) { return a * b; }
-        else { return a / b; }
+        return ew::fp_binop<T, Op>(a, b);
     } else {
         using U = std::make_unsigned_t<T>;
         if constexpr (Op == ElementwiseOp::Add) { return static_cast<T>(static_cast<U>(static_cast<U>(a) + static_cast<U>(b))); }
@@ -1632,21 +1629,14 @@ template<typename H, ElementwiseOp Op>
 static uint16_t simd_ref_lane_op(const uint16_t x, const uint16_t y) {
     const auto wx = widen_lane(idet::bit_cast_memcpy<H>(x));
     const auto wy = widen_lane(idet::bit_cast_memcpy<H>(y));
-    float32_t w;
-    if constexpr (Op == ElementwiseOp::Add) { w = wx + wy; }
-    else if constexpr (Op == ElementwiseOp::Sub) { w = wx - wy; }
-    else if constexpr (Op == ElementwiseOp::Mul) { w = wx * wy; }
-    else { w = wx / wy; }
+    const auto w = ew::fp_binop<float32_t, Op>(wx, wy);
     return lane_bits(narrow_lane<H>(w));
 }
 
-// NaN INPUT values are pinned to +-Inf (sign preserved): IEEE arithmetic
-// propagates NaN payloads in operand-order-dependent ways (a compiler may swap
-// the operands of a commutative FP op, and x86 propagates the FIRST source's
-// NaN), which is about codegen, not kernel semantics. NaN payload parity
-// between the kernels and the scalar path is covered bitwise — with NaN-laden
-// inputs — by test_simd_nan_parity_e2e below, which compares the two paths
-// inside the compiled core library instead of against a replica reference.
+// The direct kernel tests pin NaN INPUT values to +-Inf (sign preserved). The NaN
+// payload contract itself is ew::fp_binop's (a NaN operand propagates quieted;
+// when both are NaN the first operand wins), checked by test_fp_binop_nan_contract,
+// and test_simd_nan_parity_e2e compares the dispatched paths on NaN-laden inputs.
 static uint16_t no_nan_lane(const uint16_t bits, const uint16_t exp_mask, const uint16_t mant_mask) {
     if ((bits & exp_mask) == exp_mask && (bits & mant_mask) != 0) {
         return static_cast<uint16_t>((bits & 0x8000u) | exp_mask);
@@ -1877,6 +1867,42 @@ static void test_simd_contig_dispatch_bits() {
     }
 }
 
+// Pins the fp NaN contract against explicit bit patterns (not the helper's own
+// output): a NaN operand comes back quieted (quiet bit set, payload kept), and when
+// both operands are NaN, the first operand's payload is kept.
+template<ElementwiseOp Op>
+static void check_fp_binop_f32(const char* const label, const uint32_t a_bits, const uint32_t b_bits, const uint32_t want_bits) {
+    const auto got = ew::fp_binop<float32_t, Op>(idet::bit_cast_memcpy<float32_t>(a_bits), idet::bit_cast_memcpy<float32_t>(b_bits));
+    const auto got_bits = idet::bit_cast_memcpy<uint32_t>(got);
+    if (got_bits != want_bits) {
+        ++failures;
+        std::cerr << "FAIL: " << label << " got 0x" << std::hex << got_bits << " want 0x" << want_bits << std::dec << "\n";
+    }
+}
+
+template<ElementwiseOp Op>
+static void check_fp_binop_f64(const char* const label, const uint64_t a_bits, const uint64_t b_bits, const uint64_t want_bits) {
+    const auto got = ew::fp_binop<float64_t, Op>(idet::bit_cast_memcpy<float64_t>(a_bits), idet::bit_cast_memcpy<float64_t>(b_bits));
+    const auto got_bits = idet::bit_cast_memcpy<uint64_t>(got);
+    if (got_bits != want_bits) {
+        ++failures;
+        std::cerr << "FAIL: " << label << " got 0x" << std::hex << got_bits << " want 0x" << want_bits << std::dec << "\n";
+    }
+}
+
+static void test_fp_binop_nan_contract() {
+    // a = sNaN 0x7F80FFFF and b = sNaN 0xFFA2912E are the pair from the g++-13 report.
+    check_fp_binop_f32<ElementwiseOp::Add>("f32 add: sNaN a, finite b", 0x7F80FFFF, 0x3F800000, 0x7FC0FFFF);
+    check_fp_binop_f32<ElementwiseOp::Mul>("f32 mul: finite a, sNaN b", 0x3F800000, 0xFFA2912E, 0xFFE2912E);
+    check_fp_binop_f32<ElementwiseOp::Add>("f32 add: both NaN, first wins", 0x7F80FFFF, 0xFFA2912E, 0x7FC0FFFF);
+    check_fp_binop_f32<ElementwiseOp::Mul>("f32 mul: both NaN, first wins", 0x7F80FFFF, 0xFFA2912E, 0x7FC0FFFF);
+    check_fp_binop_f32<ElementwiseOp::Sub>("f32 sub: both NaN, first wins", 0x7F80FFFF, 0xFFA2912E, 0x7FC0FFFF);
+    check_fp_binop_f32<ElementwiseOp::Div>("f32 div: both NaN, first wins", 0xFFA2912E, 0x7F80FFFF, 0xFFE2912E);
+    check_fp_binop_f32<ElementwiseOp::Add>("f32 add: finite", 0x40000000, 0x40400000, 0x40A00000);
+    check_fp_binop_f64<ElementwiseOp::Add>("f64 add: sNaN a, finite b", 0x7FF0000000000001, 0x3FF0000000000000, 0x7FF8000000000001);
+    check_fp_binop_f64<ElementwiseOp::Sub>("f64 sub: both NaN, first wins", 0x7FF0000000000001, 0xFFF4000000000002, 0x7FF8000000000001);
+}
+
 template<typename P, typename H, ElementwiseOp Op>
 static void check_packed_op_bits(const char* const opname, const size_t n, Tensor& r, Tensor& a, Tensor& b) {
     const auto shape = std::vector{n};
@@ -1960,8 +1986,12 @@ static bool nan_relaxed_bits_equal(const DType dt, Tensor& x, Tensor& y,
         case DType::BFloat16x2: {
             const auto exp_mask = dt == DType::Float16x2 ? uint16_t{0x7C00} : uint16_t{0x7F80};
             const auto mant_mask = dt == DType::Float16x2 ? uint16_t{0x03FF} : uint16_t{0x007F};
-            const auto xb = idet::bit_cast_memcpy<uint32_t>(get_flat<float16x2_t>(x, shape, i));
-            const auto yb = idet::bit_cast_memcpy<uint32_t>(get_flat<float16x2_t>(y, shape, i));
+            const auto xb = dt == DType::Float16x2
+                ? idet::bit_cast_memcpy<uint32_t>(get_flat<float16x2_t>(x, shape, i))
+                : idet::bit_cast_memcpy<uint32_t>(get_flat<bfloat16x2_t>(x, shape, i));
+            const auto yb = dt == DType::Float16x2
+                ? idet::bit_cast_memcpy<uint32_t>(get_flat<float16x2_t>(y, shape, i))
+                : idet::bit_cast_memcpy<uint32_t>(get_flat<bfloat16x2_t>(y, shape, i));
             for (const auto lane : {uint16_t{0}, uint16_t{16}}) {
                 const auto xn = lane_is_nan(static_cast<uint16_t>(xb >> lane), exp_mask, mant_mask);
                 const auto yn = lane_is_nan(static_cast<uint16_t>(yb >> lane), exp_mask, mant_mask);
@@ -2579,6 +2609,7 @@ int main() {
     test_half_and_packed();
     test_threaded_path();
     test_simd_kernel_parity();
+    test_fp_binop_nan_contract();
     test_simd_contig_dispatch_bits();
     test_simd_packed_contig_dispatch();
     test_simd_nan_parity_e2e();

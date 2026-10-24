@@ -8,3 +8,4 @@ AGENTS.md
 *.ddi
 .clangd
 gpu-test.sh
+data/

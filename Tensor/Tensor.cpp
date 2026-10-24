@@ -2,8 +2,8 @@
  * @file Tensor.cpp
  * @author GreenBean
  * @brief Tensor definitions: allocation, fills, conversion, transfer, printing and cloning.
- * @version 0.2.1
- * @date 2026-10-18
+ * @version 0.2.2
+ * @date 2026-10-23
  */
 #include "Tensor.h"
 
@@ -556,6 +556,20 @@ namespace BeanTensor::Tensors {
             ++dim;
         }
         return elem_offset;
+    }
+
+    /**
+     * Guards Tensor::set and Tensor::at: the element type they were called
+     * with must be the dtype this tensor stores, or the byte stride is wrong.
+     * Callers sync first (through checked_element_offset), so a pending
+     * convert_dtype has already flipped dtype when this runs.
+     * @param expected DType of the element type being accessed.
+     * @throws ErrorHandling::MismatchedDTypes If expected differs from this tensor's dtype.
+     */
+    void Tensor::require_dtype(const DataTypes::DType expected) const {
+        if (expected != this->dtype) [[unlikely]] {
+            throw ErrorHandling::MismatchedDTypes();
+        }
     }
 
     /**

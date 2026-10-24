@@ -2,7 +2,7 @@
  * @file Tensor.h
  * @author GreenBean
  * @brief Tensor class declaration: dtype, shape, device and buffer ownership.
- * @version 0.3.3
+ * @version 0.4.0
  * @date 2026-10-23
  */
 #pragma once
@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <future>
+#include <optional>
 #include <random>
 #include <utility>
 #include <vector>
@@ -69,14 +70,17 @@ namespace BeanTensor::Tensors {
     // Defined ahead of Tensor: Tensor's inline destructor and move assignment
     // delete their owned Node, which requires the complete type.
     struct alignas(8) Node {
-        void (*_backward_fn)(Tensor*, Tensor**, size_t, DataTypes::DType);
+        // Trampolines receive the owning Node so they can read per-op state
+        // (_scalar, _saved) without a bit-cast channel through _inputs.
+        void (*_backward_fn)(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+        float64_t _scalar; // Tensor-scalar operand of the op; zero when the op has none.
         Tensor* _inputs[BT_TENSOR_MAX_PARENTS];
         Tensor* _saved[BT_TENSOR_MAX_PARENTS];
         uint8_t _n_inputs;
         uint8_t _n_saved;
         uint8_t _n_outputs_pending;
     };
-    class alignas(8) Tensor {
+    class alignas(8) Tensor final {
         public:
         ~Tensor() {
             // Drain pending pool work before freeing buffers — tasks hold raw
@@ -499,11 +503,52 @@ namespace BeanTensor::Tensors {
         void zero_grad();
 
         /**
+         * Pins this leaf's gradient buffer to dtype dt, so later backward()
+         * calls accumulate into that dtype. With no gradient held yet, a zeroed
+         * one is allocated in dt. With one held, the buffer is converted in place
+         * under the single grad-conversion rule (Math/Autograd/GradDType.h).
+         * A change that narrows the buffer (see DataTypes::is_narrowing_conversion)
+         * is refused unless narrowing is Allow; widening is always allowed.
+         * @brief Set the dtype of this leaf's gradient buffer.
+         * @param dt Dtype the gradient buffer must have.
+         * @param narrowing Reject (default) refuses a narrowing change; Allow converts it.
+         * @throws ErrorHandling::NoGradient requires_grad is false.
+         * @throws ErrorHandling::NonLeafGradDType this tensor owns a graph node.
+         * @throws ErrorHandling::NarrowingGradConversion narrowing refused under Reject.
+         */
+        void set_grad_dtype(DataTypes::DType dt, DataTypes::GradNarrowing narrowing = DataTypes::GradNarrowing::Reject);
+
+        /**
+         * Checks every precondition of set_grad_dtype(dt, narrowing) without
+         * changing anything, so a caller applying it to several tensors can
+         * validate all of them before changing any.
+         * @brief Throw if set_grad_dtype(dt, narrowing) would fail.
+         * @param dt Dtype the gradient buffer would have.
+         * @param narrowing Narrowing policy the change would use.
+         * @throws ErrorHandling::NoGradient requires_grad is false.
+         * @throws ErrorHandling::NonLeafGradDType this tensor owns a graph node.
+         * @throws ErrorHandling::NarrowingGradConversion narrowing refused under Reject.
+         */
+        void validate_grad_dtype(DataTypes::DType dt, DataTypes::GradNarrowing narrowing = DataTypes::GradNarrowing::Reject) const;
+
+        /**
          * @brief Does this tensor hold an accumulated gradient?
          * @return True when Tensor::grad is allocated.
          */
         [[nodiscard]] bool has_grad() const {
             return this->grad != nullptr;
+        }
+
+        /**
+         * Dtype of the held gradient buffer, or nullopt when no gradient is held.
+         * @brief Gradient dtype of this tensor.
+         * @return The gradient buffer's dtype, or std::nullopt.
+         */
+        [[nodiscard]] std::optional<DataTypes::DType> grad_dtype() const {
+            if (this->grad == nullptr) {
+                return std::nullopt;
+            }
+            return this->grad->dtype;
         }
 
         /**
@@ -513,6 +558,55 @@ namespace BeanTensor::Tensors {
         [[nodiscard]] DataTypes::DType get_dtype() const {
             return this->dtype;
         }
+
+        /**
+         * Number of elements in this tensor (the product of its shape). A view
+         * reports its own element count.
+         * @brief Element count.
+         * @return Number of elements.
+         */
+        [[nodiscard]] size_t element_count() const {
+            return this->numel;
+        }
+
+        /**
+         * Bytes of element data this tensor addresses: element_count() times the
+         * dtype's element size. Gradients and optimizer state are not included.
+         * @brief Byte size of the tensor data.
+         * @return Number of bytes.
+         */
+        [[nodiscard]] size_t byte_count() const {
+            return this->nbytes;
+        }
+
+        /**
+         * Bytes of the accumulated gradient (Tensor::grad), counted at the
+         * gradient's own dtype. Zero when no gradient is held.
+         * @brief Byte size of this tensor's gradient.
+         * @return Number of bytes.
+         */
+        [[nodiscard]] size_t grad_byte_count() const {
+            return this->grad == nullptr ? size_t{0} : this->grad->byte_count();
+        }
+
+        /**
+         * Bytes of the Adam moment state the optimizer holds for this tensor:
+         * first and second moments, each the same shape and dtype as this
+         * tensor. Zero until Adam has stepped this tensor. The state lives in the
+         * optimizer's map, not in this object. A tensor owned by a Module loses
+         * its state when that Module is destroyed; a bare tensor keeps it until
+         * forget_adam_state() or until its address is reused.
+         * @brief Byte size of this tensor's Adam moment state.
+         * @return Number of bytes.
+         */
+        [[nodiscard]] size_t adam_state_byte_count() const;
+
+        /**
+         * Drops this tensor's Adam moment state from the optimizer's map.
+         * Module's destructor calls this for every parameter it owns.
+         * @brief Forget this tensor's Adam moment state.
+         */
+        void forget_adam_state() const;
 
         /**
          * @brief Access the accumulated gradient tensor.
@@ -588,6 +682,21 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
          */
         [[nodiscard]] Tensor argmax(size_t axis) const;
+
+        /**
+         * Lane-aware argmax over packed x2 logits (Float16x2 or BFloat16x2). Each
+         * element's low lane is class 2j and its high lane is class 2j+1, the
+         * layout softmax_ce trains, so the result is a class index in
+         * [0, 2*classes). argmax() compares whole elements and cannot recover
+         * the class. CPU-only, rank-2 input, axis 1.
+         * @brief Class index of the largest lane per row of packed x2 logits.
+         * @param axis Must be 1.
+         * @return Int64 tensor of shape {rows}.
+         * @throws ErrorHandling::MismatchedDTypes Not a packed x2 dtype.
+         * @throws ErrorHandling::NotImplemented Not rank-2, axis is not 1, or on the GPU.
+         * @throws ErrorHandling::IndexOutOfRange The tensor is empty.
+         */
+        [[nodiscard]] Tensor argmax_lanes(size_t axis);
 
         /**
          * Elementwise equality mask, out of place: out[i] = this[i] == other[i]
@@ -897,32 +1006,45 @@ namespace BeanTensor::Tensors {
         [[nodiscard]] Tensor log() const;
 
         /**
-         * Bounds-checked strided element access.
+         * Bounds-checked strided element access. T must be a type with a
+         * DataTypes::DTypeOf mapping, and it must be the dtype this tensor
+         * stores; the stride is sizeof(T), so a mismatch would read the wrong bytes.
          * @brief Read an element by multidimensional index.
          * @tparam T Element type, matching the tensor's dtype.
          * @param idx One index per dimension; must match ndim exactly.
          * @return Copy of the element's value. A raw pointer is never exposed:
          * it would only be valid for CPU tensors, never GPU ones.
+         * @throws ErrorHandling::MismatchedDTypes T does not map to this tensor's dtype.
          * @throws ErrorHandling::IndexOutOfRange If the rank or any index is out of bounds.
          */
-        template<typename T>
+        template<typename T> requires DataTypes::DTypeMapped<T>
         [[nodiscard]] T at(const std::initializer_list<size_t> idx) {
+            // Offset first: it syncs, and a pending convert_dtype only flips dtype at sync().
+            const auto elem_offset = checked_element_offset(idx);
+            require_dtype(DataTypes::dtype_of_v<T>);
             T value;
-            read_element(checked_element_offset(idx), &value, sizeof(T));
+            read_element(elem_offset, &value, sizeof(T));
             return value;
         }
 
         /**
-         * Bounds-checked strided element write.
+         * Bounds-checked strided element write. T must be a type with a
+         * DataTypes::DTypeOf mapping, and it must be the dtype this tensor
+         * stores; the stride is sizeof(T), so a mismatch would write the wrong bytes.
+         * On a dtype mismatch nothing is written.
          * @brief Assign an element by multidimensional index.
          * @tparam T Element type, matching the tensor's dtype.
          * @param idx One index per dimension; must match ndim exactly.
          * @param value Value to write into the element.
+         * @throws ErrorHandling::MismatchedDTypes T does not map to this tensor's dtype.
          * @throws ErrorHandling::IndexOutOfRange If the rank or any index is out of bounds.
          */
-        template<typename T>
+        template<typename T> requires DataTypes::DTypeMapped<T>
         void set(const std::initializer_list<size_t> idx, const T& value) {
-            write_element(checked_element_offset(idx), &value, sizeof(T));
+            // Offset first: it syncs, and a pending convert_dtype only flips dtype at sync().
+            const auto elem_offset = checked_element_offset(idx);
+            require_dtype(DataTypes::dtype_of_v<T>);
+            write_element(elem_offset, &value, sizeof(T));
         }
 
         [[nodiscard]] bool is_same_shape(const Tensor& t2) const {
@@ -1159,6 +1281,14 @@ namespace BeanTensor::Tensors {
         size_t checked_element_offset(std::initializer_list<size_t> idx) const;
 
         /**
+         * Throw unless the element type a caller is accessing matches this
+         * tensor's dtype. Reads the dtype as-is, so callers must sync first
+         * (checked_element_offset does): a pending convert_dtype flips dtype at sync().
+         * @throws ErrorHandling::MismatchedDTypes If expected differs from this tensor's dtype.
+         */
+        void require_dtype(DataTypes::DType) const;
+
+        /**
          * Read one element (bytes at elem_offset * bytes) into dst.
          * Blocks on GPU tensors via a synchronous device-to-host copy.
          */
@@ -1226,11 +1356,13 @@ namespace BeanTensor::Tensors {
          * receive ALL op inputs (backward needs non-grad operands too, e.g.
          * GEMM's dA needs B), gated on requires_grad inside the node fn.
          * Parents are borrowed raw pointers — they must outlive backward().
-         * @param backward_fn Node::_backward_fn implementation for the op.
+         * @param backward_fn Node::_backward_fn implementation for the op. The
+         * new node is passed to it on every fire, so the op can store per-node
+         * state in Node::_scalar before wiring (or after, via Tensor::node).
          * @param a First op input.
          * @param b Second op input, when the op is binary.
          */
-        void wire_node(void (*backward_fn)(Tensor*, Tensor**, size_t, DataTypes::DType), const Tensor& a, const Tensor* b = nullptr);
+        void wire_node(void (*backward_fn)(Node*, Tensor*, Tensor**, size_t, DataTypes::DType), const Tensor& a, const Tensor* b = nullptr);
 
         friend void detail::set_amount_gpu(Tensor& t, int64_t amount);
         friend void detail::set_amount_gpu(Tensor& t, uint64_t amount);
@@ -1263,14 +1395,14 @@ namespace BeanTensor::Tensors {
         friend void detail::softmax_ce_gpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::mse_cpu(const Tensor&, const Tensor&, Tensor&);
         friend void detail::mse_gpu(const Tensor&, const Tensor&, const Tensor&);
-        friend void detail::gemm_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
-        friend void detail::bias_add_g_node(Tensor*, Tensor**, size_t, DataTypes::DType);
-        friend void detail::relu_g_node(const Tensor*, Tensor**, size_t, DataTypes::DType);
-        friend void detail::softmax_ce_g_node(const Tensor*, Tensor**, size_t, DataTypes::DType);
-        friend void detail::mse_g_node(const Tensor*, Tensor**, size_t, DataTypes::DType);
-        friend void detail::ew_binary_g_node_impl(Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseOp);
-        friend void detail::ew_scalar_g_node_impl(Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseOp);
-        friend void detail::ew_unary_g_node_impl(Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseUnaryOp);
+        friend void detail::gemm_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::bias_add_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::relu_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::softmax_ce_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::mse_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::ew_binary_g_node_impl(Node*, Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseOp);
+        friend void detail::ew_scalar_g_node_impl(Node*, Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseOp);
+        friend void detail::ew_unary_g_node_impl(Node*, Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseUnaryOp);
         friend void detail::ew_deliver_delta(Tensor&&, Tensor&, const DataTypes::DType&, const DataTypes::DType&);
         friend Tensor detail::ew_operand_copy(const Tensor&, const DataTypes::DType&);
         friend void detail::bcast_sum_to_cpu(const Tensor&, const Tensor&, Tensor&);

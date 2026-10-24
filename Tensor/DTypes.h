@@ -1,9 +1,10 @@
 /**
  * @file DTypes.h
  * @author GreenBean
- * @brief Fixed-width dtype aliases, packed dtypes and dtype metadata.
- * @version 0.1
- * @date 2026-10-18
+ * @brief Fixed-width dtype aliases, packed dtypes, dtype metadata, and the
+ * narrowing predicate used by gradient-dtype changes.
+ * @version 0.3
+ * @date 2026-10-23
  */
 #pragma once
 
@@ -103,6 +104,17 @@ namespace BeanTensor::DataTypes {
         Int4x2
     };
 
+    /**
+     * Policy for a gradient-dtype change that would narrow an existing gradient.
+     * Reject (the default) refuses any change that can lose values or range;
+     * Allow converts the gradient anyway. See is_narrowing_conversion.
+     * @brief Whether a gradient-dtype change may narrow.
+     */
+    enum class GradNarrowing {
+        Reject,
+        Allow
+    };
+
     inline size_t dtype_bytes(const DType& dt) {
         switch (dt) {
             case DType::Float16: return sizeof(float16_t);
@@ -144,6 +156,60 @@ namespace BeanTensor::DataTypes {
             [[unlikely]] default: throw ErrorHandling::NotImplemented();
         }
     }
+
+    /**
+     * Mapping shared by every DTypeOf specialization.
+     * @tparam T C++ element type.
+     * @tparam D DType that T is stored as.
+     */
+    template <class T, DType D> struct DTypeMapping {
+        static constexpr bool mapped = true;
+        static constexpr DType value = D;
+    };
+
+    /**
+     * Compile-time map from a C++ element type to its DType. Each DType has
+     * exactly one specialization, so the mapping is one-to-one. Any type
+     * without a specialization (bool, long long, ...) keeps mapped == false
+     * and is rejected at compile time by DTypeMapped.
+     *
+     * Packed and sub-byte types map to their own DType, not to a lane type:
+     * Float16x2/BFloat16x2 are one 4-byte element holding two lanes, and
+     * Int4x2 is one byte holding two signed 4-bit lanes. For each of these,
+     * dtype_bytes() equals sizeof(T), so a write of T lands on the element it
+     * addresses. Individual lanes of a packed element are never addressed.
+     * @tparam T Candidate element type.
+     */
+    template <class T> struct DTypeOf {
+        static constexpr bool mapped = false;
+    };
+    template <> struct DTypeOf<float16_t> : DTypeMapping<float16_t, DType::Float16> { };
+    template <> struct DTypeOf<float16x2_t> : DTypeMapping<float16x2_t, DType::Float16x2> { };
+    template <> struct DTypeOf<bfloat16_t> : DTypeMapping<bfloat16_t, DType::BFloat16> { };
+    template <> struct DTypeOf<bfloat16x2_t> : DTypeMapping<bfloat16x2_t, DType::BFloat16x2> { };
+    template <> struct DTypeOf<float32_t> : DTypeMapping<float32_t, DType::Float32> { };
+    template <> struct DTypeOf<float64_t> : DTypeMapping<float64_t, DType::Float64> { };
+    template <> struct DTypeOf<int64_t> : DTypeMapping<int64_t, DType::Int64> { };
+    template <> struct DTypeOf<int32_t> : DTypeMapping<int32_t, DType::Int32> { };
+    template <> struct DTypeOf<int16_t> : DTypeMapping<int16_t, DType::Int16> { };
+    template <> struct DTypeOf<int8_t> : DTypeMapping<int8_t, DType::Int8> { };
+    template <> struct DTypeOf<uint64_t> : DTypeMapping<uint64_t, DType::UInt64> { };
+    template <> struct DTypeOf<uint32_t> : DTypeMapping<uint32_t, DType::UInt32> { };
+    template <> struct DTypeOf<uint16_t> : DTypeMapping<uint16_t, DType::UInt16> { };
+    template <> struct DTypeOf<uint8_t> : DTypeMapping<uint8_t, DType::UInt8> { };
+    template <> struct DTypeOf<int4x2_t> : DTypeMapping<int4x2_t, DType::Int4x2> { };
+
+    /**
+     * @brief True when element type T has a DType mapping (see DTypeOf).
+     * @tparam T Candidate element type.
+     */
+    template <class T> concept DTypeMapped = DTypeOf<T>::mapped;
+
+    /**
+     * @brief DType that element type T is stored as. Only meaningful when DTypeMapped<T>.
+     * @tparam T Element type with a DTypeOf specialization.
+     */
+    template <class T> constexpr DType dtype_of_v = DTypeOf<T>::value;
 }
 namespace BeanTensor::DataTypes::detail {
     constexpr float32_t FP16_MAX      =  65504.0f;
@@ -159,4 +225,146 @@ namespace BeanTensor::DataTypes::detail {
     // numeric_limits<float32_t>::max()/lowest(); nvcc rejects numeric_limits in device code.
     constexpr float64_t FP32_MAX_D =  3.4028234663852886e+38;
     constexpr float64_t FP32_MIN_D = -3.4028234663852886e+38;
+
+    /**
+     * Significand width (implicit bit included), largest exponent and smallest
+     * subnormal exponent of a non-packed float dtype: the three numbers that
+     * decide whether a float -> float conversion is exact.
+     */
+    struct FloatLayout {
+        int32_t significand_bits;
+        int32_t max_exponent;
+        int32_t min_subnormal_exponent;
+    };
+
+    /**
+     * Signedness and bit width of a non-packed integer dtype.
+     */
+    struct IntLayout {
+        bool is_signed;
+        int32_t bits;
+    };
+
+    /**
+     * @brief Layout of a non-packed float dtype.
+     * @param dt Float16, BFloat16, Float32 or Float64.
+     * @return The float layout.
+     * @throws ErrorHandling::NotImplemented for any other dtype.
+     */
+    inline FloatLayout float_layout(const DType& dt) {
+        switch (dt) {
+            case DType::Float16: return {11, 15, -24};
+            case DType::BFloat16: return {8, 127, -133};
+            case DType::Float32: return {24, 127, -149};
+            case DType::Float64: return {53, 1023, -1074};
+            [[unlikely]] default: throw ErrorHandling::NotImplemented();
+        }
+    }
+
+    /**
+     * @brief Signedness and width of a non-packed integer dtype.
+     * @param dt Int8..Int64 or UInt8..UInt64.
+     * @return The integer layout.
+     * @throws ErrorHandling::NotImplemented for any other dtype.
+     */
+    inline IntLayout int_layout(const DType& dt) {
+        switch (dt) {
+            case DType::Int8: return {true, 8};
+            case DType::Int16: return {true, 16};
+            case DType::Int32: return {true, 32};
+            case DType::Int64: return {true, 64};
+            case DType::UInt8: return {false, 8};
+            case DType::UInt16: return {false, 16};
+            case DType::UInt32: return {false, 32};
+            case DType::UInt64: return {false, 64};
+            [[unlikely]] default: throw ErrorHandling::NotImplemented();
+        }
+    }
+
+    /**
+     * @brief Is dt one of the non-packed float dtypes (Float16, BFloat16, Float32, Float64)?
+     * @param dt Dtype to test.
+     * @return True for a non-packed float dtype.
+     */
+    inline bool is_float_dtype(const DType& dt) {
+        return dt == DType::Float16 || dt == DType::BFloat16 || dt == DType::Float32 || dt == DType::Float64;
+    }
+
+    /**
+     * @brief Is dt a packed dtype (Float16x2, BFloat16x2 or Int4x2)?
+     * @param dt Dtype to test.
+     * @return True for a packed dtype.
+     */
+    inline bool is_packed_dtype(const DType& dt) {
+        return dt == DType::Float16x2 || dt == DType::BFloat16x2 || dt == DType::Int4x2;
+    }
+}
+
+namespace BeanTensor::DataTypes {
+
+    /**
+     * True when converting a value of dtype src to dtype dst can lose value or
+     * range, so the destination cannot hold every value the source can. Rules:
+     * - same dtype: never narrowing;
+     * - a packed source (Float16x2, BFloat16x2, Int4x2) keeps only its low lane
+     *   when converted to anything else: always narrowing;
+     * - an unpacked source into a packed destination duplicates the value into
+     *   both lanes, so it is narrowing exactly when it is narrowing into the
+     *   lane type (Int4x2 lanes are 4-bit: anything but Int4x2 is narrowing);
+     * - float into integer always truncates: narrowing;
+     * - float into float is exact when the source's significand, max exponent
+     *   and smallest subnormal exponent all fit the destination's;
+     * - integer into float is exact when the integer's bit width fits the
+     *   float's significand (Int8 fits Float16/BFloat16; Int32 fits Float64 only;
+     *   Int64 fits no float exactly);
+     * - integer into integer is exact when the destination can hold every source
+     *   value: same signedness with at least the source width, unsigned into
+     *   signed with strictly more bits, signed into unsigned never.
+     * @brief Does src -> dst lose values or range?
+     * @param src Source dtype.
+     * @param dst Destination dtype.
+     * @return True when the conversion can lose data.
+     * @throws ErrorHandling::NotImplemented for a dtype outside the supported set.
+     */
+    inline bool is_narrowing_conversion(const DType& src, const DType& dst) {
+        if (src == dst) {
+            return false;
+        }
+        if (detail::is_packed_dtype(src)) {
+            return true;
+        }
+        if (dst == DType::Int4x2) {
+            return true;
+        }
+        if (dst == DType::Float16x2) {
+            return is_narrowing_conversion(src, DType::Float16);
+        }
+        if (dst == DType::BFloat16x2) {
+            return is_narrowing_conversion(src, DType::BFloat16);
+        }
+        if (detail::is_float_dtype(dst)) {
+            if (detail::is_float_dtype(src)) {
+                const auto from = detail::float_layout(src);
+                const auto to = detail::float_layout(dst);
+                return !(
+                    from.significand_bits <= to.significand_bits &&
+                    from.max_exponent <= to.max_exponent &&
+                    from.min_subnormal_exponent >= to.min_subnormal_exponent
+                );
+            }
+            return detail::int_layout(src).bits > detail::float_layout(dst).significand_bits;
+        }
+        if (detail::is_float_dtype(src)) {
+            return true;
+        }
+        const auto from = detail::int_layout(src);
+        const auto to = detail::int_layout(dst);
+        if (from.is_signed && !to.is_signed) {
+            return true;
+        }
+        if (from.is_signed == to.is_signed) {
+            return to.bits < from.bits;
+        }
+        return to.bits <= from.bits;
+    }
 }

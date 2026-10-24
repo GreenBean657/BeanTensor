@@ -3,7 +3,7 @@
  * @author GreenBean
  * @brief Entry point for mse backward (cpu vs gpu):
  * dpred = 2 * (pred - target) / numel * dloss.
- * @version 0.1
+ * @version 0.2
  * @date 2026-10-23
  */
 #pragma once
@@ -12,6 +12,7 @@
 
 namespace BeanTensor::Tensors {
     class Tensor;
+    struct Node;
     namespace detail {
 
         /**
@@ -25,14 +26,15 @@ namespace BeanTensor::Tensors {
 
         /**
          * @brief Backward trampoline for mse; matches Node::_backward_fn's
-         * signature. The trailing DType is the calling backward()'s assigned grad dtype.
+         * signature. The leading Node* is the owning node; the trailing DType is the
+         * calling backward()'s assigned grad dtype.
          */
-        void mse_g_node(const Tensor*, Tensor**, size_t, DataTypes::DType);
+        void mse_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
         /**
          * @brief Signature bridge between wire_node (mutable output_grad) and
          * mse_g_node (const output_grad).
          */
-        void mse_g_bridge(Tensor*, Tensor**, size_t, DataTypes::DType);
+        void mse_g_bridge(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
     }
 }
 

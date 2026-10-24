@@ -7,7 +7,7 @@
  * per-parameter first/second moments and a step count, and Tensor's verified
  * sizeof layout must not grow, so the state lives in an external map keyed by
  * the parameter's address (this file) instead of new Tensor members.
- * @version 0.1.1
+ * @version 0.1.3
  * @date 2026-10-23
  */
 #include <cmath>
@@ -442,5 +442,35 @@ namespace BeanTensor::Tensors {
             throw ErrorHandling::NoGradient();
         }
         adam_update(*this->grad, lr, beta1, beta2, epsilon);
+    }
+
+    /**
+     * Reads the optimizer's map under the same mutex the step holds, so a
+     * concurrent step cannot resize the map mid-lookup. Does not create an entry.
+     * @brief Byte size of this tensor's Adam moment state.
+     * @return Bytes held for first and second moments, or 0 if none.
+     */
+    size_t Tensor::adam_state_byte_count() const {
+        const auto lock = std::lock_guard{detail::adam_state_mutex()};
+        const auto& states = detail::adam_states();
+        const auto found = states.find(this);
+        if (found == states.end() || !found->second) {
+            return 0;
+        }
+        const auto& entry = *found->second;
+        if (entry.m == nullptr || entry.v == nullptr) {
+            return 0;
+        }
+        return entry.m->byte_count() + entry.v->byte_count();
+    }
+
+    /**
+     * Erases this tensor's entry under the same mutex a step holds. Erasing
+     * destroys the moment tensors, which drain their own pending work.
+     * @brief Drop this tensor's Adam moment state from the optimizer's map.
+     */
+    void Tensor::forget_adam_state() const {
+        const auto lock = std::lock_guard{detail::adam_state_mutex()};
+        detail::adam_states().erase(this);
     }
 }

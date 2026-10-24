@@ -40,7 +40,7 @@ namespace BeanTensor::Modules {
             // The matmul intermediate is referenced by bias_add's graph
             // node, so it must outlive this stack frame — hold it in the
             // forward cache.
-            auto& y = this->hold_intermediate(x.matmul(this->parameter("weight")));
+            const auto& y = this->hold_intermediate(x.matmul(this->parameter("weight")));
             return y.bias_add(this->parameter("bias"));
         }
         return x.matmul(this->parameter("weight"));
@@ -50,15 +50,15 @@ namespace BeanTensor::Modules {
         return "Linear";
     }
 
-    size_t Linear::in_features() const {
+    size_t Linear::in_features() const noexcept {
         return this->in_features_;
     }
 
-    size_t Linear::out_features() const {
+    size_t Linear::out_features() const noexcept {
         return this->out_features_;
     }
 
-    bool Linear::has_bias() const {
+    bool Linear::has_bias() const noexcept {
         return this->has_bias_;
     }
 }

@@ -2,11 +2,11 @@
  * @file Backward.cpp
  * @author GreenBean
  * @brief Tensor gradient plumbing: ensure_grad, accumulate_grad, wire_node,
- * zero_grad, and backward() (reverse-mode backpropagation, Kahn's algorithm
- * over consumer counts). accumulate_grad dispatches to the grad_acc
- * cpu/gpu backends.
- * @version 0.1
- * @date 2026-10-20
+ * zero_grad, set_grad_dtype (with its validate_grad_dtype precheck), and
+ * backward() (reverse-mode backpropagation, Kahn's algorithm over consumer
+ * counts). accumulate_grad dispatches to the grad_acc cpu/gpu backends.
+ * @version 0.3
+ * @date 2026-10-23
  */
 #include <limits>
 #include <unordered_set>
@@ -76,11 +76,11 @@ namespace BeanTensor::Tensors {
      * that requires grad, allocates a Node recording backward_fn and the input pointers
      * (non-owning: the inputs must outlive this tensor), and replaces any stale node.
      * @brief Attach an autograd node to this (output) tensor.
-     * @param backward_fn Backward trampoline invoked as (output grad, inputs, input count).
+     * @param backward_fn Backward trampoline invoked as (owning node, output grad, inputs, input count, grad dtype).
      * @param a First input tensor.
      * @param b Optional second input tensor; nullptr for a unary op.
      */
-    void Tensor::wire_node(void (*backward_fn)(Tensor*, Tensor**, size_t, DataTypes::DType), const Tensor& a, const Tensor* b) {
+    void Tensor::wire_node(void (*backward_fn)(Node*, Tensor*, Tensor**, size_t, DataTypes::DType), const Tensor& a, const Tensor* b) {
         if (!a.requires_grad && (b == nullptr || !b->requires_grad)) {
             return;
         }
@@ -109,6 +109,62 @@ namespace BeanTensor::Tensors {
     void Tensor::zero_grad() {
         delete this->grad; // ~Tensor drains grad's own pending workers first
         this->grad = nullptr;
+    }
+
+    /**
+     * Refuses non-leaf tensors and tensors that do not require grad, then, when a
+     * gradient is held with a dtype different from dt, refuses a narrowing change
+     * under Reject. Syncs the held gradient first, since a pending conversion only
+     * flips its dtype at sync().
+     * @brief Check set_grad_dtype's preconditions without changing anything.
+     * @param dt Dtype the gradient buffer would have.
+     * @param narrowing Narrowing policy the change would use.
+     * @throws ErrorHandling::NonLeafGradDType this tensor owns a graph node.
+     * @throws ErrorHandling::NoGradient requires_grad is false.
+     * @throws ErrorHandling::NarrowingGradConversion narrowing refused under Reject.
+     */
+    void Tensor::validate_grad_dtype(const DataTypes::DType dt, const DataTypes::GradNarrowing narrowing) const {
+        if (this->node != nullptr) {
+            throw ErrorHandling::NonLeafGradDType();
+        }
+        if (!this->requires_grad) {
+            throw ErrorHandling::NoGradient();
+        }
+        if (this->grad == nullptr) {
+            return;
+        }
+        this->grad->sync();
+        if (
+            const auto old = this->grad->dtype;
+            old != dt && narrowing == DataTypes::GradNarrowing::Reject && DataTypes::is_narrowing_conversion(old, dt)
+        ) {
+            throw ErrorHandling::NarrowingGradConversion();
+        }
+    }
+
+    /**
+     * Validates via validate_grad_dtype, then: with no gradient held, allocates a
+     * zeroed one in dt (so the leaf is pinned to dt for its next backward); with a
+     * gradient of dt already, does nothing; otherwise converts the held buffer in
+     * place under the single grad-conversion rule and syncs, so the conversion has
+     * landed before the next backward() accumulates into it.
+     * @brief Pin or change this leaf's gradient dtype.
+     * @param dt Dtype the gradient buffer must have.
+     * @param narrowing Reject refuses a narrowing change; Allow converts it.
+     * @throws ErrorHandling::NonLeafGradDType this tensor owns a graph node.
+     * @throws ErrorHandling::NoGradient requires_grad is false.
+     * @throws ErrorHandling::NarrowingGradConversion narrowing refused under Reject.
+     */
+    void Tensor::set_grad_dtype(const DataTypes::DType dt, const DataTypes::GradNarrowing narrowing) {
+        this->validate_grad_dtype(dt, narrowing);
+        if (this->grad == nullptr) {
+            this->ensure_grad(dt);
+            return;
+        }
+        if (this->grad->dtype == dt) {
+            return;
+        }
+        detail::grad_convert_inplace(*this->grad, dt);
     }
 
     /**
@@ -202,7 +258,7 @@ namespace BeanTensor::Tensors {
             const auto* t = ready.back();
             ready.pop_back();
             auto* const n = t->node;
-            n->_backward_fn(t->grad, n->_inputs, n->_n_inputs, grad_dtype);
+            n->_backward_fn(n, t->grad, n->_inputs, n->_n_inputs, grad_dtype);
             ++fired;
             for (auto i = size_t{0}; i < n->_n_inputs; ++i) {
                 if (

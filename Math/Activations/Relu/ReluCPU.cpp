@@ -4,8 +4,8 @@
  * @brief CPU backend for relu.
  * Hosts the Tensor::relu method definition (mirrors how Tensor::matmul
  * lives in MatmulCPU.cpp).
- * @version 0.1
- * @date 2026-10-20
+ * @version 0.2
+ * @date 2026-10-23
  */
 #include <type_traits>
 #include <vector>
@@ -124,13 +124,14 @@ namespace BeanTensor::Tensors::detail {
          * Clang build accepts as an extension but GCC rejects). The trampoline
          * only reads output_grad, so forward through a matching bridge.
          * @brief Signature bridge between wire_node and relu_g_node.
+         * @param node Owning node, forwarded to relu_g_node unchanged.
          * @param output_grad Gradient of the forward output, in grad_dtype.
          * @param inputs Input tensors of the forward op.
          * @param n_inputs Number of entries in inputs.
          * @param grad_dtype The calling backward()'s assigned gradient dtype.
          */
-        void relu_g_bridge(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
-            relu_g_node(output_grad, inputs, n_inputs, grad_dtype);
+        void relu_g_bridge(Node* node, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+            relu_g_node(node, output_grad, inputs, n_inputs, grad_dtype);
         }
     }
 

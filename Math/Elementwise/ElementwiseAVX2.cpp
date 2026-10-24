@@ -17,7 +17,7 @@
  * register, same tail semantics) and the per-nibble Int4x2 wrap kernels
  * (unsigned-nibble byte-lane arithmetic masked to 4 bits reproduces the
  * scalar signed wrap bit-for-bit).
- * @version 0.2
+ * @version 0.3
  * @date 2026-10-23
  */
 #include <immintrin.h>
@@ -37,36 +37,65 @@ namespace BeanTensor::Math::Elementwise {
         // --------------------------- vector op selectors ---------------------------
 
         /**
-         * Compile-time map from the elementwise op selector to the fp32 vector instruction.
+         * Applies the fp_binop NaN contract to a computed lane vector: where x is NaN
+         * the quieted x wins, otherwise where y is NaN the quieted y wins. Explicit
+         * selects, so the choice never depends on how the compiler orders the
+         * instruction's operands. Non-NaN lanes keep r.
+         * @brief fp32 NaN-contract select.
+         */
+        [[nodiscard]] __m256 f32_nan_select(const __m256 x, const __m256 y, const __m256 r) {
+            const auto quiet = _mm256_castsi256_ps(_mm256_set1_epi32(0x00400000));
+            const auto x_nan = _mm256_cmp_ps(x, x, _CMP_UNORD_Q);
+            const auto y_nan = _mm256_cmp_ps(y, y, _CMP_UNORD_Q);
+            const auto pick = _mm256_blendv_ps(_mm256_or_ps(y, quiet), _mm256_or_ps(x, quiet), x_nan);
+            return _mm256_blendv_ps(r, pick, _mm256_or_ps(x_nan, y_nan));
+        }
+
+        /**
+         * fp64 twin of f32_nan_select (quiet bit 51).
+         * @brief fp64 NaN-contract select.
+         */
+        [[nodiscard]] __m256d f64_nan_select(const __m256d x, const __m256d y, const __m256d r) {
+            const auto quiet = _mm256_castsi256_pd(_mm256_set1_epi64x(static_cast<int64_t>(uint64_t{1} << 51)));
+            const auto x_nan = _mm256_cmp_pd(x, x, _CMP_UNORD_Q);
+            const auto y_nan = _mm256_cmp_pd(y, y, _CMP_UNORD_Q);
+            const auto pick = _mm256_blendv_pd(_mm256_or_pd(y, quiet), _mm256_or_pd(x, quiet), x_nan);
+            return _mm256_blendv_pd(r, pick, _mm256_or_pd(x_nan, y_nan));
+        }
+
+        /**
+         * Compile-time map from the elementwise op selector to the fp32 vector instruction,
+         * under the fp_binop NaN contract.
          * @brief fp32 vector op.
          */
         template<ElementwiseOp Op>
         [[nodiscard]] __m256 f32_vec_op(const __m256 x, const __m256 y) {
             if constexpr (Op == ElementwiseOp::Add) {
-                return _mm256_add_ps(x, y);
+                return f32_nan_select(x, y, _mm256_add_ps(x, y));
             } else if constexpr (Op == ElementwiseOp::Sub) {
-                return _mm256_sub_ps(x, y);
+                return f32_nan_select(x, y, _mm256_sub_ps(x, y));
             } else if constexpr (Op == ElementwiseOp::Mul) {
-                return _mm256_mul_ps(x, y);
+                return f32_nan_select(x, y, _mm256_mul_ps(x, y));
             } else {
-                return _mm256_div_ps(x, y);
+                return f32_nan_select(x, y, _mm256_div_ps(x, y));
             }
         }
 
         /**
-         * Compile-time map from the elementwise op selector to the fp64 vector instruction.
+         * Compile-time map from the elementwise op selector to the fp64 vector instruction,
+         * under the fp_binop NaN contract.
          * @brief fp64 vector op.
          */
         template<ElementwiseOp Op>
         [[nodiscard]] __m256d f64_vec_op(const __m256d x, const __m256d y) {
             if constexpr (Op == ElementwiseOp::Add) {
-                return _mm256_add_pd(x, y);
+                return f64_nan_select(x, y, _mm256_add_pd(x, y));
             } else if constexpr (Op == ElementwiseOp::Sub) {
-                return _mm256_sub_pd(x, y);
+                return f64_nan_select(x, y, _mm256_sub_pd(x, y));
             } else if constexpr (Op == ElementwiseOp::Mul) {
-                return _mm256_mul_pd(x, y);
+                return f64_nan_select(x, y, _mm256_mul_pd(x, y));
             } else {
-                return _mm256_div_pd(x, y);
+                return f64_nan_select(x, y, _mm256_div_pd(x, y));
             }
         }
 
@@ -111,16 +140,7 @@ namespace BeanTensor::Math::Elementwise {
                 Intrinsics::detail::bit_cast_memcpy<float16_t>(x));
             const auto wy = Intrinsics::detail::unaccel_fp16_to_fp32_untracked(
                 Intrinsics::detail::bit_cast_memcpy<float16_t>(y));
-            float32_t w;
-            if constexpr (Op == ElementwiseOp::Add) {
-                w = wx + wy;
-            } else if constexpr (Op == ElementwiseOp::Sub) {
-                w = wx - wy;
-            } else if constexpr (Op == ElementwiseOp::Mul) {
-                w = wx * wy;
-            } else {
-                w = wx / wy;
-            }
+            const auto w = Math::Elementwise::fp_binop<float32_t, Op>(wx, wy);
             return Intrinsics::detail::bit_cast_memcpy<uint16_t>(
                 Intrinsics::detail::unaccel_fp32_to_fp16_untracked(w));
         }
@@ -178,16 +198,7 @@ namespace BeanTensor::Math::Elementwise {
                 Intrinsics::detail::bit_cast_memcpy<bfloat16_t>(x));
             const auto wy = Intrinsics::detail::unaccel_bf16_to_fp32(
                 Intrinsics::detail::bit_cast_memcpy<bfloat16_t>(y));
-            float32_t w;
-            if constexpr (Op == ElementwiseOp::Add) {
-                w = wx + wy;
-            } else if constexpr (Op == ElementwiseOp::Sub) {
-                w = wx - wy;
-            } else if constexpr (Op == ElementwiseOp::Mul) {
-                w = wx * wy;
-            } else {
-                w = wx / wy;
-            }
+            const auto w = Math::Elementwise::fp_binop<float32_t, Op>(wx, wy);
             return Intrinsics::detail::bit_cast_memcpy<uint16_t>(
                 Intrinsics::detail::unaccel_fp32_to_bf16_untracked(w));
         }
@@ -313,15 +324,7 @@ namespace BeanTensor::Math::Elementwise {
                 _mm256_storeu_ps(out + i, f32_vec_op<Op>(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i)));
             }
             for (; i < end; ++i) {
-                if constexpr (Op == ElementwiseOp::Add) {
-                    out[i] = a[i] + b[i];
-                } else if constexpr (Op == ElementwiseOp::Sub) {
-                    out[i] = a[i] - b[i];
-                } else if constexpr (Op == ElementwiseOp::Mul) {
-                    out[i] = a[i] * b[i];
-                } else {
-                    out[i] = a[i] / b[i];
-                }
+                out[i] = Math::Elementwise::fp_binop<float32_t, Op>(a[i], b[i]);
             }
         }
 
@@ -337,15 +340,7 @@ namespace BeanTensor::Math::Elementwise {
                 _mm256_storeu_pd(out + i, f64_vec_op<Op>(_mm256_loadu_pd(a + i), _mm256_loadu_pd(b + i)));
             }
             for (; i < end; ++i) {
-                if constexpr (Op == ElementwiseOp::Add) {
-                    out[i] = a[i] + b[i];
-                } else if constexpr (Op == ElementwiseOp::Sub) {
-                    out[i] = a[i] - b[i];
-                } else if constexpr (Op == ElementwiseOp::Mul) {
-                    out[i] = a[i] * b[i];
-                } else {
-                    out[i] = a[i] / b[i];
-                }
+                out[i] = Math::Elementwise::fp_binop<float64_t, Op>(a[i], b[i]);
             }
         }
 
@@ -499,15 +494,7 @@ namespace BeanTensor::Math::Elementwise {
                 _mm256_storeu_ps(out + i, f32_vec_op<Op>(_mm256_loadu_ps(a + i), vs));
             }
             for (; i < end; ++i) {
-                if constexpr (Op == ElementwiseOp::Add) {
-                    out[i] = a[i] + s;
-                } else if constexpr (Op == ElementwiseOp::Sub) {
-                    out[i] = a[i] - s;
-                } else if constexpr (Op == ElementwiseOp::Mul) {
-                    out[i] = a[i] * s;
-                } else {
-                    out[i] = a[i] / s;
-                }
+                out[i] = Math::Elementwise::fp_binop<float32_t, Op>(a[i], s);
             }
         }
 
@@ -524,15 +511,7 @@ namespace BeanTensor::Math::Elementwise {
                 _mm256_storeu_pd(out + i, f64_vec_op<Op>(_mm256_loadu_pd(a + i), vs));
             }
             for (; i < end; ++i) {
-                if constexpr (Op == ElementwiseOp::Add) {
-                    out[i] = a[i] + s;
-                } else if constexpr (Op == ElementwiseOp::Sub) {
-                    out[i] = a[i] - s;
-                } else if constexpr (Op == ElementwiseOp::Mul) {
-                    out[i] = a[i] * s;
-                } else {
-                    out[i] = a[i] / s;
-                }
+                out[i] = Math::Elementwise::fp_binop<float64_t, Op>(a[i], s);
             }
         }
 
@@ -758,15 +737,7 @@ namespace BeanTensor::Math::Elementwise {
                 _mm256_storeu_ps(out + i, f32_vec_op<Op>(vs, _mm256_loadu_ps(a + i)));
             }
             for (; i < end; ++i) {
-                if constexpr (Op == ElementwiseOp::Add) {
-                    out[i] = s + a[i];
-                } else if constexpr (Op == ElementwiseOp::Sub) {
-                    out[i] = s - a[i];
-                } else if constexpr (Op == ElementwiseOp::Mul) {
-                    out[i] = s * a[i];
-                } else {
-                    out[i] = s / a[i];
-                }
+                out[i] = Math::Elementwise::fp_binop<float32_t, Op>(s, a[i]);
             }
         }
 
@@ -782,15 +753,7 @@ namespace BeanTensor::Math::Elementwise {
                 _mm256_storeu_pd(out + i, f64_vec_op<Op>(vs, _mm256_loadu_pd(a + i)));
             }
             for (; i < end; ++i) {
-                if constexpr (Op == ElementwiseOp::Add) {
-                    out[i] = s + a[i];
-                } else if constexpr (Op == ElementwiseOp::Sub) {
-                    out[i] = s - a[i];
-                } else if constexpr (Op == ElementwiseOp::Mul) {
-                    out[i] = s * a[i];
-                } else {
-                    out[i] = s / a[i];
-                }
+                out[i] = Math::Elementwise::fp_binop<float64_t, Op>(s, a[i]);
             }
         }
 

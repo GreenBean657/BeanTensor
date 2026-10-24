@@ -16,7 +16,7 @@ namespace BeanTensor::Modules {
 
     Tensors::Tensor Sequential::forward(const Tensors::Tensor& x) {
         if (this->empty()) {
-            throw ErrorHandling::NotImplemented();
+            throw ErrorHandling::EmptyModule();
         }
         // Every stage output is referenced by the NEXT stage's graph node, so
         // each one (except the last, which is returned) is held in this
@@ -76,7 +76,7 @@ namespace BeanTensor::Modules {
         return *this->modules[pos].module;
     }
 
-    Module& Sequential::at(const std::string& module_name) {
+    Module& Sequential::at(const std::string& module_name) const {
         return *this->modules[this->module_index_of(module_name)].module;
     }
 

@@ -4,9 +4,10 @@
  * @brief HIP GPU kernels + host wrappers for basic tensor operations.
  * Mirror pair of Tensor/Ops/TensorOps.cu (CUDA); both backends must stay behaviorally identical (same rounding via
  * explicit _rn intrinsics, same fail_check semantics, same async handoff to Threading::GetCPUThreadPool()).
- * @version 0.1.1
+ * @version 0.1.2
  * @date 2026-10-18
  */
+#if defined(USE_HIP)
 #include <cstdint>
 #include <type_traits>
 
@@ -1049,5 +1050,6 @@ namespace BeanTensor::Tensors::detail {
         t.give_future(future);
     }
 }
+#endif
 
 #include "TensorOps.hpp"

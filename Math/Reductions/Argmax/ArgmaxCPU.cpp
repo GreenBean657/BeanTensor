@@ -3,7 +3,7 @@
  * @author GreenBean
  * @brief CPU backend for argmax. Hosts the Tensor::argmax method definition
  * (mirrors how Tensor::matmul lives in MatmulCPU.cpp).
- * @version 0.3
+ * @version 0.3.1
  * @date 2026-10-22
  */
 #include <algorithm>
@@ -643,6 +643,61 @@ namespace BeanTensor::Tensors {
             detail::argmax_axis_gpu(*this, out, axis);
         } else [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
+        }
+        return out;
+    }
+
+    /**
+     * Lane-aware argmax over packed x2 logits. Element j holds two classes: its
+     * low lane is class 2j and its high lane class 2j+1, the layout softmax_ce
+     * trains. Per row, the largest lane wins; the first strict maximum wins
+     * ties, and NaN never wins. CPU-only, rank-2 {rows, classes}, axis 1.
+     * @brief Index of the largest class lane per row of packed x2 logits.
+     * @param axis Must be 1.
+     * @return Int64 tensor of shape {rows} holding class indices in [0, 2*classes).
+     * @throws ErrorHandling::MismatchedDTypes The tensor is not Float16x2 or BFloat16x2.
+     * @throws ErrorHandling::NotImplemented Not rank-2, axis is not 1, or the tensor is on the GPU.
+     * @throws ErrorHandling::IndexOutOfRange The tensor is empty.
+     */
+    Tensor Tensor::argmax_lanes(const size_t axis) {
+        namespace shared = detail::reductions_shared;
+        sync();
+        const auto is_half = this->dtype == DataTypes::DType::Float16x2;
+        if (!is_half && this->dtype != DataTypes::DType::BFloat16x2) {
+            throw ErrorHandling::MismatchedDTypes();
+        }
+        if (this->ndim != 2 || axis != 1 || this->device != Device::CPU) {
+            throw ErrorHandling::NotImplemented();
+        }
+        if (this->numel == 0) {
+            throw ErrorHandling::IndexOutOfRange();
+        }
+        const auto rows = this->shape[0];
+        const auto cols = this->shape[1];
+        auto out = Tensor(std::vector<size_t>{rows}, DataTypes::DType::Int64, this->device, false);
+        for (auto r = size_t{0}; r < rows; ++r) {
+            auto has = false;
+            auto best = float32_t{0};
+            auto best_class = size_t{0};
+            for (auto c = size_t{0}; c < cols; ++c) {
+                auto bits = uint32_t{0};
+                this->read_element(this->checked_element_offset({r, c}), &bits, sizeof(bits));
+                for (auto lane = size_t{0}; lane < 2; ++lane) {
+                    const auto value = is_half
+                        ? (lane == 0 ? shared::widen_lane(shared::lane_lo<float16_t>(bits)) : shared::widen_lane(shared::lane_hi<float16_t>(bits)))
+                        : (lane == 0 ? shared::widen_lane(shared::lane_lo<bfloat16_t>(bits)) : shared::widen_lane(shared::lane_hi<bfloat16_t>(bits)));
+                    if (std::isnan(value)) {
+                        continue;
+                    }
+                    const auto class_index = 2 * c + lane;
+                    if (!has || value > best) {
+                        has = true;
+                        best = value;
+                        best_class = class_index;
+                    }
+                }
+            }
+            out.set<int64_t>({r}, static_cast<int64_t>(best_class));
         }
         return out;
     }

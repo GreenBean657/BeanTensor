@@ -2,8 +2,8 @@
  * @file Errors.h
  * @author GreenBean
  * @brief ErrorHandling exception types and GPU API error-check macros.
- * @version 0.1
- * @date 2026-10-18
+ * @version 0.4
+ * @date 2026-10-23
  */
 #pragma once
 
@@ -126,6 +126,16 @@ namespace BeanTensor::ErrorHandling {
         explicit DimensionTooLarge(const std::string& detail) : std::out_of_range("Tensor dimension too large: " + detail) { }
     };
 
+    class NameError : public std::out_of_range {
+    public:
+        NameError() = delete;
+        /**
+         * @brief Exception thrown when a registry name is empty, unknown, or already taken.
+         * @param detail What failed (empty name, unknown name, duplicate name, ...).
+         */
+        explicit NameError(const std::string& detail) : std::out_of_range("Name error: " + detail) { }
+    };
+
     class NoGradient : public std::logic_error {
     public:
         /**
@@ -133,6 +143,34 @@ namespace BeanTensor::ErrorHandling {
          * (Tensor::grad) but the tensor does not require grad or has none.
          */
         NoGradient() : std::logic_error("Tensor has no accumulated gradient (requires_grad is false or grad is null)") { }
+    };
+
+    class NonLeafGradDType : public std::logic_error {
+    public:
+        /**
+         * @brief Exception thrown when a gradient dtype is set on a tensor that
+         * owns a graph node: intermediate gradients are rebuilt per backward()
+         * call, so only leaf gradients keep a pinned dtype.
+         */
+        NonLeafGradDType() : std::logic_error("Gradient dtype can only be set on a leaf tensor (a tensor with no graph node)") { }
+    };
+
+    class NarrowingGradConversion : public std::logic_error {
+    public:
+        /**
+         * @brief Exception thrown when a gradient-dtype change would narrow an
+         * existing gradient and the caller did not allow narrowing.
+         */
+        NarrowingGradConversion() : std::logic_error("Gradient dtype change would narrow the accumulated gradient (pass GradNarrowing::Allow to permit it)") { }
+    };
+
+    class EmptyModule : public std::logic_error {
+    public:
+        /**
+         * @brief Exception thrown when a container module with no child modules
+         * is asked to run (e.g. Sequential::forward on an empty registry).
+         */
+        EmptyModule() : std::logic_error("Module has no child modules to run") { }
     };
 }
 

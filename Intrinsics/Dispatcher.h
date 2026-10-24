@@ -2,8 +2,8 @@
  * @file Dispatcher.h
  * @author GreenBean
  * @brief CPU dtype conversion dispatcher; selects the scalar, AVX2 or AVX512 conversion path.
- * @version 0.1
- * @date 2026-10-18
+ * @version 0.2
+ * @date 2026-10-23
  */
 #pragma once
 
@@ -26,6 +26,15 @@
 namespace BeanTensor::Tensors { class Tensor; }
 
 namespace BeanTensor::Intrinsics::detail {
+
+    /**
+     * Runtime feature gate for the conversion dispatcher. Defined in DispatchFeatures.cpp, which is compiled with the full
+     * ISA flag union; Dispatcher.cpp is not, so its scalar fallback can never be emitted with AVX codegen.
+     * @brief True when the feature is compiled in and reported by the CPU.
+     * @param feature The feature to test.
+     * @return Whether the dispatcher may take the fast path gated on this feature.
+     */
+    [[nodiscard]] bool dispatch_has_feature(const CPUFeatureSetTypes);
 
     /**
      * Map a dtype to its lane type: identity for unpacked dtypes, the half type

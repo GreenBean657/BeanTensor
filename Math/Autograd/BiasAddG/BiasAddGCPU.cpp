@@ -3,8 +3,8 @@
  * @author GreenBean
  * @brief CPU backend for bias_add backward (column sums of dy), plus the
  * bias_add backward trampoline (bias_add_g_node).
- * @version 0.1
- * @date 2026-10-20
+ * @version 0.2
+ * @date 2026-10-23
  */
 #include <algorithm>
 #include <future>
@@ -431,7 +431,7 @@ namespace BeanTensor::Tensors::detail {
      * @param grad_dtype The calling backward()'s assigned gradient dtype.
      * @throws ErrorHandling::UnReachableCode if n_inputs is not 2 or the device is neither CPU nor GPU.
      */
-    void bias_add_g_node(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+    void bias_add_g_node(Node*, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
         if (n_inputs != 2) [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }

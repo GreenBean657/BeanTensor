@@ -4,8 +4,8 @@
  * @brief CPU backend for softmax cross-entropy backward, plus the softmax_ce
  * backward trampoline (softmax_ce_g_node). Scalar exp()/log() dominate, so
  * there are no SIMD kernels (same reason as forward softmax_ce).
- * @version 0.1.1
- * @date 2026-10-20
+ * @version 0.1.2
+ * @date 2026-10-23
  */
 #include <algorithm>
 #include <cmath>
@@ -424,7 +424,7 @@ namespace BeanTensor::Tensors::detail {
      * @param grad_dtype The calling backward()'s assigned gradient dtype.
      * @throws ErrorHandling::UnReachableCode if n_inputs is not 2 or the device is neither CPU nor GPU.
      */
-    void softmax_ce_g_node(const Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+    void softmax_ce_g_node(Node*, const Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
         if (n_inputs != 2) [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
@@ -458,12 +458,13 @@ namespace BeanTensor::Tensors::detail {
      * the Clang build accepts as an extension but GCC rejects). The
      * trampoline only reads output_grad, so forward through a matching bridge.
      * @brief Signature bridge between wire_node and softmax_ce_g_node.
+     * @param node Owning node, forwarded to softmax_ce_g_node unchanged.
      * @param output_grad Gradient of the forward output, in grad_dtype.
      * @param inputs Input tensors of the forward op.
      * @param n_inputs Number of entries in inputs.
      * @param grad_dtype The calling backward()'s assigned gradient dtype.
      */
-    void softmax_ce_g_bridge(Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
-        softmax_ce_g_node(output_grad, inputs, n_inputs, grad_dtype);
+    void softmax_ce_g_bridge(Node* node, Tensor* output_grad, Tensor** inputs, const size_t n_inputs, const DataTypes::DType grad_dtype) {
+        softmax_ce_g_node(node, output_grad, inputs, n_inputs, grad_dtype);
     }
 }
