@@ -2,14 +2,15 @@
  * @file main.cpp
  * @author GreenBean
  * @brief MNIST demo over the Module layer stack: reads the uncompressed IDX
- * files from data/mnist/, trains a Sequential MLP (Linear -> Relu -> Linear)
+ * files from data/mnist/, prints live thread-pool telemetry (snapshot + format) on the first
+ * batch of each epoch, trains a Sequential MLP (Linear -> Relu -> Linear)
  * with softmax_cross_entropy against class labels and Module::adam_step, and
  * reports test accuracy after every epoch. Every tensor access is gated on
  * its dtype once per batch; a mismatch prints to std::cerr and exits 1.
  * Batches are staged in Float32 on the host and converted to the model dtype
  * with Tensor::convert_dtype, so packed dtypes (Float16x2) never need a
  * host-side scalar type.
- * @version 0.3.8
+ * @version 0.3.9
  * @date 2026-10-23
  */
 
@@ -28,6 +29,8 @@
 #include <utility>
 #include <vector>
 
+#include "Helpers/CPUThreading.h"
+#include "Helpers/PoolMonitor.h"
 #include "Module/Linear.h"
 #include "Module/Module.h"
 #include "Module/Relu.h"
@@ -288,6 +291,11 @@ namespace {
 }
 
 int main() {
+    // Live worker dashboard on stderr: BEANTENSOR_MONITOR=1 ./BeanTensorV5
+    auto monitor = std::optional<BeanTensor::Threading::MonitorSession>{};
+    if (std::getenv("BEANTENSOR_MONITOR") != nullptr) {
+        monitor.emplace(std::cerr);
+    }
     const auto dir = std::filesystem::path(kMnistDir);
     auto train = MnistSplit{};
     auto test = MnistSplit{};
@@ -310,7 +318,6 @@ int main() {
     // Labels live outside the training loop and are refilled each step. The
     // input batch is built inside the step, so it outlives backward() on that step.
     auto labels = Tensor(std::vector<size_t>{kBatch}, DType::Int64);
-
     auto rng = std::mt19937{kShuffleSeed};
     auto order = identity_order(train.count);
     const auto run_start = std::chrono::steady_clock::now();
@@ -329,6 +336,10 @@ int main() {
             }
 
             auto out = net.forward(*batch);
+            if (start == 0) {
+                // Live pool telemetry: the forward chunks are in flight right now.
+                std::cout << "\n" << BeanTensor::Threading::format_snapshot(BeanTensor::Threading::GetCPUThreadPool().snapshot());
+            }
             auto loss = softmax_cross_entropy(out, labels);
             loss.backward(gDType);
             constexpr auto epsilon = (kDType == DType::Float16 || kDType == DType::Float16x2) ? kEpsilonHalf : kEpsilon;

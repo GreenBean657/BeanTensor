@@ -1,16 +1,22 @@
-// BeanTensorV5 mse + adam tests — framework-free assertion suite.
-// Covers: mse forward values (rank 1/2/3, fp32/fp64/fp16/int32/packed,
-// free-function form, error paths), mse backward vs hand-computed
-// d/dpred = 2*(pred-target)/numel (leaf and chained-through-matmul, the
-// intermediate-delta probe, per-call grad dtype override, targets never
-// receiving a gradient), Adam (bias-correction hand check against an fp64
-// reference mirror, constant-gradient trajectory, convergence on a quadratic
-// via the mse -> backward -> adam_step loop, error paths, mixed grad dtype),
-// and — when a backend + device exist — the same checks on the GPU plus
-// CPU/GPU parity. Storage-dtype coverage: mse backward on fp16/bf16 (narrowing
-// store), packed x2 (per-lane, packed grad dtype), every integer width
-// (truncation toward zero, unsigned clamp, int8 clamp); Adam trajectories on
-// fp16/bf16/packed x2 against an fp64 mirror.
+/**
+ * @file mse_adam_tests.cpp
+ * @author GreenBean
+ * @brief MSE + Adam tests — framework-free assertion suite.
+ * Covers: mse forward values (rank 1/2/3, fp32/fp64/fp16/int32/packed,
+ * free-function form, error paths), mse backward vs hand-computed
+ * d/dpred = 2*(pred-target)/numel (leaf and chained-through-matmul, the
+ * intermediate-delta probe, per-call grad dtype override, targets never
+ * receiving a gradient), Adam (bias-correction hand check against an fp64
+ * reference mirror, constant-gradient trajectory, convergence on a quadratic
+ * via the mse -> backward -> adam_step loop, error paths, mixed grad dtype),
+ * and — when a backend + device exist — the same checks on the GPU plus
+ * CPU/GPU parity. Storage-dtype coverage: mse backward on fp16/bf16 (narrowing
+ * store), packed x2 (per-lane, packed grad dtype), every integer width
+ * (truncation toward zero, unsigned clamp, int8 clamp, int64 max narrowing
+ * guard); Adam trajectories on fp16/bf16/packed x2 against an fp64 mirror.
+ * @version 0.1
+ * @date 2026-10-26
+ */
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -451,6 +457,21 @@ static void test_mse_g_int(const DType dt) {
     }
 }
 
+// int64_t max narrowing guard: {INT64_MAX, 0} vs {0, 0} gives a mean of
+// INT64_MAX^2 / 2, far above INT64_MAX. The GPU narrowing path must return
+// INT64_MAX deterministically instead of UB from casting the rounded-up
+// fp64 representation of INT64_MAX.
+static void test_mse_int64_max_clamp(const Device dev) {
+    auto pred = Tensor({2}, DType::Int64, dev, false);
+    auto target = Tensor({2}, DType::Int64, dev, false);
+    pred.set<int64_t>({0}, std::numeric_limits<int64_t>::max());
+    pred.set<int64_t>({1}, 0);
+    target.set_zero();
+    auto loss = pred.mse(target);
+    loss.sync();
+    CHECK(loss.at<int64_t>({0}) == std::numeric_limits<int64_t>::max());
+}
+
 // Int8 clamp: (127 - (-128)) / 2 = 127.5 clamps to the int8 max, and
 // (-128 - 127) / 2 = -127.5 is above the int8 min, so it truncates to -127.
 static void test_mse_g_int8_clamp() {
@@ -849,6 +870,8 @@ int main() {
         test_mse_g_values(Device::GPU);
         test_mse_g_chain_probe(Device::GPU);
         test_mse_target_requires_grad(Device::GPU);
+        test_mse_int64_max_clamp(Device::CPU);
+        test_mse_int64_max_clamp(Device::GPU);
         test_adam_convergence_quadratic(Device::GPU);
         test_adam_fp64_convergence(Device::GPU);
         test_adam_errors(Device::GPU);

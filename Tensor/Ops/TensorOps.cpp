@@ -4,7 +4,7 @@
  * @brief HIP GPU kernels + host wrappers for basic tensor operations.
  * Mirror pair of Tensor/Ops/TensorOps.cu (CUDA); both backends must stay behaviorally identical (same rounding via
  * explicit _rn intrinsics, same fail_check semantics, same async handoff to Threading::GetCPUThreadPool()).
- * @version 0.1.2
+ * @version 0.1.3
  * @date 2026-10-18
  */
 #if defined(USE_HIP)
@@ -15,6 +15,7 @@
 #include "Tensor/DTypes.h"
 #include "TensorOps.h"
 
+#include "Helpers/Alloc.h"
 #include "Helpers/CPUThreading.h"
 
 #include <hip/hip_fp16.h>
@@ -923,7 +924,7 @@ namespace BeanTensor::Tensors::detail {
         t.kill_buffer();
         const auto worker = [&t] {
             HIP_CHECK_ERROR(hipSetDevice(0));
-            void* buffer = std::aligned_alloc(64, (t.nbytes + 63) / 64 * 64);
+            void* buffer = bt_aligned_alloc(t.nbytes);
             HIP_CHECK_ERROR(hipMemcpy(buffer, t.data, t.nbytes, hipMemcpyDeviceToHost));
             HIP_CHECK_ERROR(hipFree(t.data));
             t.data = buffer;

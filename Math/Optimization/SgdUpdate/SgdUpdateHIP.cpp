@@ -5,8 +5,8 @@
  * Divergent twin of Math/Optimization/SgdUpdate/SgdUpdateCUDA.cu — the two backends are
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same fp32/fp64 compute widths, same RNE narrowing.
- * @version 0.1.1
- * @date 2026-10-20
+ * @version 0.1.2
+ * @date 2026-10-26
  */
 #if defined(USE_HIP)
 #include <cstdint>
@@ -119,8 +119,8 @@ namespace BeanTensor::Tensors::detail {
          */
         template<typename T>
         __host__ void run_sgd(T* w, const T* g, const float64_t lr, const size_t numel) {
-            auto lo = 0.0;
-            auto hi = 0.0;
+            float64_t lo = 0.0;
+            float64_t hi = 0.0;
             if constexpr (std::is_same_v<T, int4x2_t>) {
                 lo = -8.0;
                 hi = 7.0;

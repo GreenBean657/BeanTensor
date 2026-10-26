@@ -4,8 +4,8 @@
  * @brief CPU backend for sgd_update. Hosts the Tensor::sgd_update and
  * Tensor::sgd_step method definitions (mirrors how Tensor::matmul lives in
  * MatmulCPU.cpp).
- * @version 0.1.1
- * @date 2026-10-20
+ * @version 0.1.2
+ * @date 2026-10-25
  */
 #include <algorithm>
 #include <cmath>
@@ -159,10 +159,15 @@ namespace BeanTensor::Tensors::detail {
         /**
          * Futures land on both tensors so teardown drains the workers (they hold raw buffer pointers).
          * Small inputs run inline. The worker is captured by value, the futures outlive this call.
+         * CCD-aware: SGD writes the parameter buffer in place (w), so the gate is the bytes
+         * written, numel * w's element size. When that fits one CCD's LLC the chunks go to
+         * the calling thread's CCD group (submit_to_group) so the cache-resident parameter is
+         * written locally; otherwise they go to the whole pool as before. The chunk count
+         * still assumes all t_count threads — group workers simply claim multiple chunks.
          * @brief Threaded SGD launcher, chunks an elementwise two-operand range worker across the CPU thread pool.
          * @param worker Callable taking (begin, end).
          * @param numel Element count to cover.
-         * @param w Weight tensor, receives the futures.
+         * @param w Weight tensor, receives the futures (its span is the write gate).
          * @param grad Gradient tensor, receives the futures.
          */
         template<typename Worker>
@@ -175,6 +180,8 @@ namespace BeanTensor::Tensors::detail {
             auto& threadMgr = Threading::GetCPUThreadPool();
             std::vector<std::shared_future<void>> futures;
             const auto chunk = (numel + t_count - 1) / t_count;
+            const bool keep_local = KeepWorkLocal(numel * DataTypes::dtype_bytes(w.get_dtype()));
+            const auto group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
             for (auto t = size_t{0}; t < t_count; ++t) {
                 const auto begin = t * chunk;
                 if (begin >= numel) {
@@ -182,7 +189,11 @@ namespace BeanTensor::Tensors::detail {
                 }
                 // worker is captured BY VALUE: these futures outlive this call
                 // (they land on the tensors), so a reference would dangle.
-                futures.push_back(threadMgr.submit([worker, begin, end = std::min(begin + chunk, numel)] { worker(begin, end); }, Threading::TaskPriority::Normal).share());
+                if (keep_local) {
+                    futures.push_back(threadMgr.submit_to_group([worker, begin, end = std::min(begin + chunk, numel)] { worker(begin, end); }, group, Threading::TaskPriority::Normal).share());
+                } else {
+                    futures.push_back(threadMgr.submit([worker, begin, end = std::min(begin + chunk, numel)] { worker(begin, end); }, Threading::TaskPriority::Normal).share());
+                }
             }
             w.give_futures(futures);
             grad.give_futures(futures);

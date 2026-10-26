@@ -3,7 +3,7 @@
  * @author GreenBean
  * @brief Ordered container module: an append/insert/replace/remove registry
  * of named child modules whose forward chains outputs through in order.
- * @version 0.2
+ * @version 0.3
  * @date 2026-10-23
  */
 #pragma once
@@ -106,11 +106,6 @@ namespace BeanTensor::Modules {
          * @return size() == 0.
          */
         [[nodiscard]] bool empty() const;
-        /**
-         * @brief Memory usage.
-         * @return The total memory usage of the registry.
-         */
-        [[nodiscard]] size_t bytes() const;
 
         /**
          * @brief Child at a registry position.

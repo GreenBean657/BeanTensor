@@ -5,8 +5,8 @@
  * definition (mirrors how Tensor::matmul lives in MatmulCPU.cpp).
  * The comparison result is a UInt8 (0/1) mask: DType has no Bool, and UInt8 is
  * the smallest dtype with full conversion/reduction support.
- * @version 0.1
- * @date 2026-10-22
+ * @version 0.2
+ * @date 2026-10-25
  */
 #include <cstdint>
 #include <future>
@@ -135,9 +135,9 @@ namespace BeanTensor::Tensors::detail {
                  */
                 auto launch_f = [&]<typename T>(const T* pa, const T* pb) {
                     if constexpr (std::is_same_v<T, float32_t> || std::is_same_v<T, float64_t>) {
-                        launch_compare([&](const size_t s, const size_t e) { equal_range_scalar<T>(out_data, pa, pb, s, e); }, numel, a, b, out);
+                        launch_compare([&](const size_t s, const size_t e) { equal_range_scalar<T>(out_data, pa, pb, s, e); }, numel, numel * sizeof(uint8_t), a, b, out);
                     } else {
-                        launch_compare([&](const size_t s, const size_t e) { equal_range_half<T>(out_data, pa, pb, s, e); }, numel, a, b, out);
+                        launch_compare([&](const size_t s, const size_t e) { equal_range_half<T>(out_data, pa, pb, s, e); }, numel, numel * sizeof(uint8_t), a, b, out);
                     }
                 };
                 switch (a.dtype) {
@@ -158,7 +158,7 @@ namespace BeanTensor::Tensors::detail {
                  * @note Lambda subcall. Self-execution prohibited.
                  */
                 auto launch_p = [&]<typename P>(const P* pa, const P* pb) {
-                    launch_compare([&](const size_t s, const size_t e) { equal_range_packed<P>(out_data, pa, pb, s, e); }, numel, a, b, out);
+                    launch_compare([&](const size_t s, const size_t e) { equal_range_packed<P>(out_data, pa, pb, s, e); }, numel, numel * sizeof(uint8_t), a, b, out);
                 };
                 if (a.dtype == DType::Float16x2) {
                     launch_p(static_cast<const float16x2_t*>(a.data) + a.offset, static_cast<const float16x2_t*>(b.data) + b.offset);
@@ -167,7 +167,7 @@ namespace BeanTensor::Tensors::detail {
                 } else {
                     const auto* pa = static_cast<const int4x2_t*>(a.data) + a.offset;
                     const auto* pb = static_cast<const int4x2_t*>(b.data) + b.offset;
-                    launch_compare([&](const size_t s, const size_t e) { equal_range_i4x2(out_data, pa, pb, s, e); }, numel, a, b, out);
+                    launch_compare([&](const size_t s, const size_t e) { equal_range_i4x2(out_data, pa, pb, s, e); }, numel, numel * sizeof(uint8_t), a, b, out);
                 }
                 break;
             }
@@ -181,7 +181,7 @@ namespace BeanTensor::Tensors::detail {
                  * @note Lambda subcall. Self-execution prohibited.
                  */
                 auto launch_i = [&]<typename T>(const T* pa, const T* pb) {
-                    launch_compare([&](const size_t s, const size_t e) { equal_range_int<T>(out_data, pa, pb, s, e); }, numel, a, b, out);
+                    launch_compare([&](const size_t s, const size_t e) { equal_range_int<T>(out_data, pa, pb, s, e); }, numel, numel * sizeof(uint8_t), a, b, out);
                 };
                 switch (a.dtype) {
                     case DType::Int8: launch_i(static_cast<const int8_t*>(a.data) + a.offset, static_cast<const int8_t*>(b.data) + b.offset); break;

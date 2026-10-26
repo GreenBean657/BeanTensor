@@ -5,12 +5,14 @@
  * Divergent twin of Math/Reductions/Argmax/ArgmaxHIP.cpp — the two backends are
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same NaN-wins argmax rule.
- * @version 0.3
- * @date 2026-10-22
+ * @version 0.4
+ * @date 2026-10-25
  */
 #if defined(USE_CUDA)
+#include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <type_traits>
 
 #include <cuda_fp16.h>
@@ -21,6 +23,7 @@
 #include "Tensor/Tensor.h"
 
 #include "Helpers/CPUThreading.h"
+#include "Helpers/KernelTune.h"
 
 namespace BeanTensor::Tensors::detail {
     using namespace reductions_gpu;
@@ -215,6 +218,32 @@ namespace BeanTensor::Tensors::detail {
         }
 
         /**
+         * Dynamic shared memory is allocated untyped; each kernel casts to its ValIdx<K>.
+         * @brief Typed pointer to the block's dynamic shared memory.
+         * @tparam K Key type for the ValIdx accumulator.
+         * @return Pointer to the launch-supplied shared memory.
+         */
+        template<typename K>
+        __device__ __forceinline__ ValIdx<K>* dyn_shared() {
+            extern __shared__ uint8_t s_base[];
+            return reinterpret_cast<ValIdx<K>*>(s_base);
+        }
+
+        /**
+         * The tree reduction requires a power-of-two block size in [1, 1024].
+         * @brief Validate the runtime block size before launch.
+         * @param bt Block size returned by KernelTune.
+         * @return The same block size if valid.
+         * @throws ErrorHandling::InvalidKernelBlockSize if out of range or not a power of two.
+         */
+        [[nodiscard]] __host__ size_t validate_block_size(const size_t bt) {
+            if (bt < 1 || bt > 1024 || (bt & (bt - 1)) != 0) {
+                throw ErrorHandling::InvalidKernelBlockSize("block size must be a power of two in [1, 1024], got " + std::to_string(bt));
+            }
+            return bt;
+        }
+
+        /**
          * Grid-stride per-thread best, shared-memory tree combine per block, one ValIdx partial per block.
          * @note Stage 1 of the two-stage argmax.
          * @brief Argmax partial kernel (all dtypes).
@@ -224,7 +253,7 @@ namespace BeanTensor::Tensors::detail {
          */
         template<typename T, typename K>
         __global__ void argmax_partial_kernel(const T* __restrict__ data, ValIdx<K>* __restrict__ partials, const size_t numel) {
-            __shared__ ValIdx<K> shared[BT_GPU_THREADS];
+            auto* const s_shared = dyn_shared<K>();
             const auto tid = threadIdx.x;
             const size_t gid = threadIdx.x + blockIdx.x * blockDim.x;
             const size_t stride = blockDim.x * gridDim.x;
@@ -232,16 +261,16 @@ namespace BeanTensor::Tensors::detail {
             for (size_t i = gid; i < numel; i += stride) {
                 acc = vi_combine(acc, ValIdx<K>{to_key(data[i]), i});
             }
-            shared[tid] = acc;
+            s_shared[tid] = acc;
             __syncthreads();
-            for (auto s = BT_GPU_THREADS / 2; s > 0; s >>= 1) {
+            for (auto s = blockDim.x / 2; s > 0; s >>= 1) {
                 if (tid < s) {
-                    shared[tid] = vi_combine(shared[tid], shared[tid + s]);
+                    s_shared[tid] = vi_combine(s_shared[tid], s_shared[tid + s]);
                 }
                 __syncthreads();
             }
             if (tid == 0) {
-                partials[blockIdx.x] = shared[0];
+                partials[blockIdx.x] = s_shared[0];
             }
         }
 
@@ -255,22 +284,22 @@ namespace BeanTensor::Tensors::detail {
          */
         template<typename K>
         __global__ void argmax_final_kernel(const ValIdx<K>* __restrict__ partials, const size_t count, uint64_t* __restrict__ result) {
-            __shared__ ValIdx<K> shared[BT_GPU_THREADS];
+            auto* const s_shared = dyn_shared<K>();
             const auto tid = threadIdx.x;
             auto acc = ValIdx<K>{key_zero<K>(), UINT64_MAX};
-            for (auto i = tid; i < count; i += BT_GPU_THREADS) {
+            for (auto i = tid; i < count; i += blockDim.x) {
                 acc = vi_combine(acc, partials[i]);
             }
-            shared[tid] = acc;
+            s_shared[tid] = acc;
             __syncthreads();
-            for (auto s = BT_GPU_THREADS / 2; s > 0; s >>= 1) {
+            for (auto s = blockDim.x / 2; s > 0; s >>= 1) {
                 if (tid < s) {
-                    shared[tid] = vi_combine(shared[tid], shared[tid + s]);
+                    s_shared[tid] = vi_combine(s_shared[tid], s_shared[tid + s]);
                 }
                 __syncthreads();
             }
             if (tid == 0) {
-                result[0] = shared[0].idx;
+                result[0] = s_shared[0].idx;
             }
         }
 
@@ -283,14 +312,16 @@ namespace BeanTensor::Tensors::detail {
          * @param out_host Host output, flat index of the winner.
          */
         template<typename T, typename K>
-        __host__ void run_argmax(const T* data, const size_t numel, uint64_t* out_host) {
-            const auto blocks = grid_for(numel);
+        __host__ void run_argmax(const T* data, const size_t numel, const size_t bt, uint64_t* out_host) {
+            const auto blocks = grid_for(numel, bt);
             ValIdx<K>* partials = nullptr;
             uint64_t* dev_result = nullptr;
             CUDA_CHECK_ERROR(cudaMalloc(&partials, blocks * sizeof(ValIdx<K>)));
             CUDA_CHECK_ERROR(cudaMalloc(&dev_result, sizeof(uint64_t)));
-            argmax_partial_kernel<T, K><<<blocks, BT_GPU_THREADS>>>(data, partials, numel);
-            argmax_final_kernel<K><<<1, BT_GPU_THREADS>>>(partials, blocks, dev_result);
+            // Largest Acc (ValIdx<float64_t>) is 16 B; 1024 * 16 B = 16 KB, under the 48 KB default.
+            const auto shared_bytes = bt * sizeof(ValIdx<K>);
+            argmax_partial_kernel<T, K><<<blocks, bt, shared_bytes>>>(data, partials, numel);
+            argmax_final_kernel<K><<<1, bt, shared_bytes>>>(partials, blocks, dev_result);
             CUDA_CHECK_ERROR(cudaGetLastError());
             CUDA_CHECK_ERROR(cudaMemcpy(out_host, dev_result, sizeof(uint64_t), cudaMemcpyDeviceToHost));
             CUDA_CHECK_ERROR(cudaFree(partials));
@@ -334,9 +365,9 @@ namespace BeanTensor::Tensors::detail {
          * @param inner Stride of the reduced axis.
          */
         template<typename T, typename K>
-        __host__ void run_argmax_axis(const T* data, int64_t* out, const size_t out_numel, const size_t axis_len, const size_t inner) {
+        __host__ void run_argmax_axis(const T* data, int64_t* out, const size_t out_numel, const size_t axis_len, const size_t inner, const size_t bt) {
             if (out_numel > 0) {
-                argmax_axis_kernel<T, K><<<grid_for(out_numel), BT_GPU_THREADS>>>(data, out, out_numel, axis_len, inner);
+                argmax_axis_kernel<T, K><<<grid_for(out_numel, bt), bt>>>(data, out, out_numel, axis_len, inner);
             }
         }
     }
@@ -363,23 +394,24 @@ namespace BeanTensor::Tensors::detail {
          * @note Lambda subcall. Self-execution prohibited.
          */
         const auto worker = [=] {
+            const auto bt = validate_block_size(BeanTensor::KernelTune::block_size_for(BeanTensor::KernelTune::GpuFamily::Reduction, numel));
             using DType = DataTypes::DType;
             switch (dtype) {
-                case DType::Float32: run_argmax<float32_t, float64_t>(static_cast<const float32_t*>(t_data) + t_offset, numel, res.get()); break;
-                case DType::Float64: run_argmax<float64_t, float64_t>(static_cast<const float64_t*>(t_data) + t_offset, numel, res.get()); break;
-                case DType::Float16: run_argmax<float16_t, float64_t>(static_cast<const float16_t*>(t_data) + t_offset, numel, res.get()); break;
-                case DType::BFloat16: run_argmax<bfloat16_t, float64_t>(static_cast<const bfloat16_t*>(t_data) + t_offset, numel, res.get()); break;
-                case DType::Float16x2: run_argmax<float16x2_t, float2>(static_cast<const float16x2_t*>(t_data) + t_offset, numel, res.get()); break;
-                case DType::BFloat16x2: run_argmax<bfloat16x2_t, float2>(static_cast<const bfloat16x2_t*>(t_data) + t_offset, numel, res.get()); break;
-                case DType::Int8: run_argmax<int8_t, int64_t>(static_cast<const int8_t*>(t_data) + t_offset, numel, res.get()); break;
-                case DType::UInt8: run_argmax<uint8_t, uint64_t>(static_cast<const uint8_t*>(t_data) + t_offset, numel, res.get()); break;
-                case DType::Int16: run_argmax<int16_t, int64_t>(static_cast<const int16_t*>(t_data) + t_offset, numel, res.get()); break;
-                case DType::UInt16: run_argmax<uint16_t, uint64_t>(static_cast<const uint16_t*>(t_data) + t_offset, numel, res.get()); break;
-                case DType::Int32: run_argmax<int32_t, int64_t>(static_cast<const int32_t*>(t_data) + t_offset, numel, res.get()); break;
-                case DType::UInt32: run_argmax<uint32_t, uint64_t>(static_cast<const uint32_t*>(t_data) + t_offset, numel, res.get()); break;
-                case DType::Int64: run_argmax<int64_t, int64_t>(static_cast<const int64_t*>(t_data) + t_offset, numel, res.get()); break;
-                case DType::UInt64: run_argmax<uint64_t, uint64_t>(static_cast<const uint64_t*>(t_data) + t_offset, numel, res.get()); break;
-                case DType::Int4x2: run_argmax<int4x2_t, int2>(static_cast<const int4x2_t*>(t_data) + t_offset, numel, res.get()); break;
+                case DType::Float32: run_argmax<float32_t, float64_t>(static_cast<const float32_t*>(t_data) + t_offset, numel, bt, res.get()); break;
+                case DType::Float64: run_argmax<float64_t, float64_t>(static_cast<const float64_t*>(t_data) + t_offset, numel, bt, res.get()); break;
+                case DType::Float16: run_argmax<float16_t, float64_t>(static_cast<const float16_t*>(t_data) + t_offset, numel, bt, res.get()); break;
+                case DType::BFloat16: run_argmax<bfloat16_t, float64_t>(static_cast<const bfloat16_t*>(t_data) + t_offset, numel, bt, res.get()); break;
+                case DType::Float16x2: run_argmax<float16x2_t, float2>(static_cast<const float16x2_t*>(t_data) + t_offset, numel, bt, res.get()); break;
+                case DType::BFloat16x2: run_argmax<bfloat16x2_t, float2>(static_cast<const bfloat16x2_t*>(t_data) + t_offset, numel, bt, res.get()); break;
+                case DType::Int8: run_argmax<int8_t, int64_t>(static_cast<const int8_t*>(t_data) + t_offset, numel, bt, res.get()); break;
+                case DType::UInt8: run_argmax<uint8_t, uint64_t>(static_cast<const uint8_t*>(t_data) + t_offset, numel, bt, res.get()); break;
+                case DType::Int16: run_argmax<int16_t, int64_t>(static_cast<const int16_t*>(t_data) + t_offset, numel, bt, res.get()); break;
+                case DType::UInt16: run_argmax<uint16_t, uint64_t>(static_cast<const uint16_t*>(t_data) + t_offset, numel, bt, res.get()); break;
+                case DType::Int32: run_argmax<int32_t, int64_t>(static_cast<const int32_t*>(t_data) + t_offset, numel, bt, res.get()); break;
+                case DType::UInt32: run_argmax<uint32_t, uint64_t>(static_cast<const uint32_t*>(t_data) + t_offset, numel, bt, res.get()); break;
+                case DType::Int64: run_argmax<int64_t, int64_t>(static_cast<const int64_t*>(t_data) + t_offset, numel, bt, res.get()); break;
+                case DType::UInt64: run_argmax<uint64_t, uint64_t>(static_cast<const uint64_t*>(t_data) + t_offset, numel, bt, res.get()); break;
+                case DType::Int4x2: run_argmax<int4x2_t, int2>(static_cast<const int4x2_t*>(t_data) + t_offset, numel, bt, res.get()); break;
                 [[unlikely]] default: throw ErrorHandling::NotImplemented();
             }
             // run_argmax's D2H memcpy already synced the stream.
@@ -420,24 +452,25 @@ namespace BeanTensor::Tensors::detail {
          * @note Lambda subcall. Self-execution prohibited.
          */
         const auto worker = [=] {
+            const auto bt = validate_block_size(BeanTensor::KernelTune::block_size_for(BeanTensor::KernelTune::GpuFamily::Reduction, out_numel));
             auto* const out_ptr = static_cast<int64_t*>(out_data);
             using DType = DataTypes::DType;
             switch (dtype) {
-                case DType::Float32: run_argmax_axis<float32_t, float64_t>(static_cast<const float32_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner); break;
-                case DType::Float64: run_argmax_axis<float64_t, float64_t>(static_cast<const float64_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner); break;
-                case DType::Float16: run_argmax_axis<float16_t, float64_t>(static_cast<const float16_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner); break;
-                case DType::BFloat16: run_argmax_axis<bfloat16_t, float64_t>(static_cast<const bfloat16_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner); break;
-                case DType::Float16x2: run_argmax_axis<float16x2_t, float2>(static_cast<const float16x2_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner); break;
-                case DType::BFloat16x2: run_argmax_axis<bfloat16x2_t, float2>(static_cast<const bfloat16x2_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner); break;
-                case DType::Int8: run_argmax_axis<int8_t, int64_t>(static_cast<const int8_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner); break;
-                case DType::UInt8: run_argmax_axis<uint8_t, uint64_t>(static_cast<const uint8_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner); break;
-                case DType::Int16: run_argmax_axis<int16_t, int64_t>(static_cast<const int16_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner); break;
-                case DType::UInt16: run_argmax_axis<uint16_t, uint64_t>(static_cast<const uint16_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner); break;
-                case DType::Int32: run_argmax_axis<int32_t, int64_t>(static_cast<const int32_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner); break;
-                case DType::UInt32: run_argmax_axis<uint32_t, uint64_t>(static_cast<const uint32_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner); break;
-                case DType::Int64: run_argmax_axis<int64_t, int64_t>(static_cast<const int64_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner); break;
-                case DType::UInt64: run_argmax_axis<uint64_t, uint64_t>(static_cast<const uint64_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner); break;
-                case DType::Int4x2: run_argmax_axis<int4x2_t, int2>(static_cast<const int4x2_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner); break;
+                case DType::Float32: run_argmax_axis<float32_t, float64_t>(static_cast<const float32_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner, bt); break;
+                case DType::Float64: run_argmax_axis<float64_t, float64_t>(static_cast<const float64_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner, bt); break;
+                case DType::Float16: run_argmax_axis<float16_t, float64_t>(static_cast<const float16_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner, bt); break;
+                case DType::BFloat16: run_argmax_axis<bfloat16_t, float64_t>(static_cast<const bfloat16_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner, bt); break;
+                case DType::Float16x2: run_argmax_axis<float16x2_t, float2>(static_cast<const float16x2_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner, bt); break;
+                case DType::BFloat16x2: run_argmax_axis<bfloat16x2_t, float2>(static_cast<const bfloat16x2_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner, bt); break;
+                case DType::Int8: run_argmax_axis<int8_t, int64_t>(static_cast<const int8_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner, bt); break;
+                case DType::UInt8: run_argmax_axis<uint8_t, uint64_t>(static_cast<const uint8_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner, bt); break;
+                case DType::Int16: run_argmax_axis<int16_t, int64_t>(static_cast<const int16_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner, bt); break;
+                case DType::UInt16: run_argmax_axis<uint16_t, uint64_t>(static_cast<const uint16_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner, bt); break;
+                case DType::Int32: run_argmax_axis<int32_t, int64_t>(static_cast<const int32_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner, bt); break;
+                case DType::UInt32: run_argmax_axis<uint32_t, uint64_t>(static_cast<const uint32_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner, bt); break;
+                case DType::Int64: run_argmax_axis<int64_t, int64_t>(static_cast<const int64_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner, bt); break;
+                case DType::UInt64: run_argmax_axis<uint64_t, uint64_t>(static_cast<const uint64_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner, bt); break;
+                case DType::Int4x2: run_argmax_axis<int4x2_t, int2>(static_cast<const int4x2_t*>(t_data) + t_offset, out_ptr, out_numel, axis_len, inner, bt); break;
                 [[unlikely]] default: throw ErrorHandling::NotImplemented();
             }
             CUDA_CHECK_ERROR(cudaStreamSynchronize(nullptr));

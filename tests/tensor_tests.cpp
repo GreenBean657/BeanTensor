@@ -4,7 +4,7 @@
  * @brief Tensor tests - framework-free assertion suite.
  * Covers CPU fills, scalar and runtime-gated AVX512/AVX2 conversions, clamp semantics, NaN/Inf flag consistency,
  * printing, clone, and the GPU paths incl. GPU<->CPU conversion parity when a backend and device exist.
- * @version 0.2
+ * @version 0.3
  * @date 2026-10-18
  */
 #include <atomic>
@@ -39,17 +39,17 @@ using BeanTensor::float64_t;
 using BeanTensor::int4x2_t;
 using DType = BeanTensor::DataTypes::DType;
 
-static int failures = 0;
+static int32_t failures = 0;
 #define CHECK(...) do { \
     if (!(__VA_ARGS__)) { ++failures; std::cerr << "FAIL: " << #__VA_ARGS__ << " @ line " << __LINE__ << "\n"; } \
 } while (0)
 
 static bool gpu_available() {
 #if defined(USE_HIP)
-    int count = 0;
+    int32_t count = 0;
     return hipGetDeviceCount(&count) == hipSuccess && count > 0;
 #elif defined(USE_CUDA)
-    int count = 0;
+    int32_t count = 0;
     return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
 #else
     return false;
@@ -167,7 +167,7 @@ static void test_nan_inf_flags() {
     constexpr ConversionClampMethod methods[3] = {
         ConversionClampMethod::STRICT, ConversionClampMethod::ALLOW_INF, ConversionClampMethod::PERMISSIVE};
 
-    for (int m = 0; m < 3; ++m) {
+    for (int32_t m = 0; m < 3; ++m) {
         bool flag = false;
         constexpr bool want_nan[3] = {true, true, false};
         constexpr bool want_inf[3] = {true, false, false};
@@ -205,7 +205,9 @@ static void test_nan_inf_flags() {
 static void test_avx512_runtime_gate() {
     alignas(64) float32_t src[16];
     alignas(64) BeanTensor::bfloat16_t dst[16]{};
-    for (int i = 0; i < 16; ++i) src[i] = static_cast<float32_t>(i) * 0.5f;
+    for (int32_t i = 0; i < 16; ++i) {
+        src[i] = static_cast<float32_t>(i) * 0.5f;
+    }
 
     // The Accelerated targets compile these kernels in even when the CPU
     // lacks AVX512BF16, and the runtime gate's answer is only authoritative
@@ -219,7 +221,7 @@ static void test_avx512_runtime_gate() {
         for (const auto futures = BeanTensor::Intrinsics::detail::avx512_fp32_to_bf16(src, dst, 16, flag, ConversionClampMethod::PERMISSIVE); auto& f : futures) {
             f.get();
         }
-        for (int i = 0; i < 16; ++i) {
+        for (int32_t i = 0; i < 16; ++i) {
             CHECK(std::bit_cast<uint32_t>(BeanTensor::Intrinsics::detail::unaccel_bf16_to_fp32(dst[i])) == std::bit_cast<uint32_t>(src[i]));
         }
     } catch (const BeanTensor::ErrorHandling::CPUIllegalInstruction&) {
@@ -299,13 +301,15 @@ static void test_scalar_avx512_parity() {
     };
     const auto seed = std::random_device{}();
     std::mt19937 rng(seed);
-    for (int i = 0; i < 1 << 18; ++i) {
+    for (int32_t i = 0; i < 1 << 18; ++i) {
         specials.push_back(rng()); // random bit patterns incl. NaN/subnormal
     }
 
     std::atomic flag{false};
     std::vector<float32_t> src(specials.size());
-    for (size_t i = 0; i < specials.size(); ++i) src[i] = std::bit_cast<float32_t>(specials[i]);
+    for (size_t i = 0; i < specials.size(); ++i) {
+        src[i] = std::bit_cast<float32_t>(specials[i]);
+    }
 
     // Odd sizes exercise the vector tails and the thread-chunk remainder —
     // every element must be converted exactly once.
@@ -315,40 +319,64 @@ static void test_scalar_avx512_parity() {
         // fp32 -> bf16: scalar vs AVX512, at several sizes
         for (const size_t n : sizes) {
             std::vector<bfloat16_t> a(n), b(n);
-            for (size_t i = 0; i < n; ++i) a[i] = bd::unaccel_fp32_to_bf16_untracked(src[i]);
-            for (auto& f : bd::avx512_fp32_to_bf16(src.data(), b.data(), n, flag, ConversionClampMethod::PERMISSIVE)) f.get();
-            for (size_t i = 0; i < n; ++i)
+            for (size_t i = 0; i < n; ++i) {
+                a[i] = bd::unaccel_fp32_to_bf16_untracked(src[i]);
+            }
+            for (auto& f : bd::avx512_fp32_to_bf16(src.data(), b.data(), n, flag, ConversionClampMethod::PERMISSIVE)) {
+                f.get();
+            }
+            for (size_t i = 0; i < n; ++i) {
                 CHECK(bd::bit_cast_memcpy<uint16_t>(a[i]) == bd::bit_cast_memcpy<uint16_t>(b[i]));
+            }
         }
 
         // bf16 -> fp32: exhaustive over all 65536 patterns
         std::vector<bfloat16_t> all16(65536);
         std::vector<float32_t> fa(65536), fb(65536);
-        for (uint32_t i = 0; i < 65536; ++i) all16[i] = bd::bit_cast_memcpy<bfloat16_t>(static_cast<uint16_t>(i));
-        for (uint32_t i = 0; i < 65536; ++i) fa[i] = bd::unaccel_bf16_to_fp32(all16[i]);
-        for (auto& f : bd::avx512_bf16_to_fp32(all16.data(), fb.data(), 65536)) f.get();
-        for (uint32_t i = 0; i < 65536; ++i)
+        for (uint32_t i = 0; i < 65536; ++i) {
+            all16[i] = bd::bit_cast_memcpy<bfloat16_t>(static_cast<uint16_t>(i));
+        }
+        for (uint32_t i = 0; i < 65536; ++i) {
+            fa[i] = bd::unaccel_bf16_to_fp32(all16[i]);
+        }
+        for (auto& f : bd::avx512_bf16_to_fp32(all16.data(), fb.data(), 65536)) {
+            f.get();
+        }
+        for (uint32_t i = 0; i < 65536; ++i) {
             CHECK(std::bit_cast<uint32_t>(fa[i]) == std::bit_cast<uint32_t>(fb[i]));
+        }
     }
 
     if (probe_avx512_f()) {
         // fp32 -> fp16: scalar vs AVX512, at several sizes
         for (const size_t n : sizes) {
             std::vector<float16_t> a(n), b(n);
-            for (size_t i = 0; i < n; ++i) a[i] = bd::unaccel_fp32_to_fp16_untracked(src[i]);
-            for (auto& f : bd::avx512_fp32_to_fp16(src.data(), b.data(), n, flag, ConversionClampMethod::PERMISSIVE)) f.get();
-            for (size_t i = 0; i < n; ++i)
+            for (size_t i = 0; i < n; ++i) {
+                a[i] = bd::unaccel_fp32_to_fp16_untracked(src[i]);
+            }
+            for (auto& f : bd::avx512_fp32_to_fp16(src.data(), b.data(), n, flag, ConversionClampMethod::PERMISSIVE)) {
+                f.get();
+            }
+            for (size_t i = 0; i < n; ++i) {
                 CHECK(bd::bit_cast_memcpy<uint16_t>(a[i]) == bd::bit_cast_memcpy<uint16_t>(b[i]));
+            }
         }
 
         // fp16 -> fp32: exhaustive over all 65536 patterns
         std::vector<float16_t> all16(65536);
         std::vector<float32_t> fa(65536), fb(65536);
-        for (uint32_t i = 0; i < 65536; ++i) all16[i] = bd::bit_cast_memcpy<float16_t>(static_cast<uint16_t>(i));
-        for (uint32_t i = 0; i < 65536; ++i) fa[i] = bd::unaccel_fp16_to_fp32_untracked(all16[i]);
-        for (auto& f : bd::avx512_fp16_to_fp32(all16.data(), fb.data(), 65536, flag, ConversionClampMethod::PERMISSIVE)) f.get();
-        for (uint32_t i = 0; i < 65536; ++i)
+        for (uint32_t i = 0; i < 65536; ++i) {
+            all16[i] = bd::bit_cast_memcpy<float16_t>(static_cast<uint16_t>(i));
+        }
+        for (uint32_t i = 0; i < 65536; ++i) {
+            fa[i] = bd::unaccel_fp16_to_fp32_untracked(all16[i]);
+        }
+        for (auto& f : bd::avx512_fp16_to_fp32(all16.data(), fb.data(), 65536, flag, ConversionClampMethod::PERMISSIVE)) {
+            f.get();
+        }
+        for (uint32_t i = 0; i < 65536; ++i) {
             CHECK(std::bit_cast<uint32_t>(fa[i]) == std::bit_cast<uint32_t>(fb[i]));
+        }
     }
 }
 
@@ -1215,7 +1243,7 @@ static void test_move_defers_pending_error() {
 static_assert(alignof(BeanTensor::Tensors::Node) == 8, "Node must stay 8-aligned, or be reviewed.");
 static_assert(alignof(Tensor) == 8, "Tensor must stay 8-aligned, or be reviewed.");
 // BT_TENSOR_MAX_DIMS 3: 216 + std::vector view_parents (24 bytes). Re-verify with offsetof on change.
-static_assert(sizeof(Tensor) == 240, "Tensor size changed; re-verify layout and update AGENTS.md.");
+static_assert(sizeof(Tensor) == 240, "Tensor size changed; re-verify layout and update the project docs.");
 static_assert(std::is_nothrow_move_constructible_v<Tensor>, "Tensor move ctor must stay noexcept, or be reviewed.");
 static_assert(std::is_nothrow_move_assignable_v<Tensor>, "Tensor move assignment must stay noexcept, or be reviewed.");
 
@@ -1519,9 +1547,11 @@ static void test_indexing_gpu() {
     }
     // Reference CPU tensors.
     Tensor cpu_src({2, 3}, DType::Float32);
-    for (auto r = size_t{0}; r < 2; ++r)
-        for (auto c = size_t{0}; c < 3; ++c)
+    for (auto r = size_t{0}; r < 2; ++r) {
+        for (auto c = size_t{0}; c < 3; ++c) {
             cpu_src.set<float32_t>({r, c}, static_cast<float32_t>(r * 3 + c));
+        }
+    }
     cpu_src.sync();
 
     auto gpu_src = cpu_src.clone(true);
@@ -1609,7 +1639,7 @@ static void test_indexing_gpu() {
 #endif
 }
 
-int main() {
+int32_t main() {
     std::cout << "TensorTests" << std::endl;
     test_fills_cpu();
     test_random_cpu();

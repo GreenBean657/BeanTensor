@@ -6,8 +6,8 @@
  * written separately per project rule (no HIP-only unification), but must
  * stay behaviorally identical: same fp32/fp64 compute widths, same RNE
  * narrowing, same NaN handling.
- * @version 0.1
- * @date 2026-10-23
+ * @version 0.2
+ * @date 2026-10-26
  */
 #if defined(USE_CUDA)
 #include <cstdint>
@@ -65,7 +65,7 @@ namespace BeanTensor::Tensors::detail {
         __device__ __forceinline__ float64_t mse_g_clamp(const float64_t v, const float64_t lo, const float64_t hi) {
             auto x = v;
             if (isnan(x)) {
-                x = 0.0;
+                x = float64_t{0.0};
             }
             if (x <= lo) {
                 x = lo;
@@ -172,8 +172,8 @@ namespace BeanTensor::Tensors::detail {
         template<typename T, typename Acc>
         __host__ void run_mse_g(const T* p, const T* t, const T* dloss, T* out,
                                 const size_t n_logical, const size_t numel) {
-            auto lo = 0.0;
-            auto hi = 0.0;
+            float64_t lo = 0.0;
+            float64_t hi = 0.0;
             if constexpr (std::is_same_v<T, int4x2_t>) {
                 lo = -8.0;
                 hi = 7.0;

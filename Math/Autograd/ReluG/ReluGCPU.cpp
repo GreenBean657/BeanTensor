@@ -3,8 +3,8 @@
  * @author GreenBean
  * @brief CPU backend for relu backward (relu_g), plus the relu backward
  * trampoline (relu_g_node).
- * @version 0.2
- * @date 2026-10-23
+ * @version 0.3
+ * @date 2026-10-25
  */
 #include <type_traits>
 #include <vector>
@@ -125,6 +125,55 @@ namespace BeanTensor::Tensors::detail {
          */
         template<typename T>
         using ReluGScalarFn = void(*)(T*, const T*, const T*, size_t, size_t);
+
+        /**
+         * Local twin of autograd_shared::launch_elementwise with CCD-aware
+         * scheduling: relu_g writes the output gradient buffer, so the gate is
+         * the bytes written (numel * element size). When that fits one CCD's
+         * LLC the chunks are submitted to the calling thread's CCD group
+         * (submit_to_group) so the cache-resident buffer is written locally;
+         * otherwise they go to the whole pool exactly as before. The chunk
+         * count still assumes all t_count threads — group workers simply claim
+         * multiple chunks from the queue, so restricting the submit never
+         * starves the decomposition.
+         * @brief Threaded relu-backward launcher with CCD-local routing.
+         * @param worker Callable taking (begin, end); copied into each task.
+         * @param numel Total element count to cover.
+         * @param out_bytes Bytes of the output gradient buffer actually written by the workers.
+         * @param a First tensor the workers touch (receives the futures).
+         * @param b Second tensor the workers touch (receives the futures).
+         * @param out Output tensor (receives the futures).
+         */
+        template<typename Worker>
+        void launch_elementwise_ccd(Worker&& worker, const size_t numel, const size_t out_bytes,
+                                    const Tensor& a, const Tensor& b, const Tensor& out) {
+            const auto t_count = static_cast<size_t>(IncludedCPUFeatures().threads);
+            if (t_count <= 1 || numel <= t_count * 1024) {
+                worker(0, numel);
+                return;
+            }
+            auto& threadMgr = Threading::GetCPUThreadPool();
+            std::vector<std::shared_future<void>> futures;
+            const auto chunk = (numel + t_count - 1) / t_count;
+            const bool keep_local = KeepWorkLocal(out_bytes);
+            const auto group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
+            for (auto t = size_t{0}; t < t_count; ++t) {
+                const auto begin = t * chunk;
+                if (begin >= numel) {
+                    break;
+                }
+                // worker is captured BY VALUE: these futures outlive this call
+                // (they land on the tensors), so a reference would dangle.
+                if (keep_local) {
+                    futures.push_back(threadMgr.submit_to_group([worker, begin, end = std::min(begin + chunk, numel)] { worker(begin, end); }, group, Threading::TaskPriority::Normal).share());
+                } else {
+                    futures.push_back(threadMgr.submit([worker, begin, end = std::min(begin + chunk, numel)] { worker(begin, end); }, Threading::TaskPriority::Normal).share());
+                }
+            }
+            a.give_futures(futures);
+            b.give_futures(futures);
+            out.give_futures(futures);
+        }
     }
 
     /**
@@ -159,7 +208,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First element index of the range (inclusive).
                  * @param e One past the last element index of the range.
                  */
-                launch_elementwise([=](const size_t b, const size_t e) { kernel(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, x, dy, dx);
+                launch_elementwise_ccd([=](const size_t b, const size_t e) { kernel(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, numel * sizeof(float32_t), x, dy, dx);
                 break;
             }
             case DType::Float64: {
@@ -176,7 +225,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First element index of the range (inclusive).
                  * @param e One past the last element index of the range.
                  */
-                launch_elementwise([=](const size_t b, const size_t e) { kernel(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, x, dy, dx);
+                launch_elementwise_ccd([=](const size_t b, const size_t e) { kernel(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, numel * sizeof(float64_t), x, dy, dx);
                 break;
             }
             case DType::Float16: {
@@ -187,7 +236,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First element index of the range (inclusive).
                  * @param e One past the last element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<float16_t*>(dx.data) + dx.offset, x_ptr = static_cast<const float16_t*>(x.data) + x.offset, dy_ptr = static_cast<const float16_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_half<float16_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, x, dy, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<float16_t*>(dx.data) + dx.offset, x_ptr = static_cast<const float16_t*>(x.data) + x.offset, dy_ptr = static_cast<const float16_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_half<float16_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, numel * sizeof(float16_t), x, dy, dx);
                 break;
             }
             case DType::BFloat16: {
@@ -198,7 +247,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First element index of the range (inclusive).
                  * @param e One past the last element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<bfloat16_t*>(dx.data) + dx.offset, x_ptr = static_cast<const bfloat16_t*>(x.data) + x.offset, dy_ptr = static_cast<const bfloat16_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_half<bfloat16_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, x, dy, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<bfloat16_t*>(dx.data) + dx.offset, x_ptr = static_cast<const bfloat16_t*>(x.data) + x.offset, dy_ptr = static_cast<const bfloat16_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_half<bfloat16_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, numel * sizeof(bfloat16_t), x, dy, dx);
                 break;
             }
             case DType::Float16x2: {
@@ -209,7 +258,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First element index of the range (inclusive).
                  * @param e One past the last element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<float16x2_t*>(dx.data) + dx.offset, x_ptr = static_cast<const float16x2_t*>(x.data) + x.offset, dy_ptr = static_cast<const float16x2_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_packed<float16x2_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, x, dy, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<float16x2_t*>(dx.data) + dx.offset, x_ptr = static_cast<const float16x2_t*>(x.data) + x.offset, dy_ptr = static_cast<const float16x2_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_packed<float16x2_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, numel * sizeof(float16x2_t), x, dy, dx);
                 break;
             }
             case DType::BFloat16x2: {
@@ -220,7 +269,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First element index of the range (inclusive).
                  * @param e One past the last element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<bfloat16x2_t*>(dx.data) + dx.offset, x_ptr = static_cast<const bfloat16x2_t*>(x.data) + x.offset, dy_ptr = static_cast<const bfloat16x2_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_packed<bfloat16x2_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, x, dy, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<bfloat16x2_t*>(dx.data) + dx.offset, x_ptr = static_cast<const bfloat16x2_t*>(x.data) + x.offset, dy_ptr = static_cast<const bfloat16x2_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_packed<bfloat16x2_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, numel * sizeof(bfloat16x2_t), x, dy, dx);
                 break;
             }
             case DType::Int8: {
@@ -231,7 +280,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First element index of the range (inclusive).
                  * @param e One past the last element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<int8_t*>(dx.data) + dx.offset, x_ptr = static_cast<const int8_t*>(x.data) + x.offset, dy_ptr = static_cast<const int8_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int<int8_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, x, dy, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<int8_t*>(dx.data) + dx.offset, x_ptr = static_cast<const int8_t*>(x.data) + x.offset, dy_ptr = static_cast<const int8_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int<int8_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, numel * sizeof(int8_t), x, dy, dx);
                 break;
             }
             case DType::UInt8: {
@@ -242,7 +291,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First element index of the range (inclusive).
                  * @param e One past the last element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<uint8_t*>(dx.data) + dx.offset, x_ptr = static_cast<const uint8_t*>(x.data) + x.offset, dy_ptr = static_cast<const uint8_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int<uint8_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, x, dy, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<uint8_t*>(dx.data) + dx.offset, x_ptr = static_cast<const uint8_t*>(x.data) + x.offset, dy_ptr = static_cast<const uint8_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int<uint8_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, numel * sizeof(uint8_t), x, dy, dx);
                 break;
             }
             case DType::Int16: {
@@ -253,7 +302,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First element index of the range (inclusive).
                  * @param e One past the last element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<int16_t*>(dx.data) + dx.offset, x_ptr = static_cast<const int16_t*>(x.data) + x.offset, dy_ptr = static_cast<const int16_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int<int16_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, x, dy, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<int16_t*>(dx.data) + dx.offset, x_ptr = static_cast<const int16_t*>(x.data) + x.offset, dy_ptr = static_cast<const int16_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int<int16_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, numel * sizeof(int16_t), x, dy, dx);
                 break;
             }
             case DType::UInt16: {
@@ -264,7 +313,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First element index of the range (inclusive).
                  * @param e One past the last element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<uint16_t*>(dx.data) + dx.offset, x_ptr = static_cast<const uint16_t*>(x.data) + x.offset, dy_ptr = static_cast<const uint16_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int<uint16_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, x, dy, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<uint16_t*>(dx.data) + dx.offset, x_ptr = static_cast<const uint16_t*>(x.data) + x.offset, dy_ptr = static_cast<const uint16_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int<uint16_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, numel * sizeof(uint16_t), x, dy, dx);
                 break;
             }
             case DType::Int32: {
@@ -275,7 +324,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First element index of the range (inclusive).
                  * @param e One past the last element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<int32_t*>(dx.data) + dx.offset, x_ptr = static_cast<const int32_t*>(x.data) + x.offset, dy_ptr = static_cast<const int32_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int<int32_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, x, dy, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<int32_t*>(dx.data) + dx.offset, x_ptr = static_cast<const int32_t*>(x.data) + x.offset, dy_ptr = static_cast<const int32_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int<int32_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, numel * sizeof(int32_t), x, dy, dx);
                 break;
             }
             case DType::UInt32: {
@@ -286,7 +335,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First element index of the range (inclusive).
                  * @param e One past the last element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<uint32_t*>(dx.data) + dx.offset, x_ptr = static_cast<const uint32_t*>(x.data) + x.offset, dy_ptr = static_cast<const uint32_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int<uint32_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, x, dy, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<uint32_t*>(dx.data) + dx.offset, x_ptr = static_cast<const uint32_t*>(x.data) + x.offset, dy_ptr = static_cast<const uint32_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int<uint32_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, numel * sizeof(uint32_t), x, dy, dx);
                 break;
             }
             case DType::Int64: {
@@ -297,7 +346,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First element index of the range (inclusive).
                  * @param e One past the last element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<int64_t*>(dx.data) + dx.offset, x_ptr = static_cast<const int64_t*>(x.data) + x.offset, dy_ptr = static_cast<const int64_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int<int64_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, x, dy, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<int64_t*>(dx.data) + dx.offset, x_ptr = static_cast<const int64_t*>(x.data) + x.offset, dy_ptr = static_cast<const int64_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int<int64_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, numel * sizeof(int64_t), x, dy, dx);
                 break;
             }
             case DType::UInt64: {
@@ -308,7 +357,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First element index of the range (inclusive).
                  * @param e One past the last element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<uint64_t*>(dx.data) + dx.offset, x_ptr = static_cast<const uint64_t*>(x.data) + x.offset, dy_ptr = static_cast<const uint64_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int<uint64_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, x, dy, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<uint64_t*>(dx.data) + dx.offset, x_ptr = static_cast<const uint64_t*>(x.data) + x.offset, dy_ptr = static_cast<const uint64_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int<uint64_t>(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, numel * sizeof(uint64_t), x, dy, dx);
                 break;
             }
             case DType::Int4x2: {
@@ -319,7 +368,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First element index of the range (inclusive).
                  * @param e One past the last element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<int4x2_t*>(dx.data) + dx.offset, x_ptr = static_cast<const int4x2_t*>(x.data) + x.offset, dy_ptr = static_cast<const int4x2_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int4x2(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, x, dy, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<int4x2_t*>(dx.data) + dx.offset, x_ptr = static_cast<const int4x2_t*>(x.data) + x.offset, dy_ptr = static_cast<const int4x2_t*>(dy.data) + dy.offset](const size_t b, const size_t e) { relu_g_range_int4x2(dx_ptr, x_ptr, dy_ptr, b, e); }, numel, numel * sizeof(int4x2_t), x, dy, dx);
                 break;
             }
             [[unlikely]] default: {

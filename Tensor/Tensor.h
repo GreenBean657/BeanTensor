@@ -2,8 +2,8 @@
  * @file Tensor.h
  * @author GreenBean
  * @brief Tensor class declaration: dtype, shape, device and buffer ownership.
- * @version 0.4.0
- * @date 2026-10-23
+ * @version 0.4.2
+ * @date 2026-10-25
  */
 #pragma once
 #define BT_TENSOR_MAX_DIMS 3
@@ -628,6 +628,9 @@ namespace BeanTensor::Tensors {
          * and chunkings). Float reduction order is backend-defined, so float
          * sums are not guaranteed bit-identical between CPU/SIMD/GPU tiers.
          * Blocks before returning (the merge happens on the caller thread).
+         * When requires_grad=true the output joins the computation graph
+         * (SumG backward: dx = the scalar seed broadcast to this tensor's
+         * shape).
          * @brief Full-tensor sum reduction.
          * @return Shape-{1} tensor holding the sum.
          */
@@ -646,12 +649,57 @@ namespace BeanTensor::Tensors {
          * thread). Mean consumes the UInt8 0/1 masks equal() produces
          * directly, e.g. accuracy = equal(pred, labels) cast to Float32,
          * then mean().
+         * When requires_grad=true the output joins the computation graph
+         * (MeanG backward: dx = the scalar seed divided by numel, broadcast
+         * to this tensor's shape).
          * @brief Full-tensor mean reduction.
          * @return Shape-{1} tensor holding the mean.
          * @throws ErrorHandling::IndexOutOfRange Tensor is empty.
          * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
          */
         [[nodiscard]] Tensor mean() const;
+
+        /**
+         * Smallest of every element, reduced to a shape-{1} tensor of this
+         * tensor's dtype and device. Comparison reduction: the non-NaN result
+         * is always bit-for-bit one of the input elements, and the combine is
+         * associative and commutative, so min results ARE bit-identical
+         * across CPU/GPU tiers and across chunk counts (unlike sum/mean,
+         * whose float accumulation order is backend-defined). PyTorch-
+         * compatible NaN rule: if ANY element is NaN the result is the
+         * canonical quiet NaN of the dtype (payloads are not preserved).
+         * Packed x2 dtypes (Float16x2/BFloat16x2) reduce per lane, so the two
+         * lanes' winners may come from different elements; a +0.0/-0.0 tie
+         * canonicalizes to -0.0. Integer and Int4x2 dtypes compare plainly
+         * (Int4x2 per lane). Blocks before returning (same move-drain
+         * contract as sum()). The output never joins the autograd graph.
+         * @brief Full-tensor min reduction.
+         * @return Shape-{1} tensor holding the minimum element.
+         * @throws ErrorHandling::IndexOutOfRange Tensor is empty.
+         * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
+         */
+        [[nodiscard]] Tensor min() const;
+
+        /**
+         * Largest of every element, reduced to a shape-{1} tensor of this
+         * tensor's dtype and device. Comparison reduction: the non-NaN result
+         * is always bit-for-bit one of the input elements, and the combine is
+         * associative and commutative, so max results ARE bit-identical
+         * across CPU/GPU tiers and across chunk counts (unlike sum/mean,
+         * whose float accumulation order is backend-defined). PyTorch-
+         * compatible NaN rule: if ANY element is NaN the result is the
+         * canonical quiet NaN of the dtype (payloads are not preserved).
+         * Packed x2 dtypes (Float16x2/BFloat16x2) reduce per lane, so the two
+         * lanes' winners may come from different elements; a +0.0/-0.0 tie
+         * canonicalizes to +0.0. Integer and Int4x2 dtypes compare plainly
+         * (Int4x2 per lane). Blocks before returning (same move-drain
+         * contract as sum()). The output never joins the autograd graph.
+         * @brief Full-tensor max reduction.
+         * @return Shape-{1} tensor holding the maximum element.
+         * @throws ErrorHandling::IndexOutOfRange Tensor is empty.
+         * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
+         */
+        [[nodiscard]] Tensor max() const;
 
         /**
          * Flat index of the maximum element. PyTorch-compatible NaN rule: NaN
@@ -1385,6 +1433,10 @@ namespace BeanTensor::Tensors {
         friend void detail::argmax_axis_gpu(const Tensor&, const Tensor&, size_t);
         friend void detail::mean_cpu(const Tensor&, const Tensor&);
         friend void detail::mean_gpu(const Tensor&, const Tensor&);
+        friend void detail::min_cpu(const Tensor&, const Tensor&);
+        friend void detail::min_gpu(const Tensor&, const Tensor&);
+        friend void detail::max_cpu(const Tensor&, const Tensor&);
+        friend void detail::max_gpu(const Tensor&, const Tensor&);
         friend void detail::equal_cpu(const Tensor&, const Tensor&, Tensor&);
         friend void detail::equal_gpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::bias_add_cpu(const Tensor&, const Tensor&, const Tensor&);
@@ -1397,6 +1449,8 @@ namespace BeanTensor::Tensors {
         friend void detail::mse_gpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::gemm_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::bias_add_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::sum_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::mean_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::relu_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::softmax_ce_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::mse_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);

@@ -3,8 +3,8 @@
  * @author GreenBean
  * @brief CPU backend for mse. Hosts the Tensor::mse method definition
  * (mirrors how Tensor::softmax_ce lives in SoftmaxCECPU.cpp).
- * @version 0.1
- * @date 2026-10-23
+ * @version 0.2
+ * @date 2026-10-26
  */
 #include <cstdint>
 #include <future>
@@ -56,7 +56,7 @@ namespace BeanTensor::Tensors::detail {
          */
         template<typename H>
         [[nodiscard]] float32_t mse_range_half(const H* p, const H* t, const size_t begin, const size_t end) {
-            auto total = 0.0f;
+            float32_t total = 0.0f;
             for (auto i = begin; i < end; ++i) {
                 const auto d = widen_lane(p[i]) - widen_lane(t[i]);
                 total += d * d;
@@ -78,7 +78,7 @@ namespace BeanTensor::Tensors::detail {
         template<typename P>
         [[nodiscard]] float32_t mse_range_packed(const P* p, const P* t, const size_t begin, const size_t end) {
             using H = packed_lane_t<P>;
-            auto total = 0.0f;
+            float32_t total = 0.0f;
             for (auto i = begin; i < end; ++i) {
                 const auto p_bits = Intrinsics::detail::bit_cast_memcpy<uint32_t>(p[i]);
                 const auto t_bits = Intrinsics::detail::bit_cast_memcpy<uint32_t>(t[i]);
@@ -102,7 +102,7 @@ namespace BeanTensor::Tensors::detail {
          */
         template<typename T>
         [[nodiscard]] float64_t mse_range_int(const T* p, const T* t, const size_t begin, const size_t end) {
-            auto total = 0.0;
+            float64_t total = 0.0;
             for (auto i = begin; i < end; ++i) {
                 const auto d = static_cast<float64_t>(p[i]) - static_cast<float64_t>(t[i]);
                 total += d * d;
@@ -120,7 +120,7 @@ namespace BeanTensor::Tensors::detail {
          * @return FP64 sum of the squared nibble differences over [begin, end).
          */
         [[nodiscard]] float64_t mse_range_i4x2(const int4x2_t* p, const int4x2_t* t, const size_t begin, const size_t end) {
-            auto total = 0.0;
+            float64_t total = 0.0;
             for (auto i = begin; i < end; ++i) {
                 const auto d_lo = static_cast<float64_t>(i4_lane_lo(p[i])) - static_cast<float64_t>(i4_lane_lo(t[i]));
                 const auto d_hi = static_cast<float64_t>(i4_lane_hi(p[i])) - static_cast<float64_t>(i4_lane_hi(t[i]));
@@ -157,9 +157,9 @@ namespace BeanTensor::Tensors::detail {
             case DType::Float32: {
                 const auto* p = static_cast<const float32_t*>(t.data) + t.offset;
                 const auto* g = static_cast<const float32_t*>(target.data) + target.offset;
-                std::vector partials(IncludedCPUFeatures().threads, 0.0f);
+                std::vector<float32_t> partials(IncludedCPUFeatures().threads, 0.0f);
                 drain(launch_loss_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mse_range_scalar<float32_t, float32_t>(p, g, b, e); }, t, target));
-                auto total = 0.0;
+                float64_t total = 0.0;
                 for (const auto part : partials) {
                     total += static_cast<float64_t>(part);
                 }
@@ -169,9 +169,9 @@ namespace BeanTensor::Tensors::detail {
             case DType::Float64: {
                 const auto* p = static_cast<const float64_t*>(t.data) + t.offset;
                 const auto* g = static_cast<const float64_t*>(target.data) + target.offset;
-                std::vector partials(IncludedCPUFeatures().threads, 0.0);
+                std::vector<float64_t> partials(IncludedCPUFeatures().threads, 0.0);
                 drain(launch_loss_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mse_range_scalar<float64_t, float64_t>(p, g, b, e); }, t, target));
-                auto total = 0.0;
+                float64_t total = 0.0;
                 for (const auto part : partials) {
                     total += part;
                 }
@@ -181,9 +181,9 @@ namespace BeanTensor::Tensors::detail {
             case DType::Float16: {
                 const auto* p = static_cast<const float16_t*>(t.data) + t.offset;
                 const auto* g = static_cast<const float16_t*>(target.data) + target.offset;
-                std::vector partials(IncludedCPUFeatures().threads, 0.0f);
+                std::vector<float32_t> partials(IncludedCPUFeatures().threads, 0.0f);
                 drain(launch_loss_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mse_range_half<float16_t>(p, g, b, e); }, t, target));
-                auto total = 0.0;
+                float64_t total = 0.0;
                 for (const auto part : partials) {
                     total += static_cast<float64_t>(part);
                 }
@@ -193,9 +193,9 @@ namespace BeanTensor::Tensors::detail {
             case DType::BFloat16: {
                 const auto* p = static_cast<const bfloat16_t*>(t.data) + t.offset;
                 const auto* g = static_cast<const bfloat16_t*>(target.data) + target.offset;
-                std::vector partials(IncludedCPUFeatures().threads, 0.0f);
+                std::vector<float32_t> partials(IncludedCPUFeatures().threads, 0.0f);
                 drain(launch_loss_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mse_range_half<bfloat16_t>(p, g, b, e); }, t, target));
-                auto total = 0.0;
+                float64_t total = 0.0;
                 for (const auto part : partials) {
                     total += static_cast<float64_t>(part);
                 }
@@ -205,9 +205,9 @@ namespace BeanTensor::Tensors::detail {
             case DType::Float16x2: {
                 const auto* p = static_cast<const float16x2_t*>(t.data) + t.offset;
                 const auto* g = static_cast<const float16x2_t*>(target.data) + target.offset;
-                std::vector partials(IncludedCPUFeatures().threads, 0.0f);
+                std::vector<float32_t> partials(IncludedCPUFeatures().threads, 0.0f);
                 drain(launch_loss_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mse_range_packed<float16x2_t>(p, g, b, e); }, t, target));
-                auto total = 0.0;
+                float64_t total = 0.0;
                 for (const auto part : partials) {
                     total += static_cast<float64_t>(part);
                 }
@@ -217,9 +217,9 @@ namespace BeanTensor::Tensors::detail {
             case DType::BFloat16x2: {
                 const auto* p = static_cast<const bfloat16x2_t*>(t.data) + t.offset;
                 const auto* g = static_cast<const bfloat16x2_t*>(target.data) + target.offset;
-                std::vector partials(IncludedCPUFeatures().threads, 0.0f);
+                std::vector<float32_t> partials(IncludedCPUFeatures().threads, 0.0f);
                 drain(launch_loss_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mse_range_packed<bfloat16x2_t>(p, g, b, e); }, t, target));
-                auto total = 0.0;
+                float64_t total = 0.0;
                 for (const auto part : partials) {
                     total += static_cast<float64_t>(part);
                 }
@@ -228,7 +228,7 @@ namespace BeanTensor::Tensors::detail {
             }
             case DType::Int8: case DType::UInt8: case DType::Int16: case DType::UInt16:
             case DType::Int32: case DType::UInt32: case DType::Int64: case DType::UInt64: {
-                std::vector partials(IncludedCPUFeatures().threads, 0.0);
+                std::vector<float64_t> partials(IncludedCPUFeatures().threads, 0.0);
                 /**
                  * Runs mse_range_int<T> over every chunk and drains the futures.
                  * @brief Threaded integer MSE partial for one concrete element type.
@@ -250,7 +250,7 @@ namespace BeanTensor::Tensors::detail {
                     case DType::UInt64: launch_int(static_cast<const uint64_t*>(t.data) + t.offset, static_cast<const uint64_t*>(target.data) + target.offset); break;
                     [[unlikely]] default: throw ErrorHandling::UnReachableCode();
                 }
-                auto total = 0.0;
+                float64_t total = 0.0;
                 for (const auto part : partials) {
                     total += part;
                 }
@@ -260,9 +260,9 @@ namespace BeanTensor::Tensors::detail {
             case DType::Int4x2: {
                 const auto* p = static_cast<const int4x2_t*>(t.data) + t.offset;
                 const auto* g = static_cast<const int4x2_t*>(target.data) + target.offset;
-                std::vector partials(IncludedCPUFeatures().threads, 0.0);
+                std::vector<float64_t> partials(IncludedCPUFeatures().threads, 0.0);
                 drain(launch_loss_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mse_range_i4x2(p, g, b, e); }, t, target));
-                auto total = 0.0;
+                float64_t total = 0.0;
                 for (const auto part : partials) {
                     total += part;
                 }

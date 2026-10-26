@@ -4,8 +4,8 @@
  * @brief Shared scalar/packed lane helpers, threaded reduction launcher, and
  * function-pointer typedefs used by the optimization op (sgd_update).
  * Header-only: everything here is a template or inline.
- * @version 0.1
- * @date 2026-10-22
+ * @version 0.2
+ * @date 2026-10-25
  */
 #pragma once
 
@@ -163,12 +163,27 @@ namespace BeanTensor::Tensors::detail::optimization_shared {
     }
 
     /**
-     * @brief Drain futures on the caller thread.
+     * Drains EVERY future before rethrowing the first stored worker error: a
+     * chunk's range_fn may reference the caller's stack (partials), so the
+     * caller's frame must outlive ALL chunks even when one threw — rethrowing
+     * on the first get() would let the rest run against a destroyed frame.
+     * @brief Drain futures on the caller thread, rethrowing the first error after all join.
      * @param futures Futures to wait on; rethrows the first stored worker error.
      */
     inline void drain(const std::vector<std::shared_future<void>>& futures) {
+        auto first_error = std::exception_ptr{};
         for (const auto& f : futures) {
-            f.get();
+            try {
+                f.get();
+            }
+            catch (...) {
+                if (!first_error) {
+                    first_error = std::current_exception();
+                }
+            }
+        }
+        if (first_error) {
+            std::rethrow_exception(first_error);
         }
     }
 

@@ -73,14 +73,9 @@ namespace BeanTensor::Tensors::detail {
         auto base = size_t{0};
         const auto lead = p.out_ndim - p.op_ndim;
         for (auto d = size_t{0}; d < p.out_ndim; ++d) {
-            if (d < lead) {
-                free_dim[k] = d;
-                free_ext[k] = p.out_shape[d];
-                ++k;
-            } else if (
+            if (
                 const auto od = d - lead;
-                p.op_shape[od] == 1
-            ) {
+                (p.op_shape[od] == 1) || (d < lead)) {
                 free_dim[k] = d;
                 free_ext[k] = p.out_shape[d];
                 ++k;

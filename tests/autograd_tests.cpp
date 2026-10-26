@@ -5,7 +5,9 @@
 // gradient reduction, per-call grad dtype probes) via the forward ops'
 // auto-wired graph and Tensor::backward(); analytic checks on fp32/fp64,
 // finite-difference checks (fp64) of a full relu(x·W + b) -> softmax_ce
-// chain, threaded/SIMD paths (large tensors), every dtype pathway (fp16/bf16,
+// chain, threaded/SIMD paths (large tensors), the full-tensor reduction
+// backward nodes (sum_G/mean_G: broadcast-seed deltas, non-default grad
+// dtype, leaf accumulation), every dtype pathway (fp16/bf16,
 // packed x2, all integer dtypes, int4x2), gradient accumulation across
 // backward() calls, fan-out DAGs, zero_grad, error paths, per-call grad dtype
 // override (backward(DType): fp64/fp16/fp32/int8/int32 on the same graph, with
@@ -47,6 +49,7 @@ using BeanTensor::float64_t;
 using BeanTensor::int4x2_t;
 using DType = BeanTensor::DataTypes::DType;
 namespace idet = BeanTensor::Intrinsics::detail;
+namespace tdetail = BeanTensor::Tensors::detail;
 
 static int32_t failures = 0;
 #define CHECK(...) do { \
@@ -689,6 +692,123 @@ static void test_no_gradient_errors() {
 }
 
 // =====================================================================
+// sum_G / mean_G (full-tensor reduction backward)
+// =====================================================================
+
+static void test_sum_g_basic(const Device dev) {
+    // Graph terminated by sum: dx = ones x seed, and the forward value matches.
+    Tensor x({2, 3}, DType::Float32, dev, true);
+    for (auto i = size_t{0}; i < 6; ++i) {
+        x.set<float32_t>({i / 3, i % 3}, static_cast<float32_t>(i + 1));
+    }
+    auto y = x.sum();
+    // Integers sum exactly in fp32 on every reduction order.
+    CHECK(near64(y.at<float32_t>({0}), 21.0, 0.0));
+    y.backward(DType::Float32);
+    CHECK(x.gradient().get_dtype() == DType::Float32);
+    for (auto i = size_t{0}; i < 6; ++i) {
+        CHECK(idet::bit_cast_memcpy<uint32_t>(x.gradient().at<float32_t>({i / 3, i % 3})) == idet::bit_cast_memcpy<uint32_t>(1.0f));
+    }
+    // The root's own gradient is the ones seed.
+    CHECK(idet::bit_cast_memcpy<uint32_t>(y.gradient().at<float32_t>({0})) == idet::bit_cast_memcpy<uint32_t>(1.0f));
+}
+
+static void test_sum_g_seed_and_grad_dtype(const Device dev) {
+    // Non-trivial upstream (seed 2.5 through the .mul(c) root) under a
+    // non-default assigned grad dtype: dx = 2.5 in Float16 everywhere; the
+    // sum node's delta into the mul intermediate carries Float16 (probe).
+    Tensor x({2, 2}, DType::Float32, dev, true);
+    Tensor c({1}, DType::Float32, dev, false);
+    x.set_one();
+    c.set<float32_t>({0}, 2.5f);
+    auto y = x.sum();
+    auto root = y.mul(c);
+    if (dev == Device::CPU) {
+        tdetail::grad_probe_reset();
+    }
+    root.backward(DType::Float16);
+    CHECK(x.gradient().get_dtype() == DType::Float16);
+    CHECK(y.gradient().get_dtype() == DType::Float16);
+    // 2.5 is exact in fp16 through the whole chain.
+    for (auto i = size_t{0}; i < 4; ++i) {
+        CHECK(near64(widen_lane(x.gradient().at<float16_t>({i / 2, i % 2})), 2.5, 0.0));
+    }
+    if (dev == Device::CPU) {
+        // sum_g delivers exactly one intermediate delta (into y).
+        CHECK(tdetail::grad_probe_count(DType::Float16) == 1);
+    }
+}
+
+static void test_sum_g_in_matmul_graph(const Device dev) {
+    // z = a.matmul(b), root = z.sum(): with a ones seed, da[i,k] = sum_j b[k,j]
+    // and db[k,j] = sum_i a[i,k] — the same reference GEMM_G uses.
+    Tensor a({2, 3}, DType::Float32, dev, true);
+    Tensor b({3, 2}, DType::Float32, dev, true);
+    std::vector<float64_t> av(6);
+    std::vector<float64_t> bv(6);
+    for (auto i = size_t{0}; i < 6; ++i) {
+        av[i] = static_cast<float64_t>(i % 4) - 1.5;
+        bv[i] = static_cast<float64_t>(i % 3) - 0.75;
+        a.set<float32_t>({i / 3, i % 3}, static_cast<float32_t>(av[i]));
+        b.set<float32_t>({i / 2, i % 2}, static_cast<float32_t>(bv[i]));
+    }
+    auto z = a.matmul(b);
+    auto root = z.sum();
+    if (dev == Device::CPU) {
+        tdetail::grad_probe_reset();
+    }
+    root.backward(DType::Float32);
+    if (dev == Device::CPU) {
+        // sum_g delivers exactly one intermediate delta (into z).
+        CHECK(tdetail::grad_probe_count(DType::Float32) == 1);
+    }
+    std::vector<float64_t> da;
+    std::vector<float64_t> db;
+    ref_gemm_grads_ones(av, bv, 1, 2, 3, 2, da, db);
+    auto bad = size_t{0};
+    for (auto i = size_t{0}; i < 6; ++i) {
+        if (!near64(a.gradient().at<float32_t>({i / 3, i % 3}), da[i], 1e-5)) {
+            ++bad;
+        }
+        if (!near64(b.gradient().at<float32_t>({i / 2, i % 2}), db[i], 1e-5)) {
+            ++bad;
+        }
+    }
+    CHECK(bad == 0);
+}
+
+static void test_sum_g_accumulation(const Device dev) {
+    // Leaf grads accumulate across backward() calls through the same sum.
+    Tensor x({2, 2}, DType::Float32, dev, true);
+    x.set_one();
+    auto y = x.sum();
+    y.backward(DType::Float32);
+    y.backward(DType::Float32);
+    for (auto i = size_t{0}; i < 4; ++i) {
+        CHECK(idet::bit_cast_memcpy<uint32_t>(x.gradient().at<float32_t>({i / 2, i % 2})) == idet::bit_cast_memcpy<uint32_t>(2.0f));
+    }
+    // The intermediate (root) grad holds only this call's seed.
+    CHECK(idet::bit_cast_memcpy<uint32_t>(y.gradient().at<float32_t>({0})) == idet::bit_cast_memcpy<uint32_t>(1.0f));
+}
+
+static void test_mean_g_basic(const Device dev) {
+    // dx = seed/numel broadcast: root = mean(x) * 2 over 4 elements -> 0.5 each.
+    Tensor x({2, 2}, DType::Float64, dev, true);
+    Tensor c({1}, DType::Float64, dev, false);
+    for (auto i = size_t{0}; i < 4; ++i) {
+        x.set<float64_t>({i / 2, i % 2}, static_cast<float64_t>(i + 1));
+    }
+    c.set<float64_t>({0}, 2.0);
+    auto y = x.mean();
+    CHECK(near64(y.at<float64_t>({0}), 2.5, 1e-12));
+    auto root = y.mul(c);
+    root.backward(DType::Float64);
+    for (auto i = size_t{0}; i < 4; ++i) {
+        CHECK(near64(x.gradient().at<float64_t>({i / 2, i % 2}), 0.5, 1e-12));
+    }
+}
+
+// =====================================================================
 // dtype pathways
 // =====================================================================
 
@@ -1012,6 +1132,11 @@ static void run_device_suite(const Device dev) {
     test_softmax_ce_g_threaded(dev);
     test_accumulation_and_zero_grad(dev);
     test_fan_out(dev);
+    test_sum_g_basic(dev);
+    test_sum_g_seed_and_grad_dtype(dev);
+    test_sum_g_in_matmul_graph(dev);
+    test_sum_g_accumulation(dev);
+    test_mean_g_basic(dev);
     test_all_dtype_pathways(dev);
     test_ew_binary_gradients(dev);
     test_ew_one_side(dev);
@@ -1073,8 +1198,6 @@ static void test_grad_follows_to() {
 // =====================================================================
 // Per-call grad dtype override: backward(DType)
 // =====================================================================
-
-namespace tdetail = BeanTensor::Tensors::detail;
 
 namespace {
     /**
@@ -1359,7 +1482,7 @@ static void run_ew_binary_case(const Device dev, const DType dt, const Elementwi
                                const std::vector<float64_t>& xs, const std::vector<float64_t>& ws,
                                const float64_t eps) {
     constexpr size_t n = 4;
-    const auto cval = float64_t{2.0}; // upstream gradient into the op node
+    constexpr auto cval = float64_t{2.0}; // upstream gradient into the op node
     Tensor x({2, 2}, dt, dev, true);
     Tensor w({2, 2}, dt, dev, true);
     Tensor c({2, 2}, dt, dev, false);

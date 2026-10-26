@@ -6,8 +6,8 @@
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same fp32/fp64 compute widths, same RNE narrowing,
  * same accumulator taxonomy as the CPU backend.
- * @version 0.1
- * @date 2026-10-23
+ * @version 0.3
+ * @date 2026-10-26
  */
 #if defined(USE_CUDA)
 #include <cstdint>
@@ -99,6 +99,36 @@ namespace BeanTensor::Tensors::detail {
         }
 
         /**
+         * Clamp to the dtype range, then truncate toward zero — the same
+         * narrowing rule as the CPU store_loss_mean. The uint64/int64 maxima
+         * round UP to 2^64/2^63 in fp64, so the >= guard returns the true
+         * integer max before the static_cast (UB at exactly 2^64/2^63).
+         * A NaN mean stores 0 (there is no integer NaN). The bounds are
+         * computed on the host (nvcc rejects numeric_limits in device code)
+         * and passed as T so the guard can return the exact limit value.
+         * @brief Narrow an fp64 MSE mean to an integer dtype.
+         * @param v FP64 mean.
+         * @param lo T's lowest().
+         * @param hi T's max().
+         * @return The mean narrowed into T's range.
+         */
+        template<typename T> requires std::is_integral_v<T>
+        __device__ __forceinline__ T dev_narrow_mse_int(const float64_t v, const T lo, const T hi) {
+            const auto lo_f = static_cast<float64_t>(lo);
+            const auto hi_f = static_cast<float64_t>(hi);
+            if (isnan(v)) {
+                return T{0};
+            }
+            if (v <= lo_f) {
+                return lo;
+            }
+            if (v >= hi_f) {
+                return hi;
+            }
+            return static_cast<T>(v);
+        }
+
+        /**
          * Single block reduces the per-block fp64 partials to the mean
          * (total / n_logical) and stores it narrowed into out[0]: floats RNE
          * (bf16 with the CPU-matching flush), packed dtypes duplicate the
@@ -110,17 +140,17 @@ namespace BeanTensor::Tensors::detail {
          * @param partials Per-block fp64 partials, nblocks elements.
          * @param nblocks Number of valid partials.
          * @param n_logical Logical element count the mean divides by.
-         * @param lo Integer dtype lower bound; ignored for float kinds.
-         * @param hi Integer dtype upper bound; ignored for float kinds.
+         * @param lo Integer dtype lower bound (value of type T); ignored for float kinds.
+         * @param hi Integer dtype upper bound (value of type T); ignored for float kinds.
          * @param out Single-element output tensor data.
          */
         template<typename T>
         __global__ void mse_final_kernel(const float64_t* __restrict__ partials, const size_t nblocks,
-                                         const float64_t n_logical, const float64_t lo, const float64_t hi,
+                                         const float64_t n_logical, const T lo, const T hi,
                                          T* __restrict__ out) {
             __shared__ float64_t shared[BT_GPU_THREADS];
             const auto tid = threadIdx.x;
-            auto acc = 0.0;
+            float64_t acc = 0.0;
             for (auto i = tid; i < nblocks; i += BT_GPU_THREADS) {
                 acc += partials[i];
             }
@@ -151,7 +181,7 @@ namespace BeanTensor::Tensors::detail {
                 } else if constexpr (std::is_same_v<T, int4x2_t>) {
                     auto v = mean;
                     if (isnan(v)) {
-                        v = 0.0;
+                        v = float64_t{0.0};
                     }
                     if (v <= -8.0) {
                         v = -8.0;
@@ -161,19 +191,25 @@ namespace BeanTensor::Tensors::detail {
                     const auto n = static_cast<int32_t>(v);
                     out[0] = dev_i4_pack(static_cast<int8_t>(n), static_cast<int8_t>(n));
                 } else {
-                    auto v = mean;
-                    if (isnan(v)) {
-                        v = 0.0;
-                    }
-                    if (v <= lo) {
-                        v = lo;
-                    } else if (v >= hi) {
-                        v = hi;
-                    }
-                    out[0] = static_cast<T>(v);
+                    out[0] = dev_narrow_mse_int<T>(mean, lo, hi);
                 }
             }
         }
+
+        /**
+         * Worker-local cudaMalloc buffer that frees on scope exit even when an
+         * exception is in flight. The explicit cudaFree below still checks for
+         * errors on the success path.
+         * @brief RAII guard for the MSE partials scratch buffer.
+         */
+        struct MsePartialsGuard {
+            float64_t* ptr = nullptr;
+            ~MsePartialsGuard() {
+                if (ptr != nullptr) {
+                    static_cast<void>(cudaFree(ptr));
+                }
+            }
+        };
 
         /**
          * Scratch is worker-local cudaMalloc/cudaFree. The partials buffer is
@@ -187,24 +223,30 @@ namespace BeanTensor::Tensors::detail {
          * @param numel Storage element count.
          * @param lane_factor Logical elements per storage element.
          * @param out Single-element output tensor data.
+         * @throws ErrorHandling::IndexOutOfRange when numel is zero.
          */
         template<typename T, typename Acc>
         __host__ void run_mse(const T* p, const T* t, const size_t numel, const size_t lane_factor, T* out) {
+            if (numel == 0) {
+                throw ErrorHandling::IndexOutOfRange();
+            }
             // Integer bounds are computed on the host (nvcc rejects
-            // numeric_limits in device code).
-            auto lo = 0.0;
-            auto hi = 0.0;
+            // numeric_limits in device code); T{} for non-integer T, unused.
+            T lo = T{};
+            T hi = T{};
             if constexpr (std::is_integral_v<T>) {
-                lo = static_cast<float64_t>(std::numeric_limits<T>::lowest());
-                hi = static_cast<float64_t>(std::numeric_limits<T>::max());
+                lo = std::numeric_limits<T>::lowest();
+                hi = std::numeric_limits<T>::max();
             }
             const auto blocks = grid_for(numel);
             const auto n_logical = static_cast<float64_t>(numel) * static_cast<float64_t>(lane_factor);
             float64_t* partials = nullptr;
             CUDA_CHECK_ERROR(cudaMalloc(&partials, blocks * sizeof(float64_t)));
+            MsePartialsGuard guard{partials};
             mse_partial_kernel<T, Acc><<<blocks, BT_GPU_THREADS>>>(p, t, partials, numel, lane_factor);
             mse_final_kernel<T><<<1, BT_GPU_THREADS>>>(partials, blocks, n_logical, lo, hi, out);
             CUDA_CHECK_ERROR(cudaGetLastError());
+            guard.ptr = nullptr;
             CUDA_CHECK_ERROR(cudaFree(partials));
         }
     }
@@ -220,8 +262,14 @@ namespace BeanTensor::Tensors::detail {
      * @note Throws DirectFunctionCallOnWrongDataSource when any tensor is not on the GPU.
      */
     __host__ void mse_gpu(const Tensor& t, const Tensor& target, const Tensor& out) {
-        if (t.device != Device::GPU || target.device != Device::GPU || out.device != Device::GPU) {
+        if (t.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(t.device));
+        }
+        if (target.device != Device::GPU) {
+            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(target.device));
+        }
+        if (out.device != Device::GPU) {
+            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(out.device));
         }
         const auto* const p_data = t.data;
         const auto* const t_data = target.data;

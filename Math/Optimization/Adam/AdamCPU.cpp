@@ -7,8 +7,8 @@
  * per-parameter first/second moments and a step count, and Tensor's verified
  * sizeof layout must not grow, so the state lives in an external map keyed by
  * the parameter's address (this file) instead of new Tensor members.
- * @version 0.1.3
- * @date 2026-10-23
+ * @version 0.1.5
+ * @date 2026-10-26
  */
 #include <cmath>
 #include <cstdint>
@@ -138,8 +138,8 @@ namespace BeanTensor::Tensors::detail {
                              const float32_t lr, const float32_t b1, const float32_t b2,
                              const float32_t bc1, const float32_t bc2, const float32_t eps,
                              const size_t begin, const size_t end) {
-            const auto omb1 = 1.0f - b1;
-            const auto omb2 = 1.0f - b2;
+            const float32_t omb1 = 1.0f - b1;
+            const float32_t omb2 = 1.0f - b2;
             const auto neg_lr = -lr;
             for (auto i = begin; i < end; ++i) {
                 const auto gm = widen_lane(g[i]);
@@ -174,8 +174,8 @@ namespace BeanTensor::Tensors::detail {
                                const float32_t bc1, const float32_t bc2, const float32_t eps,
                                const size_t begin, const size_t end) {
             using H = packed_lane_t<P>;
-            const auto omb1 = 1.0f - b1;
-            const auto omb2 = 1.0f - b2;
+            const float32_t omb1 = 1.0f - b1;
+            const float32_t omb2 = 1.0f - b2;
             const auto neg_lr = -lr;
             for (auto i = begin; i < end; ++i) {
                 const auto w_bits = Intrinsics::detail::bit_cast_memcpy<uint32_t>(w[i]);
@@ -214,16 +214,24 @@ namespace BeanTensor::Tensors::detail {
          * Futures land on all four tensors so teardown drains the workers
          * (they hold raw buffer pointers). Small inputs run inline. The worker
          * is captured by value, the futures outlive this call.
+         * CCD-aware: Adam writes the parameter plus both moment buffers (three
+         * same-sized spans), so the gate is the total bytes written. When that
+         * fits one CCD's LLC the chunks go to the calling thread's CCD group
+         * (submit_to_group) so the cache-resident spans are written locally;
+         * otherwise they go to the whole pool as before. The chunk count still
+         * assumes all t_count threads — group workers simply claim multiple
+         * chunks from the queue.
          * @brief Threaded Adam launcher, chunks an elementwise four-operand range worker across the CPU thread pool.
          * @param worker Callable taking (begin, end).
          * @param numel Element count to cover.
+         * @param out_bytes Total bytes of the parameter/moment spans the workers write.
          * @param w Weight tensor, receives the futures.
          * @param grad Gradient tensor, receives the futures.
          * @param m First-moment tensor, receives the futures.
          * @param v Second-moment tensor, receives the futures.
          */
         template<typename Worker>
-        void launch_adam(Worker&& worker, const size_t numel, const Tensor& w, const Tensor& grad, const Tensor& m, const Tensor& v) {
+        void launch_adam(Worker&& worker, const size_t numel, const size_t out_bytes, const Tensor& w, const Tensor& grad, const Tensor& m, const Tensor& v) {
             const auto t_count = static_cast<size_t>(IncludedCPUFeatures().threads);
             if (t_count <= 1 || numel <= t_count * 1024) {
                 worker(0, numel);
@@ -232,6 +240,8 @@ namespace BeanTensor::Tensors::detail {
             auto& threadMgr = Threading::GetCPUThreadPool();
             std::vector<std::shared_future<void>> futures;
             const auto chunk = (numel + t_count - 1) / t_count;
+            const bool keep_local = KeepWorkLocal(out_bytes);
+            const auto group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
             for (auto t = size_t{0}; t < t_count; ++t) {
                 const auto begin = t * chunk;
                 if (begin >= numel) {
@@ -239,7 +249,11 @@ namespace BeanTensor::Tensors::detail {
                 }
                 // worker is captured BY VALUE: these futures outlive this call
                 // (they land on the tensors), so a reference would dangle.
-                futures.push_back(threadMgr.submit([worker, begin, end = std::min(begin + chunk, numel)] { worker(begin, end); }, Threading::TaskPriority::Normal).share());
+                if (keep_local) {
+                    futures.push_back(threadMgr.submit_to_group([worker, begin, end = std::min(begin + chunk, numel)] { worker(begin, end); }, group, Threading::TaskPriority::Normal).share());
+                } else {
+                    futures.push_back(threadMgr.submit([worker, begin, end = std::min(begin + chunk, numel)] { worker(begin, end); }, Threading::TaskPriority::Normal).share());
+                }
             }
             w.give_futures(futures);
             grad.give_futures(futures);
@@ -280,7 +294,7 @@ namespace BeanTensor::Tensors::detail {
                 auto* m_ptr = static_cast<float32_t*>(m.data) + m.offset;
                 auto* v_ptr = static_cast<float32_t*>(v.data) + v.offset;
                 const auto* g_ptr = static_cast<const float32_t*>(grad.data) + grad.offset;
-                launch_adam([=](const size_t b, const size_t e) { adam_range_scalar<float32_t>(w_ptr, m_ptr, v_ptr, g_ptr, static_cast<float32_t>(lr), static_cast<float32_t>(beta1), static_cast<float32_t>(beta2), static_cast<float32_t>(beta1_corr), static_cast<float32_t>(beta2_corr), static_cast<float32_t>(epsilon), b, e); }, numel, w, grad, m, v);
+                launch_adam([=](const size_t b, const size_t e) { adam_range_scalar<float32_t>(w_ptr, m_ptr, v_ptr, g_ptr, static_cast<float32_t>(lr), static_cast<float32_t>(beta1), static_cast<float32_t>(beta2), static_cast<float32_t>(beta1_corr), static_cast<float32_t>(beta2_corr), static_cast<float32_t>(epsilon), b, e); }, numel, 3 * numel * sizeof(float32_t), w, grad, m, v);
                 break;
             }
             case DType::Float64: {
@@ -288,7 +302,7 @@ namespace BeanTensor::Tensors::detail {
                 auto* m_ptr = static_cast<float64_t*>(m.data) + m.offset;
                 auto* v_ptr = static_cast<float64_t*>(v.data) + v.offset;
                 const auto* g_ptr = static_cast<const float64_t*>(grad.data) + grad.offset;
-                launch_adam([=](const size_t b, const size_t e) { adam_range_scalar<float64_t>(w_ptr, m_ptr, v_ptr, g_ptr, lr, beta1, beta2, beta1_corr, beta2_corr, epsilon, b, e); }, numel, w, grad, m, v);
+                launch_adam([=](const size_t b, const size_t e) { adam_range_scalar<float64_t>(w_ptr, m_ptr, v_ptr, g_ptr, lr, beta1, beta2, beta1_corr, beta2_corr, epsilon, b, e); }, numel, 3 * numel * sizeof(float64_t), w, grad, m, v);
                 break;
             }
             case DType::Float16: {
@@ -296,7 +310,7 @@ namespace BeanTensor::Tensors::detail {
                 auto* m_ptr = static_cast<float16_t*>(m.data) + m.offset;
                 auto* v_ptr = static_cast<float16_t*>(v.data) + v.offset;
                 const auto* g_ptr = static_cast<const float16_t*>(grad.data) + grad.offset;
-                launch_adam([=](const size_t b, const size_t e) { adam_range_half<float16_t>(w_ptr, m_ptr, v_ptr, g_ptr, static_cast<float32_t>(lr), static_cast<float32_t>(beta1), static_cast<float32_t>(beta2), static_cast<float32_t>(beta1_corr), static_cast<float32_t>(beta2_corr), static_cast<float32_t>(epsilon), b, e); }, numel, w, grad, m, v);
+                launch_adam([=](const size_t b, const size_t e) { adam_range_half<float16_t>(w_ptr, m_ptr, v_ptr, g_ptr, static_cast<float32_t>(lr), static_cast<float32_t>(beta1), static_cast<float32_t>(beta2), static_cast<float32_t>(beta1_corr), static_cast<float32_t>(beta2_corr), static_cast<float32_t>(epsilon), b, e); }, numel, 3 * numel * sizeof(float16_t), w, grad, m, v);
                 break;
             }
             case DType::BFloat16: {
@@ -304,7 +318,7 @@ namespace BeanTensor::Tensors::detail {
                 auto* m_ptr = static_cast<bfloat16_t*>(m.data) + m.offset;
                 auto* v_ptr = static_cast<bfloat16_t*>(v.data) + v.offset;
                 const auto* g_ptr = static_cast<const bfloat16_t*>(grad.data) + grad.offset;
-                launch_adam([=](const size_t b, const size_t e) { adam_range_half<bfloat16_t>(w_ptr, m_ptr, v_ptr, g_ptr, static_cast<float32_t>(lr), static_cast<float32_t>(beta1), static_cast<float32_t>(beta2), static_cast<float32_t>(beta1_corr), static_cast<float32_t>(beta2_corr), static_cast<float32_t>(epsilon), b, e); }, numel, w, grad, m, v);
+                launch_adam([=](const size_t b, const size_t e) { adam_range_half<bfloat16_t>(w_ptr, m_ptr, v_ptr, g_ptr, static_cast<float32_t>(lr), static_cast<float32_t>(beta1), static_cast<float32_t>(beta2), static_cast<float32_t>(beta1_corr), static_cast<float32_t>(beta2_corr), static_cast<float32_t>(epsilon), b, e); }, numel, 3 * numel * sizeof(bfloat16_t), w, grad, m, v);
                 break;
             }
             case DType::Float16x2: {
@@ -312,7 +326,7 @@ namespace BeanTensor::Tensors::detail {
                 auto* m_ptr = static_cast<float16x2_t*>(m.data) + m.offset;
                 auto* v_ptr = static_cast<float16x2_t*>(v.data) + v.offset;
                 const auto* g_ptr = static_cast<const float16x2_t*>(grad.data) + grad.offset;
-                launch_adam([=](const size_t b, const size_t e) { adam_range_packed<float16x2_t>(w_ptr, m_ptr, v_ptr, g_ptr, static_cast<float32_t>(lr), static_cast<float32_t>(beta1), static_cast<float32_t>(beta2), static_cast<float32_t>(beta1_corr), static_cast<float32_t>(beta2_corr), static_cast<float32_t>(epsilon), b, e); }, numel, w, grad, m, v);
+                launch_adam([=](const size_t b, const size_t e) { adam_range_packed<float16x2_t>(w_ptr, m_ptr, v_ptr, g_ptr, static_cast<float32_t>(lr), static_cast<float32_t>(beta1), static_cast<float32_t>(beta2), static_cast<float32_t>(beta1_corr), static_cast<float32_t>(beta2_corr), static_cast<float32_t>(epsilon), b, e); }, numel, 3 * numel * sizeof(float16x2_t), w, grad, m, v);
                 break;
             }
             case DType::BFloat16x2: {
@@ -320,7 +334,7 @@ namespace BeanTensor::Tensors::detail {
                 auto* m_ptr = static_cast<bfloat16x2_t*>(m.data) + m.offset;
                 auto* v_ptr = static_cast<bfloat16x2_t*>(v.data) + v.offset;
                 const auto* g_ptr = static_cast<const bfloat16x2_t*>(grad.data) + grad.offset;
-                launch_adam([=](const size_t b, const size_t e) { adam_range_packed<bfloat16x2_t>(w_ptr, m_ptr, v_ptr, g_ptr, static_cast<float32_t>(lr), static_cast<float32_t>(beta1), static_cast<float32_t>(beta2), static_cast<float32_t>(beta1_corr), static_cast<float32_t>(beta2_corr), static_cast<float32_t>(epsilon), b, e); }, numel, w, grad, m, v);
+                launch_adam([=](const size_t b, const size_t e) { adam_range_packed<bfloat16x2_t>(w_ptr, m_ptr, v_ptr, g_ptr, static_cast<float32_t>(lr), static_cast<float32_t>(beta1), static_cast<float32_t>(beta2), static_cast<float32_t>(beta1_corr), static_cast<float32_t>(beta2_corr), static_cast<float32_t>(epsilon), b, e); }, numel, 3 * numel * sizeof(bfloat16x2_t), w, grad, m, v);
                 break;
             }
             [[unlikely]] default: {
@@ -417,8 +431,8 @@ namespace BeanTensor::Tensors {
         }
         entry->t += 1;
         const auto t_f = static_cast<float64_t>(entry->t);
-        const auto beta1_corr = 1.0 - std::pow(beta1, t_f);
-        const auto beta2_corr = 1.0 - std::pow(beta2, t_f);
+        const float64_t beta1_corr = 1.0 - std::pow(beta1, t_f);
+        const float64_t beta2_corr = 1.0 - std::pow(beta2, t_f);
         if (this->device == Device::CPU) {
             detail::adam_update_cpu(*this, gradient, *entry->m, *entry->v, lr, beta1, beta2, beta1_corr, beta2_corr, epsilon);
         } else if (this->device == Device::GPU) {

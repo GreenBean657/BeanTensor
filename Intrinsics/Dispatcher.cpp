@@ -1,15 +1,22 @@
 /**
  * @file Dispatcher.cpp
  * @author GreenBean
- * @brief CPU dtype conversion dispatcher definitions.
- * @version 0.2
- * @date 2026-10-23
+ * @brief CPU dtype conversion dispatcher definitions. The finalize task stays an
+ * unrestricted pool submit: it only joins chunk futures and swaps pointers after
+ * the real work, so it carries no CCD-locality requirement. It joins the chunk
+ * futures with a helping wait (HelpWait) — a plain blocking f.get() inside the
+ * pool task could deadlock now that FIFO claim order no longer exists.
+ * Runtime feature dispatch is centralized through dispatch_has_feature so the
+ * scalar fallback TU never emits AVX code.
+ * @version 0.5
+ * @date 2026-10-25
  */
 #include "Dispatcher.h"
 
 #include <memory>
 #include <stdexcept>
 
+#include "Helpers/Alloc.h"
 #include "Intrinsics/AVX2/DTypeConversions.h"
 #include "Intrinsics/AVX512/DTypeConversions.h"
 #include "Tensor/Tensor.h"
@@ -32,11 +39,9 @@ namespace BeanTensor::Intrinsics::detail {
         const size_t new_nbytes = t.numel * DataTypes::dtype_bytes(new_dtype);
         if (t.convert_buffer == nullptr || t.convert_buffer_size < new_nbytes) {
             std::free(t.convert_buffer);
-            // aligned_alloc requires the size to be a multiple of the alignment.
-            const size_t alloc_bytes = (new_nbytes + 63) / 64 * 64;
-            t.convert_buffer = std::aligned_alloc(64, alloc_bytes);
+            t.convert_buffer = bt_aligned_alloc(new_nbytes);
             if (t.convert_buffer == nullptr) throw ErrorHandling::OutOfMemory();
-            t.convert_buffer_size = alloc_bytes;
+            t.convert_buffer_size = new_nbytes;
         }
 
         std::vector<std::shared_future<void>> futures;
@@ -156,6 +161,9 @@ namespace BeanTensor::Intrinsics::detail {
         // A clamp violation under a non-permission method is rethrown from the future at tensor.sync().
         const auto finalize = Threading::GetCPUThreadPool().submit(
             [&t, new_dtype, new_nbytes, flag, futures = std::move(futures)] {
+                Threading::GetCPUThreadPool().HelpWait(futures);
+                // Futures are ready now: get() rethrows the first stored chunk
+                // error (surfacing at tensor.sync()) without blocking.
                 for (const auto& f : futures) f.get();
                 if (flag->load(std::memory_order_relaxed)) {
                     throw std::range_error("convert_dtype: values clamped/invalid under the active ConversionClampMethod");

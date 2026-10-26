@@ -5,8 +5,8 @@
  * (mse_g_node). The update is a pure elementwise scaling of the stored
  * difference, so there are no SIMD kernels (same reasoning as relu_g's
  * select and softmax_ce_g's scalar exp/log dominance).
- * @version 0.2
- * @date 2026-10-23
+ * @version 0.3
+ * @date 2026-10-26
  */
 #include <cstdint>
 #include <future>
@@ -71,7 +71,7 @@ namespace BeanTensor::Tensors::detail {
             } else {
                 auto v = static_cast<float64_t>(v_raw);
                 if (__builtin_isnan(v)) {
-                    v = 0.0;
+                    v = float64_t{0.0};
                 }
                 const auto lo = static_cast<float64_t>(std::numeric_limits<T>::lowest());
                 const auto hi = static_cast<float64_t>(std::numeric_limits<T>::max());

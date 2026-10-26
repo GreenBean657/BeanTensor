@@ -1,9 +1,9 @@
 /**
  * @file Tensor.cpp
  * @author GreenBean
- * @brief Tensor definitions: allocation, fills, conversion, transfer, printing and cloning.
- * @version 0.2.2
- * @date 2026-10-23
+ * @brief Tensor definitions: allocation, fills (incl. pool-chunked set_zero), dtype guards, conversion, transfer, printing and cloning.
+ * @version 0.5
+ * @date 2026-10-25
  */
 #include "Tensor.h"
 
@@ -12,6 +12,7 @@
 #include <sstream>
 #include <unordered_map>
 
+#include "Helpers/Alloc.h"
 #include "Helpers/CPUThreading.h"
 #include "Helpers/Errors.h"
 #include "Helpers/Hardware.h"
@@ -127,13 +128,24 @@ namespace BeanTensor::Tensors::detail {
 
         std::vector<std::shared_future<void>> futures;
         const size_t chunk_size = (numel + t_count - 1) / t_count;
+        // The fill writes the whole destination buffer; when it fits one
+        // CCD's LLC the chunks go to the calling thread's CCD group so the
+        // cache-resident buffer is written locally (cross-CCD writes ~8x).
+        const bool keep_local = KeepWorkLocal(numel * sizeof(T));
+        const uint32_t group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
         for (size_t t = 0; t < t_count; ++t) {
             const size_t t_start = t * chunk_size;
             const size_t t_end = std::min(t_start + chunk_size, numel);
             if (t_start >= numel) break;
-            futures.push_back(threadMgr.submit(
-                [=] { worker(t_start, t_end); }
-            ).share());
+            if (keep_local) {
+                futures.push_back(threadMgr.submit_to_group(
+                    [=] { worker(t_start, t_end); }, group
+                ).share());
+            } else {
+                futures.push_back(threadMgr.submit(
+                    [=] { worker(t_start, t_end); }
+                ).share());
+            }
         }
         exec.give_futures(futures);
     }
@@ -237,13 +249,24 @@ namespace BeanTensor::Tensors::detail {
         }
         std::vector<std::shared_future<void>> futures;
         const size_t chunk_size = (numel + t_count - 1) / t_count;
+        // The fill writes the whole destination buffer; when it fits one
+        // CCD's LLC the chunks go to the calling thread's CCD group so the
+        // cache-resident buffer is written locally (cross-CCD writes ~8x).
+        const bool keep_local = KeepWorkLocal(numel * sizeof(T));
+        const uint32_t group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
         for (size_t t = 0; t < t_count; ++t) {
             const size_t t_start = t * chunk_size;
             const size_t t_end = std::min(t_start + chunk_size, numel);
             if (t_start >= numel) break;
-            futures.push_back(threadMgr.submit(
-                [=] { worker(t_start, t_end, seed + t, min, max); }
-            ).share());
+            if (keep_local) {
+                futures.push_back(threadMgr.submit_to_group(
+                    [=] { worker(t_start, t_end, seed + t, min, max); }, group
+                ).share());
+            } else {
+                futures.push_back(threadMgr.submit(
+                    [=] { worker(t_start, t_end, seed + t, min, max); }
+                ).share());
+            }
         }
         exec.give_futures(futures);
     }
@@ -332,8 +355,11 @@ namespace BeanTensor::Tensors {
      * @param method
      */
     void Tensor::convert_dtype(const DataTypes::DType& new_dtype, const ConversionClampMethod method) {
-        if (this->dtype == new_dtype) return;
+        // sync() BEFORE the dtype check: a previously queued conversion's
+        // finalize flips dtype on a pool worker — reading dtype first races it
+        // (TSAN-verified). Same-dtype calls pay one drained-queue sync.
         sync();
+        if (this->dtype == new_dtype) return;
         if (this->device == Device::CPU) {
             Intrinsics::detail::launch_conv_cpu(*this, new_dtype, method);
         } else if (this->device == Device::GPU) {
@@ -422,7 +448,7 @@ namespace BeanTensor::Tensors {
                 }
             }
             const auto span_bytes = span_elems * DataTypes::dtype_bytes(this->dtype);
-            void* host_buf = std::aligned_alloc(64, (span_bytes + 63) / 64 * 64);
+            void* host_buf = bt_aligned_alloc(span_bytes);
             if (span_bytes != 0) {
                 HIP_CHECK_ERROR(hipMemcpy(host_buf, this->data, span_bytes, hipMemcpyDeviceToHost));
             }
@@ -505,7 +531,7 @@ namespace BeanTensor::Tensors {
             this->sync();
             this->kill_cpu_data();
             this->kill_buffer();
-            this->data = std::aligned_alloc(64, (this->nbytes + 63) / 64 * 64);
+            this->data = bt_aligned_alloc(this->nbytes);
             memcpy(this->data, parent->data, this->nbytes);
         } else if (this->device == Device::GPU) {
             this->sync();
@@ -723,9 +749,9 @@ namespace BeanTensor::Tensors {
         compute_strides();
 
         if (device == Device::CPU) {
-            // aligned_alloc(64) instead of malloc — guarantees 64-byte alignment
+            // bt_aligned_alloc(64) instead of malloc — guarantees 64-byte alignment
             // enabling NT stores in conversion functions without runtime branching
-            this->data = std::aligned_alloc(64, this->nbytes);
+            this->data = bt_aligned_alloc(this->nbytes);
             if (this->data == nullptr) {
                 throw ErrorHandling::OutOfMemory();
             }
@@ -743,17 +769,61 @@ namespace BeanTensor::Tensors {
     }
 
     /**
-     * TODO - Write documentation.
+     * Zero the tensor's storage. Synchronous: any pending tasks are drained
+     * first, and the buffer reads all-zero on return. CPU path: inline memset
+     * from inside a pool worker (never submit from a worker) or for small
+     * buffers; larger buffers are chunked across the pool, CCD-routed exactly
+     * like fill_fixed_impli, with every chunk future drained before returning.
+     * GPU path: unchanged (routed fill on the pool).
+     * @brief Set every element of the tensor to zero.
      */
     void Tensor::set_zero() {
         sync();
         if (this->device == Device::CPU) {
-            std::memset(this->data, 0, this->nbytes);
-        } else if (this->device == Device::GPU) {
-            detail::set_amount_gpu(*this, int64_t{0});
-        } else [[unlikely]] {
-            throw ErrorHandling::UnReachableCode();
+            constexpr size_t inline_threshold = size_t{256} * 1024u;
+            if (Threading::IsInPoolWorker() || this->nbytes <= inline_threshold) {
+                std::memset(this->data, 0, this->nbytes);
+                return;
+            }
+            // Chunked path mirroring fill_fixed_impli: byte ranges are
+            // element-aligned (chunking by whole elements), routed to the
+            // calling thread's CCD group when the span fits one CCD's LLC.
+            auto& threadMgr = Threading::GetCPUThreadPool();
+            const auto t_count = static_cast<size_t>(IncludedCPUFeatures().threads);
+            const auto elem_bytes = DataTypes::dtype_bytes(this->dtype);
+            const auto chunk_elems = (this->numel + t_count - 1) / t_count;
+            const bool keep_local = KeepWorkLocal(this->nbytes);
+            const auto group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
+            auto* const base = static_cast<char*>(this->data);
+            auto futures = std::vector<std::shared_future<void>>{};
+            for (auto t = size_t{0}; t < t_count; t++) {
+                const auto begin_elem = t * chunk_elems;
+                if (begin_elem >= this->numel) {
+                    break;
+                }
+                const auto end_elem = std::min(begin_elem + chunk_elems, this->numel);
+                const auto begin = begin_elem * elem_bytes;
+                const auto end = end_elem * elem_bytes;
+                if (keep_local) {
+                    futures.push_back(threadMgr.submit_to_group([base, begin, end] {
+                        std::memset(base + begin, 0, end - begin);
+                    }, group, Threading::TaskPriority::Normal).share());
+                } else {
+                    futures.push_back(threadMgr.submit([base, begin, end] {
+                        std::memset(base + begin, 0, end - begin);
+                    }, Threading::TaskPriority::Normal).share());
+                }
+            }
+            for (auto& f : futures) {
+                f.get();
+            }
+            return;
         }
+        if (this->device == Device::GPU) {
+            detail::set_amount_gpu(*this, int64_t{0});
+            return;
+        }
+        throw ErrorHandling::UnReachableCode();
     }
 
     /**

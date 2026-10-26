@@ -9,7 +9,6 @@
 #pragma once
 
 #include "Helpers/Errors.h"
-#include "Tensor/DTypes.h"
 
 #if !defined(USE_HIP) && !defined(USE_CUDA)
 namespace BeanTensor::Tensors {

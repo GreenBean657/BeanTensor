@@ -2,8 +2,17 @@
  * @file Dispatcher.h
  * @author GreenBean
  * @brief CPU dtype conversion dispatcher; selects the scalar, AVX2 or AVX512 conversion path.
- * @version 0.2
- * @date 2026-10-23
+ * Chunked conversions whose destination fits one CCD's LLC route their pool
+ * chunks through submit_to_group so the (cache-resident) destination is written
+ * from the submitting thread's CCD group only — cross-CCD writes cost ~8x.
+ * Runtime feature dispatch is centralized through dispatch_has_feature so the
+ * scalar fallback TU never emits AVX code.
+ * The vector kernels' scalar prologue/tail lanes all route through scalar_tail,
+ * the single place where non-vector lanes get their semantics (the bit-exact-parity
+ * invariant: GPU kernels must match the CPU dispatcher, whose scalar reference is
+ * scalar_convert).
+ * @version 0.4
+ * @date 2026-10-25
  */
 #pragma once
 
@@ -276,9 +285,39 @@ namespace BeanTensor::Intrinsics::detail {
     }
 
     /**
+     * Convert the [begin, end) remainder/prologue of a vector-kernel range
+     * scalar-wise. This is the single place where the vector kernels' non-vector
+     * lanes get their semantics: the bit-exact-parity invariant requires the GPU
+     * kernels to match the CPU dispatcher, and the dispatcher's scalar reference
+     * is scalar_convert — so every AVX2/AVX512 prologue and tail funnels through
+     * here rather than duplicating a scalar loop per kernel.
+     * @brief Convert [begin, end) scalar-wise — the vector kernels' shared tail/prologue.
+     * @tparam Src Source dtype.
+     * @tparam Dst Destination dtype.
+     * @param src Source buffer.
+     * @param dst Destination buffer.
+     * @param begin First element index.
+     * @param end One past the last element index.
+     * @param flag Thread-local flag accumulated into by scalar_convert (ignored on paths without flag semantics).
+     * @param method Active ConversionClampMethod (ignored on paths without flag semantics).
+     */
+    template<typename Src, typename Dst>
+    void scalar_tail(const Src* src, Dst* dst, const size_t begin, const size_t end,
+                     bool& flag, const ConversionClampMethod method) {
+        for (auto i = begin; i < end; ++i) {
+            dst[i] = scalar_convert<Src, Dst>(src[i], flag, method);
+        }
+    }
+
+    /**
      * Convert a buffer, chunking across the CPU thread pool when the tensor is
      * large enough to be worth it (numel > threads * 1024); smaller buffers
-     * convert inline on the calling thread.
+     * convert inline on the calling thread. When the destination fits one CCD's
+     * LLC the chunks are submitted to the calling thread's CCD group
+     * (submit_to_group) so the cache-resident destination is written locally;
+     * otherwise they go to the whole pool as before. The chunk count still
+     * assumes all t_count threads — group workers simply claim multiple chunks
+     * from the queue.
      * @brief Chunked, thread-pool dispatched conversion.
      * @tparam Src Source dtype.
      * @tparam Dst Destination dtype.
@@ -293,20 +332,31 @@ namespace BeanTensor::Intrinsics::detail {
     void convert_chunked(const void* src, void* dst, const size_t numel,
                          std::atomic<bool>& flag, const ConversionClampMethod method,
                          std::vector<std::shared_future<void>>& futures) {
-        const size_t t_count = IncludedCPUFeatures().threads;
+        const auto t_count = static_cast<size_t>(IncludedCPUFeatures().threads);
         if (numel <= t_count * 1024 || t_count < 2) {
             convert_range<Src, Dst>(src, dst, 0, numel, flag, method);
             return;
         }
         auto& pool = Threading::GetCPUThreadPool();
-        const size_t chunk_size = (numel + t_count - 1) / t_count;
-        for (size_t t = 0; t < t_count; ++t) {
-            const size_t t_start = t * chunk_size;
-            const size_t t_end = std::min(t_start + chunk_size, numel);
-            if (t_start >= numel) break;
-            futures.push_back(pool.submit(
-                [=, &flag] { convert_range<Src, Dst>(src, dst, t_start, t_end, flag, method); }
-            ).share());
+        const auto chunk_size = (numel + t_count - 1) / t_count;
+        const bool keep_local = KeepWorkLocal(numel * sizeof(Dst));
+        const auto group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
+        for (auto t = size_t{0}; t < t_count; ++t) {
+            const auto t_start = t * chunk_size;
+            const auto t_end = std::min(t_start + chunk_size, numel);
+            if (t_start >= numel) {
+                break;
+            }
+            if (keep_local) {
+                futures.push_back(pool.submit_to_group(
+                    [=, &flag] { convert_range<Src, Dst>(src, dst, t_start, t_end, flag, method); },
+                    group
+                ).share());
+            } else {
+                futures.push_back(pool.submit(
+                    [=, &flag] { convert_range<Src, Dst>(src, dst, t_start, t_end, flag, method); }
+                ).share());
+            }
         }
     }
 

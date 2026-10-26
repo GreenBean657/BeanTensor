@@ -9,6 +9,7 @@
 # Contract: $1 = repo root, $2 = build dir. Exit non-zero = violation.
 
 set -euo pipefail
+# shellcheck disable=SC2034
 ROOT="${1:-.}"
 BUILD="${2:-}"
 
@@ -39,7 +40,7 @@ done
 if [[ "$MISSING" -ne 0 ]]; then
     cat >&2 <<'EOF'
 cuda_glibc_noexcept_sh ERROR: CUDA 12.9 header conflicts with glibc >= 2.41 C23 math prototypes.
-Apply the documented one-time toolkit patch (see AGENTS.md "Build & verify"):
+Apply the documented one-time toolkit patch (see the project build notes):
 
   sudo sed -i -E 's/^(extern __DEVICE_FUNCTIONS_DECL__ __device_builtin__ +(double|float) +(cospi|cospif|sinpi|sinpif|rsqrt|rsqrtf)\((double|float) x\));/\1 noexcept(true);/' /usr/local/cuda-12.9/targets/x86_64-linux/include/crt/math_functions.h
 EOF

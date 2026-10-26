@@ -4,8 +4,8 @@
  * @brief CPU backend for softmax cross-entropy backward, plus the softmax_ce
  * backward trampoline (softmax_ce_g_node). Scalar exp()/log() dominate, so
  * there are no SIMD kernels (same reason as forward softmax_ce).
- * @version 0.1.2
- * @date 2026-10-23
+ * @version 0.1.3
+ * @date 2026-10-25
  */
 #include <algorithm>
 #include <cmath>
@@ -274,16 +274,24 @@ namespace BeanTensor::Tensors::detail {
          * Chunk a row-indexed worker (begin, end) across the pool; futures land
          * on the touched tensors and are returned for the caller to drain.
          * Small inputs run inline and return no futures.
+         * CCD-aware: each worker writes its slice of the dlogits span (same
+         * size as the logits), so the gate is the bytes written. When that
+         * fits one CCD's LLC the chunks go to the calling thread's CCD group
+         * (submit_to_group) so the cache-resident destination is written
+         * locally; otherwise they go to the whole pool as before. The chunk
+         * count still assumes all t_count threads — group workers simply claim
+         * multiple chunks from the queue.
          * @brief Threaded row launcher without partials. Returns the futures for the caller to drain.
          * @param rows Total row count.
          * @param range_fn Callable (begin, end) over a row range; copied into each task.
+         * @param out_bytes Bytes of the output span the workers write across all chunks.
          * @param t First tensor the workers touch (receives the futures).
          * @param extra Second tensor the workers touch (receives the futures).
          * @param out Output tensor (receives the futures).
          * @return Futures of the submitted chunks; empty if the work ran inline.
          */
         template<typename RangeFn>
-        std::vector<std::shared_future<void>> launch_rows(const size_t rows, RangeFn&& range_fn, const Tensor& t, const Tensor& extra, const Tensor& out) {
+        std::vector<std::shared_future<void>> launch_rows(const size_t rows, RangeFn&& range_fn, const size_t out_bytes, const Tensor& t, const Tensor& extra, const Tensor& out) {
             const auto t_count = static_cast<size_t>(IncludedCPUFeatures().threads);
             if (t_count <= 1 || rows <= t_count * 8) {
                 range_fn(0, rows);
@@ -292,12 +300,18 @@ namespace BeanTensor::Tensors::detail {
             auto& threadMgr = Threading::GetCPUThreadPool();
             std::vector<std::shared_future<void>> futures;
             const auto chunk = (rows + t_count - 1) / t_count;
+            const bool keep_local = KeepWorkLocal(out_bytes);
+            const auto group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
             for (auto ti = size_t{0}; ti < t_count; ++ti) {
                 const auto begin = ti * chunk;
                 if (begin >= rows) {
                     break;
                 }
-                futures.push_back(threadMgr.submit([range_fn, begin, end = std::min(begin + chunk, rows)] { range_fn(begin, end); }, Threading::TaskPriority::Normal).share());
+                if (keep_local) {
+                    futures.push_back(threadMgr.submit_to_group([range_fn, begin, end = std::min(begin + chunk, rows)] { range_fn(begin, end); }, group, Threading::TaskPriority::Normal).share());
+                } else {
+                    futures.push_back(threadMgr.submit([range_fn, begin, end = std::min(begin + chunk, rows)] { range_fn(begin, end); }, Threading::TaskPriority::Normal).share());
+                }
             }
             t.give_futures(futures);
             extra.give_futures(futures);
@@ -385,7 +399,7 @@ namespace BeanTensor::Tensors::detail {
                     case DType::Int4x2: run_targets(static_cast<const int4x2_t*>(tgt_data) + tgt_offset); break;
                     [[unlikely]] default: throw ErrorHandling::UnReachableCode();
                 }
-            }, logits, targets, dlogits));
+            }, logits.numel * sizeof(T), logits, targets, dlogits));
         };
         switch (logits.dtype) {
             case DType::Float32: run_logits.operator()<float32_t, float32_t>(static_cast<const float32_t*>(logits.data) + logits.offset, static_cast<float32_t*>(dlogits.data) + dlogits.offset, dloss_grad.data); break;

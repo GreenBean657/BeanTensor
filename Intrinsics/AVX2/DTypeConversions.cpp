@@ -3,13 +3,17 @@
  * @author GreenBean
  * @brief AVX2 dtype conversion kernels (fp32/fp16/bf16 and integer narrowing/widening).
  * Compiled with per-file AVX2 flags; execution is gated at runtime via IncludedCPUFeatures().
- * @version 0.1
- * @date 2026-10-14
+ * NT stores fire only past NtStoreMinBytes() on aligned destinations; each kernel
+ * opens with a scalar alignment prologue (single vector loop, no dual aligned/unaligned
+ * pair), and thread-pool chunks that fit one CCD's LLC submit via submit_to_group().
+ * Scalar prologue/tail lanes route through detail::scalar_tail so their semantics live
+ * in one place beside scalar_convert (bit-exact-parity reference).
+ * @version 0.3
+ * @date 2026-10-25
  */
 #include "DTypeConversions.h"
 
 #include <bit>
-#include <cstring>
 #include <immintrin.h>
 #include <limits>
 
@@ -42,10 +46,12 @@ namespace BeanTensor::Intrinsics::detail {
         const auto t = IncludedCPUFeatures().threads;
         const auto* src_f = src;
 
-        // Runtime 32-byte alignment check — enables NT stores which bypass cache
-        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 32 == 0;
+        // NT stores bypass cache but lose below the LLC-size gate — require both a
+        // 32-byte aligned destination and a destination past NtStoreMinBytes().
+        const auto use_nt = reinterpret_cast<uintptr_t>(dst) % 32 == 0 &&
+                            end * sizeof(bfloat16_t) > NtStoreMinBytes();
 
-        auto compute = [src_f, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
+        auto compute = [src_f, dst, use_nt, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
             auto i = start;
 
@@ -85,43 +91,33 @@ namespace BeanTensor::Intrinsics::detail {
                 return _mm256_blendv_epi8(_mm256_blendv_epi8(rounded, sub, is_sub), special, is_special);
             };
 
-            // Pack 8 u32 lane results (low halves) into 8 u16, in order.
-            auto pack8 = [](const __m256i r) -> __m128i {
-                // Results are <= 0xFFFF, so the signed saturation of packus never triggers.
-                return _mm_packus_epi32(_mm256_castsi256_si128(r), _mm256_extracti128_si256(r, 1));
-            };
+            // Scalar prologue — walk dst up to the vector store alignment boundary
+            // using the same scalar converter as the tail.
+            if (
+                const auto misalign = reinterpret_cast<uintptr_t>(dst + i) % 32;
+                misalign != 0
+            ) {
+                const auto prologue_end = std::min(end_l, i + (32 - misalign) / sizeof(bfloat16_t));
+                scalar_tail<float32_t, bfloat16_t>(src_f, dst, i, prologue_end, local_flag, method);
+                i = prologue_end;
+            }
 
-            if (aligned) {
-                // NT store path — bypasses cache
-                for (; i + 16 <= end_l; i += 16) {
-                    // packus is lane-local; permute restores element order across the 128-bit halves.
-                    const auto packed = _mm256_permute4x64_epi64(
-                        _mm256_packus_epi32(convert8(i), convert8(i + 8)), 0xD8);
+            for (; i + 16 <= end_l; i += 16) {
+                // packus is lane-local; permute restores element order across the 128-bit halves.
+                const auto packed = _mm256_permute4x64_epi64(
+                    _mm256_packus_epi32(convert8(i), convert8(i + 8)), 0xD8);
+                if (use_nt) {
                     _mm256_stream_si256(reinterpret_cast<__m256i*>(dst + i), packed);
-                }
-                for (; i + 8 <= end_l; i += 8) {
-                    _mm_stream_si128(reinterpret_cast<__m128i*>(dst + i), pack8(convert8(i)));
-                }
-            } else {
-                // Unaligned fallback — no NT stores
-                for (; i + 16 <= end_l; i += 16) {
-                    const auto packed = _mm256_permute4x64_epi64(
-                        _mm256_packus_epi32(convert8(i), convert8(i + 8)), 0xD8);
+                } else {
                     _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), packed);
                 }
-                for (; i + 8 <= end_l; i += 8) {
-                    _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), pack8(convert8(i)));
-                }
             }
 
-            for (; i < end_l; ++i) {
-                // Scalar tail — identical special-case handling (NaN quieting,
-                // subnormal flush, RNE) to the vector loop by construction.
-                dst[i] = unaccel_fp32_to_bf16_tracked(src_f[i], local_flag, method);
-            }
+            // Scalar tail — semantics live in scalar_tail (scalar_convert).
+            scalar_tail<float32_t, bfloat16_t>(src_f, dst, i, end_l, local_flag, method);
 
             // sfence required after NT stores to ensure visibility to other threads/cores
-            if (aligned) {
+            if (use_nt) {
                 _mm_sfence();
             }
             if (local_flag) {
@@ -141,16 +137,36 @@ namespace BeanTensor::Intrinsics::detail {
         auto worker = [compute](const size_t start, const size_t w_end) {
             compute(start, w_end);
         };
-        for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
-            const auto start = thread_id * chunk_size;
-            const auto end_worker = std::min(start + chunk_size, end);
-            if (start >= end_worker) {
-                break;
+        // Cross-CCD writes cost ~8x — cache-sized work stays on the current CCD group.
+        if (
+            const auto keep_local = KeepWorkLocal(end * sizeof(bfloat16_t));
+            keep_local
+        ) {
+            const auto group = CcdGroupOfCurrentCpu();
+            for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
+                const auto start = thread_id * chunk_size;
+                const auto end_worker = std::min(start + chunk_size, end);
+                if (start >= end_worker) {
+                    break;
+                }
+                futures.push_back(threadMgr.submit_to_group(
+                    [=] { worker(start, end_worker); },
+                    group,
+                    Threading::TaskPriority::Normal
+                ).share());
             }
-            futures.push_back(threadMgr.submit(
-                [=] { worker(start, end_worker); },
-                Threading::TaskPriority::Normal
-            ).share());
+        } else {
+            for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
+                const auto start = thread_id * chunk_size;
+                const auto end_worker = std::min(start + chunk_size, end);
+                if (start >= end_worker) {
+                    break;
+                }
+                futures.push_back(threadMgr.submit(
+                    [=] { worker(start, end_worker); },
+                    Threading::TaskPriority::Normal
+                ).share());
+            }
         }
         return futures;
     }
@@ -172,10 +188,13 @@ namespace BeanTensor::Intrinsics::detail {
 
         const auto t = IncludedCPUFeatures().threads;
 
-        // Runtime 32-byte alignment check for NT stores
-        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 32 == 0;
+        // NT stores bypass cache but lose below the LLC-size gate — require both a
+        // 32-byte aligned destination and a destination past NtStoreMinBytes().
+        const auto use_nt = reinterpret_cast<uintptr_t>(dst) % 32 == 0 &&
+                            end * sizeof(float32_t) > NtStoreMinBytes();
 
-        auto compute = [src, dst, aligned](const size_t start, const size_t end_l) {
+        auto compute = [src, dst, use_nt](const size_t start, const size_t end_l) {
+            auto tail_flag = false;
             auto i = start;
 
             auto convert8 = [&](const size_t at) -> __m256 {
@@ -184,33 +203,32 @@ namespace BeanTensor::Intrinsics::detail {
                 return _mm256_castsi256_ps(_mm256_slli_epi32(extended, 16));
             };
 
-            if (aligned) {
-                for (; i + 16 <= end_l; i += 16) {
-                    _mm256_stream_ps(dst + i,     convert8(i));
-                    _mm256_stream_ps(dst + i + 8, convert8(i + 8));
-                }
-                for (; i + 8 <= end_l; i += 8) {
-                    _mm256_stream_ps(dst + i, convert8(i));
-                }
-            } else {
-                for (; i + 16 <= end_l; i += 16) {
-                    _mm256_storeu_ps(dst + i,     convert8(i));
-                    _mm256_storeu_ps(dst + i + 8, convert8(i + 8));
-                }
-                for (; i + 8 <= end_l; i += 8) {
-                    _mm256_storeu_ps(dst + i, convert8(i));
+            // Scalar prologue — walk dst up to the vector store alignment boundary
+            // using the same scalar conversion as the tail.
+            if (
+                const auto misalign = reinterpret_cast<uintptr_t>(dst + i) % 32;
+                misalign != 0
+            ) {
+                const auto prologue_end = std::min(end_l, i + (32 - misalign) / sizeof(float32_t));
+                // Widening ignores flag/method — scalar_convert's bfloat16 branch is the
+                // same shift+bit-cast the inlined loop used.
+                scalar_tail<bfloat16_t, float32_t>(src, dst, i, prologue_end, tail_flag, ConversionClampMethod::PERMISSIVE);
+                i = prologue_end;
+            }
+
+            for (; i + 8 <= end_l; i += 8) {
+                const auto f = convert8(i);
+                if (use_nt) {
+                    _mm256_stream_ps(dst + i, f);
+                } else {
+                    _mm256_storeu_ps(dst + i, f);
                 }
             }
 
-            for (; i < end_l; ++i) {
-                uint16_t raw;
-                std::memcpy(&raw, &src[i], sizeof(raw));
-                const auto bits = static_cast<uint32_t>(raw) << 16;
-                dst[i] = std::bit_cast<float32_t>(bits);
-            }
+            scalar_tail<bfloat16_t, float32_t>(src, dst, i, end_l, tail_flag, ConversionClampMethod::PERMISSIVE);
 
             // sfence after NT stores
-            if (aligned) {
+            if (use_nt) {
                 _mm_sfence();
             }
         };
@@ -227,16 +245,36 @@ namespace BeanTensor::Intrinsics::detail {
         auto worker = [compute](const size_t start, const size_t end_l) {
             compute(start, end_l);
         };
-        for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
-            const auto start = thread_id * chunk_size;
-            const auto end_v = std::min(start + chunk_size, end);
-            if (start >= end_v) {
-                break;
+        // Cross-CCD writes cost ~8x — cache-sized work stays on the current CCD group.
+        if (
+            const auto keep_local = KeepWorkLocal(end * sizeof(float32_t));
+            keep_local
+        ) {
+            const auto group = CcdGroupOfCurrentCpu();
+            for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
+                const auto start = thread_id * chunk_size;
+                const auto end_v = std::min(start + chunk_size, end);
+                if (start >= end_v) {
+                    break;
+                }
+                futures.push_back(threadMgr.submit_to_group(
+                    [=] { worker(start, end_v); },
+                    group,
+                    Threading::TaskPriority::Normal
+                ).share());
             }
-            futures.push_back(threadMgr.submit(
-                [=] { worker(start, end_v); },
-                Threading::TaskPriority::Normal
-            ).share());
+        } else {
+            for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
+                const auto start = thread_id * chunk_size;
+                const auto end_v = std::min(start + chunk_size, end);
+                if (start >= end_v) {
+                    break;
+                }
+                futures.push_back(threadMgr.submit(
+                    [=] { worker(start, end_v); },
+                    Threading::TaskPriority::Normal
+                ).share());
+            }
         }
         return futures;
     }
@@ -262,11 +300,25 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 32 == 0;
+        // NT stores bypass cache but lose below the LLC-size gate — require both a
+        // 32-byte aligned destination and a destination past NtStoreMinBytes().
+        const auto use_nt = reinterpret_cast<uintptr_t>(dst) % 32 == 0 &&
+                            end * sizeof(float64_t) > NtStoreMinBytes();
 
-        auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
+        auto compute = [src, dst, use_nt, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
             auto i = start;
+
+            // Scalar prologue — walk dst up to the vector store alignment boundary
+            // using the same scalar converter as the tail.
+            if (
+                const auto misalign = reinterpret_cast<uintptr_t>(dst + i) % 32;
+                misalign != 0
+            ) {
+                const auto prologue_end = std::min(end_l, i + (32 - misalign) / sizeof(float64_t));
+                scalar_tail<float32_t, float64_t>(src, dst, i, prologue_end, local_flag, method);
+                i = prologue_end;
+            }
 
             for (; i + 4 <= end_l; i += 4) {
                 const auto v = _mm_loadu_ps(src + i);
@@ -296,18 +348,17 @@ namespace BeanTensor::Intrinsics::detail {
                         local_flag = true;
                     }
                 }
-                if (aligned) {
+                if (use_nt) {
                     _mm256_stream_pd(dst + i, d);
                 } else {
                     _mm256_storeu_pd(dst + i, d);
                 }
             }
 
-            for (; i < end_l; ++i) {
-                dst[i] = standard2standard<float32_t, float64_t>(src[i], local_flag, method);
-            }
+            // Scalar tail — semantics live in scalar_tail (scalar_convert).
+            scalar_tail<float32_t, float64_t>(src, dst, i, end_l, local_flag, method);
 
-            if (aligned) {
+            if (use_nt) {
                 _mm_sfence();
             }
             if (local_flag) {
@@ -324,16 +375,36 @@ namespace BeanTensor::Intrinsics::detail {
         static auto& threadMgr = Threading::GetCPUThreadPool();
         const auto chunk_size = ((end + t - 1) / t + 3) / 4 * 4;
 
-        for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
-            const auto start = thread_id * chunk_size;
-            const auto end_worker = std::min(start + chunk_size, end);
-            if (start >= end_worker) {
-                break;
+        // Cross-CCD writes cost ~8x — cache-sized work stays on the current CCD group.
+        if (
+            const auto keep_local = KeepWorkLocal(end * sizeof(float64_t));
+            keep_local
+        ) {
+            const auto group = CcdGroupOfCurrentCpu();
+            for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
+                const auto start = thread_id * chunk_size;
+                const auto end_worker = std::min(start + chunk_size, end);
+                if (start >= end_worker) {
+                    break;
+                }
+                futures.push_back(threadMgr.submit_to_group(
+                    [=] { compute(start, end_worker); },
+                    group,
+                    Threading::TaskPriority::Normal
+                ).share());
             }
-            futures.push_back(threadMgr.submit(
-                [=] { compute(start, end_worker); },
-                Threading::TaskPriority::Normal
-            ).share());
+        } else {
+            for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
+                const auto start = thread_id * chunk_size;
+                const auto end_worker = std::min(start + chunk_size, end);
+                if (start >= end_worker) {
+                    break;
+                }
+                futures.push_back(threadMgr.submit(
+                    [=] { compute(start, end_worker); },
+                    Threading::TaskPriority::Normal
+                ).share());
+            }
         }
         return futures;
     }
@@ -359,11 +430,25 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 16 == 0;
+        // NT stores bypass cache but lose below the LLC-size gate — require both a
+        // 16-byte aligned destination and a destination past NtStoreMinBytes().
+        const auto use_nt = reinterpret_cast<uintptr_t>(dst) % 16 == 0 &&
+                            end * sizeof(float32_t) > NtStoreMinBytes();
 
-        auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
+        auto compute = [src, dst, use_nt, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
             auto i = start;
+
+            // Scalar prologue — walk dst up to the vector store alignment boundary
+            // using the same scalar converter as the tail.
+            if (
+                const auto misalign = reinterpret_cast<uintptr_t>(dst + i) % 16;
+                misalign != 0
+            ) {
+                const auto prologue_end = std::min(end_l, i + (16 - misalign) / sizeof(float32_t));
+                scalar_tail<float64_t, float32_t>(src, dst, i, prologue_end, local_flag, method);
+                i = prologue_end;
+            }
 
             for (; i + 4 <= end_l; i += 4) {
                 const auto v = _mm256_loadu_pd(src + i);
@@ -400,18 +485,17 @@ namespace BeanTensor::Intrinsics::detail {
                     }
                 }
 
-                if (aligned) {
+                if (use_nt) {
                     _mm_stream_si128(reinterpret_cast<__m128i*>(dst + i), _mm_castps_si128(r));
                 } else {
                     _mm_storeu_ps(dst + i, r);
                 }
             }
 
-            for (; i < end_l; ++i) {
-                dst[i] = standard2standard<float64_t, float32_t>(src[i], local_flag, method);
-            }
+            // Scalar tail — semantics live in scalar_tail (scalar_convert).
+            scalar_tail<float64_t, float32_t>(src, dst, i, end_l, local_flag, method);
 
-            if (aligned) {
+            if (use_nt) {
                 _mm_sfence();
             }
             if (local_flag) {
@@ -428,16 +512,36 @@ namespace BeanTensor::Intrinsics::detail {
         static auto& threadMgr = Threading::GetCPUThreadPool();
         const auto chunk_size = ((end + t - 1) / t + 3) / 4 * 4;
 
-        for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
-            const auto start = thread_id * chunk_size;
-            const auto end_worker = std::min(start + chunk_size, end);
-            if (start >= end_worker) {
-                break;
+        // Cross-CCD writes cost ~8x — cache-sized work stays on the current CCD group.
+        if (
+            const auto keep_local = KeepWorkLocal(end * sizeof(float32_t));
+            keep_local
+        ) {
+            const auto group = CcdGroupOfCurrentCpu();
+            for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
+                const auto start = thread_id * chunk_size;
+                const auto end_worker = std::min(start + chunk_size, end);
+                if (start >= end_worker) {
+                    break;
+                }
+                futures.push_back(threadMgr.submit_to_group(
+                    [=] { compute(start, end_worker); },
+                    group,
+                    Threading::TaskPriority::Normal
+                ).share());
             }
-            futures.push_back(threadMgr.submit(
-                [=] { compute(start, end_worker); },
-                Threading::TaskPriority::Normal
-            ).share());
+        } else {
+            for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
+                const auto start = thread_id * chunk_size;
+                const auto end_worker = std::min(start + chunk_size, end);
+                if (start >= end_worker) {
+                    break;
+                }
+                futures.push_back(threadMgr.submit(
+                    [=] { compute(start, end_worker); },
+                    Threading::TaskPriority::Normal
+                ).share());
+            }
         }
         return futures;
     }
@@ -459,27 +563,41 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 32 == 0;
+        // NT stores bypass cache but lose below the LLC-size gate — require both a
+        // 32-byte aligned destination and a destination past NtStoreMinBytes().
+        const auto use_nt = reinterpret_cast<uintptr_t>(dst) % 32 == 0 &&
+                            end * sizeof(float32_t) > NtStoreMinBytes();
 
-        auto compute = [src, dst, aligned](const size_t start, const size_t end_l) {
+        auto compute = [src, dst, use_nt](const size_t start, const size_t end_l) {
+            auto tail_flag = false;
             auto i = start;
+
+            // Scalar prologue — walk dst up to the vector store alignment boundary
+            // using the same scalar conversion as the tail.
+            if (
+                const auto misalign = reinterpret_cast<uintptr_t>(dst + i) % 32;
+                misalign != 0
+            ) {
+                const auto prologue_end = std::min(end_l, i + (32 - misalign) / sizeof(float32_t));
+                // int -> float ignores flag/method in scalar_convert (plain static_cast).
+                scalar_tail<int32_t, float32_t>(src, dst, i, prologue_end, tail_flag, ConversionClampMethod::PERMISSIVE);
+                i = prologue_end;
+            }
 
             for (; i + 8 <= end_l; i += 8) {
                 const auto v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
                 const auto f = _mm256_cvtepi32_ps(v);
-                if (aligned) {
+                if (use_nt) {
                     _mm256_stream_ps(dst + i, f);
                 } else {
                     _mm256_storeu_ps(dst + i, f);
                 }
             }
 
-            for (; i < end_l; ++i) {
-                // Scalar int->float: always representable in range, plain static_cast.
-                dst[i] = static_cast<float32_t>(src[i]);
-            }
+            // Scalar tail — int->float ignores flag/method in scalar_convert (plain static_cast).
+            scalar_tail<int32_t, float32_t>(src, dst, i, end_l, tail_flag, ConversionClampMethod::PERMISSIVE);
 
-            if (aligned) {
+            if (use_nt) {
                 _mm_sfence();
             }
         };
@@ -493,16 +611,36 @@ namespace BeanTensor::Intrinsics::detail {
         static auto& threadMgr = Threading::GetCPUThreadPool();
         const auto chunk_size = ((end + t - 1) / t + 7) / 8 * 8;
 
-        for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
-            const auto start = thread_id * chunk_size;
-            const auto end_worker = std::min(start + chunk_size, end);
-            if (start >= end_worker) {
-                break;
+        // Cross-CCD writes cost ~8x — cache-sized work stays on the current CCD group.
+        if (
+            const auto keep_local = KeepWorkLocal(end * sizeof(float32_t));
+            keep_local
+        ) {
+            const auto group = CcdGroupOfCurrentCpu();
+            for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
+                const auto start = thread_id * chunk_size;
+                const auto end_worker = std::min(start + chunk_size, end);
+                if (start >= end_worker) {
+                    break;
+                }
+                futures.push_back(threadMgr.submit_to_group(
+                    [=] { compute(start, end_worker); },
+                    group,
+                    Threading::TaskPriority::Normal
+                ).share());
             }
-            futures.push_back(threadMgr.submit(
-                [=] { compute(start, end_worker); },
-                Threading::TaskPriority::Normal
-            ).share());
+        } else {
+            for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
+                const auto start = thread_id * chunk_size;
+                const auto end_worker = std::min(start + chunk_size, end);
+                if (start >= end_worker) {
+                    break;
+                }
+                futures.push_back(threadMgr.submit(
+                    [=] { compute(start, end_worker); },
+                    Threading::TaskPriority::Normal
+                ).share());
+            }
         }
         return futures;
     }
@@ -528,11 +666,25 @@ namespace BeanTensor::Intrinsics::detail {
         }
 
         const auto t = IncludedCPUFeatures().threads;
-        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 32 == 0;
+        // NT stores bypass cache but lose below the LLC-size gate — require both a
+        // 32-byte aligned destination and a destination past NtStoreMinBytes().
+        const auto use_nt = reinterpret_cast<uintptr_t>(dst) % 32 == 0 &&
+                            end * sizeof(int32_t) > NtStoreMinBytes();
 
-        auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
+        auto compute = [src, dst, use_nt, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
             auto i = start;
+
+            // Scalar prologue — walk dst up to the vector store alignment boundary
+            // using the same scalar converter as the tail.
+            if (
+                const auto misalign = reinterpret_cast<uintptr_t>(dst + i) % 32;
+                misalign != 0
+            ) {
+                const auto prologue_end = std::min(end_l, i + (32 - misalign) / sizeof(int32_t));
+                scalar_tail<float32_t, int32_t>(src, dst, i, prologue_end, local_flag, method);
+                i = prologue_end;
+            }
 
             for (; i + 8 <= end_l; i += 8) {
                 const auto v = _mm256_loadu_ps(src + i);
@@ -557,18 +709,17 @@ namespace BeanTensor::Intrinsics::detail {
                     r = _mm256_blendv_epi8(r, _mm256_setzero_si256(), _mm256_castps_si256(nan));
                 }
 
-                if (aligned) {
+                if (use_nt) {
                     _mm256_stream_si256(reinterpret_cast<__m256i*>(dst + i), r);
                 } else {
                     _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), r);
                 }
             }
 
-            for (; i < end_l; ++i) {
-                dst[i] = scalar_convert<float32_t, int32_t>(src[i], local_flag, method);
-            }
+            // Scalar tail — semantics live in scalar_tail (scalar_convert).
+            scalar_tail<float32_t, int32_t>(src, dst, i, end_l, local_flag, method);
 
-            if (aligned) {
+            if (use_nt) {
                 _mm_sfence();
             }
             if (local_flag) {
@@ -585,16 +736,36 @@ namespace BeanTensor::Intrinsics::detail {
         static auto& threadMgr = Threading::GetCPUThreadPool();
         const auto chunk_size = ((end + t - 1) / t + 7) / 8 * 8;
 
-        for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
-            const auto start = thread_id * chunk_size;
-            const auto end_worker = std::min(start + chunk_size, end);
-            if (start >= end_worker) {
-                break;
+        // Cross-CCD writes cost ~8x — cache-sized work stays on the current CCD group.
+        if (
+            const auto keep_local = KeepWorkLocal(end * sizeof(int32_t));
+            keep_local
+        ) {
+            const auto group = CcdGroupOfCurrentCpu();
+            for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
+                const auto start = thread_id * chunk_size;
+                const auto end_worker = std::min(start + chunk_size, end);
+                if (start >= end_worker) {
+                    break;
+                }
+                futures.push_back(threadMgr.submit_to_group(
+                    [=] { compute(start, end_worker); },
+                    group,
+                    Threading::TaskPriority::Normal
+                ).share());
             }
-            futures.push_back(threadMgr.submit(
-                [=] { compute(start, end_worker); },
-                Threading::TaskPriority::Normal
-            ).share());
+        } else {
+            for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
+                const auto start = thread_id * chunk_size;
+                const auto end_worker = std::min(start + chunk_size, end);
+                if (start >= end_worker) {
+                    break;
+                }
+                futures.push_back(threadMgr.submit(
+                    [=] { compute(start, end_worker); },
+                    Threading::TaskPriority::Normal
+                ).share());
+            }
         }
         return futures;
     }
@@ -659,11 +830,25 @@ namespace BeanTensor::Intrinsics::detail {
 
         const auto t = IncludedCPUFeatures().threads;
 
-        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 32 == 0;
+        // NT stores bypass cache but lose below the LLC-size gate — require both a
+        // 32-byte aligned destination and a destination past NtStoreMinBytes().
+        const auto use_nt = reinterpret_cast<uintptr_t>(dst) % 32 == 0 &&
+                            end * sizeof(float16_t) > NtStoreMinBytes();
 
-        auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
+        auto compute = [src, dst, use_nt, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
             auto i = start;
+
+            // Scalar prologue — walk dst up to the vector store alignment boundary
+            // using the same scalar converter as the tail.
+            if (
+                const auto misalign = reinterpret_cast<uintptr_t>(dst + i) % 16;
+                misalign != 0
+            ) {
+                const auto prologue_end = std::min(end_l, i + (16 - misalign) / sizeof(float16_t));
+                scalar_tail<float32_t, float16_t>(src, dst, i, prologue_end, local_flag, method);
+                i = prologue_end;
+            }
 
             for (; i + 8 <= end_l; i += 8) {
                 const auto v = _mm256_loadu_ps(src + i);
@@ -673,16 +858,16 @@ namespace BeanTensor::Intrinsics::detail {
                 auto h = _mm256_cvtps_ph(v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
 
                 // Overflow: the scalar path clamps finite values to +/-FP16_MAX while hardware RNE would
-                // produce Inf past 65520 — fix those up scalar-wise. Inf lanes need no value fixup (the
-                // scalar kernel reproduces Inf) and flag under STRICT only; finite overflow flags under
-                // any non-PERMISSIVE method.
+                // produce Inf past 65520 — fix those up with a bit-exact blend. Inf lanes need no value
+                // fixup (the scalar kernel reproduces Inf) and flag under STRICT only; finite overflow
+                // flags under any non-PERMISSIVE method.
                 if (
                     const auto ovf = _mm256_cmp_ps(av, _mm256_set1_ps(DataTypes::detail::FP16_MAX), _CMP_GT_OQ);
                     _mm256_movemask_ps(ovf) != 0
                 ) {
                     const auto inf_lanes = _mm256_cmp_ps(av, _mm256_set1_ps(__builtin_inff()), _CMP_EQ_OQ);
+                    const auto finite_ovf = _mm256_andnot_si256(_mm256_castps_si256(inf_lanes), _mm256_castps_si256(ovf));
                     if (
-                        const auto finite_ovf = _mm256_andnot_si256(_mm256_castps_si256(inf_lanes), _mm256_castps_si256(ovf));
                         _mm256_movemask_epi8(finite_ovf) != 0 && method != ConversionClampMethod::PERMISSIVE
                     ) {
                         local_flag = true;
@@ -690,17 +875,21 @@ namespace BeanTensor::Intrinsics::detail {
                     if (_mm256_movemask_ps(inf_lanes) != 0 && method == ConversionClampMethod::STRICT) {
                         local_flag = true;
                     }
-                    alignas(16) uint16_t lanes[8];
-                    _mm_store_si128(reinterpret_cast<__m128i*>(lanes), h);
-                    auto mask = static_cast<uint32_t>(_mm256_movemask_ps(ovf));
-                    while (mask != 0) {
-                        const auto lane = static_cast<uint32_t>(std::countr_zero(mask));
-                        mask &= mask - 1;
-                        auto ignored = false;
-                        lanes[lane] = bit_cast_memcpy<uint16_t>(
-                            unaccel_fp32_to_fp16_tracked(src[i + lane], ignored, ConversionClampMethod::PERMISSIVE));
-                    }
-                    h = _mm_load_si128(reinterpret_cast<const __m128i*>(lanes));
+                    // Bit-exact blend fixup: the scalar path hard-clamps every finite |x| > 65504
+                    // to exactly +0x7BFF/-0xFBFF; hardware RNE matches except finite |x| >= 65520,
+                    // which rounds to Inf. The fp16 lanes of h are 16-bit, but the ovf compare is
+                    // 32-bit per float — packs_epi32 widens each 32-bit lane mask down onto the
+                    // matching fp16 lane (saturation of 0xFFFFFFFF/0x00000000 is exact), and the
+                    // sign comes from an arithmetic shift of the fp32 bits by 31 (-0.0 is in range
+                    // so it never reaches an ovf lane, and -Inf is excluded by inf_lanes).
+                    const auto sign32 = _mm256_srai_epi32(_mm256_castps_si256(v), 31);
+                    const auto fix128 = _mm_packs_epi32(_mm256_castsi256_si128(finite_ovf),
+                                                        _mm256_extracti128_si256(finite_ovf, 1));
+                    const auto sign128 = _mm_packs_epi32(_mm256_castsi256_si128(sign32),
+                                                         _mm256_extracti128_si256(sign32, 1));
+                    const auto clamp128 = _mm_or_si128(_mm_set1_epi16(static_cast<short>(0x7BFF)),
+                                                       _mm_and_si128(sign128, _mm_set1_epi16(static_cast<short>(0x8000))));
+                    h = _mm_blendv_epi8(h, clamp128, fix128);
                 }
 
                 // NaN flags under any non-PERMISSIVE method, matching the scalar path.
@@ -710,18 +899,17 @@ namespace BeanTensor::Intrinsics::detail {
                     }
                 }
 
-                if (aligned) {
+                if (use_nt) {
                     _mm_stream_si128(reinterpret_cast<__m128i*>(dst + i), h);
                 } else {
                     _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), h);
                 }
             }
 
-            for (; i < end_l; ++i) {
-                dst[i] = unaccel_fp32_to_fp16_tracked(src[i], local_flag, method);
-            }
+            // Scalar tail — semantics live in scalar_tail (scalar_convert).
+            scalar_tail<float32_t, float16_t>(src, dst, i, end_l, local_flag, method);
 
-            if (aligned) {
+            if (use_nt) {
                 _mm_sfence();
             }
             if (local_flag) {
@@ -738,16 +926,36 @@ namespace BeanTensor::Intrinsics::detail {
         static auto& threadMgr = Threading::GetCPUThreadPool();
         const auto chunk_size = ((end + t - 1) / t + 7) / 8 * 8;
 
-        for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
-            const auto start = thread_id * chunk_size;
-            const auto end_worker = std::min(start + chunk_size, end);
-            if (start >= end_worker) {
-                break;
+        // Cross-CCD writes cost ~8x — cache-sized work stays on the current CCD group.
+        if (
+            const auto keep_local = KeepWorkLocal(end * sizeof(float16_t));
+            keep_local
+        ) {
+            const auto group = CcdGroupOfCurrentCpu();
+            for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
+                const auto start = thread_id * chunk_size;
+                const auto end_worker = std::min(start + chunk_size, end);
+                if (start >= end_worker) {
+                    break;
+                }
+                futures.push_back(threadMgr.submit_to_group(
+                    [=] { compute(start, end_worker); },
+                    group,
+                    Threading::TaskPriority::Normal
+                ).share());
             }
-            futures.push_back(threadMgr.submit(
-                [=] { compute(start, end_worker); },
-                Threading::TaskPriority::Normal
-            ).share());
+        } else {
+            for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
+                const auto start = thread_id * chunk_size;
+                const auto end_worker = std::min(start + chunk_size, end);
+                if (start >= end_worker) {
+                    break;
+                }
+                futures.push_back(threadMgr.submit(
+                    [=] { compute(start, end_worker); },
+                    Threading::TaskPriority::Normal
+                ).share());
+            }
         }
         return futures;
     }
@@ -773,11 +981,25 @@ namespace BeanTensor::Intrinsics::detail {
 
         const auto t = IncludedCPUFeatures().threads;
 
-        const auto aligned = reinterpret_cast<uintptr_t>(dst) % 32 == 0;
+        // NT stores bypass cache but lose below the LLC-size gate — require both a
+        // 32-byte aligned destination and a destination past NtStoreMinBytes().
+        const auto use_nt = reinterpret_cast<uintptr_t>(dst) % 32 == 0 &&
+                            end * sizeof(float32_t) > NtStoreMinBytes();
 
-        auto compute = [src, dst, aligned, &flag, method](const size_t start, const size_t end_l) {
+        auto compute = [src, dst, use_nt, &flag, method](const size_t start, const size_t end_l) {
             auto local_flag = false;
             auto i = start;
+
+            // Scalar prologue — walk dst up to the vector store alignment boundary
+            // using the same scalar converter as the tail.
+            if (
+                const auto misalign = reinterpret_cast<uintptr_t>(dst + i) % 32;
+                misalign != 0
+            ) {
+                const auto prologue_end = std::min(end_l, i + (32 - misalign) / sizeof(float32_t));
+                scalar_tail<float16_t, float32_t>(src, dst, i, prologue_end, local_flag, method);
+                i = prologue_end;
+            }
 
             for (; i + 8 <= end_l; i += 8) {
                 const auto h = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
@@ -802,18 +1024,17 @@ namespace BeanTensor::Intrinsics::detail {
                     }
                 }
                 const auto f = _mm256_cvtph_ps(h);
-                if (aligned) {
+                if (use_nt) {
                     _mm256_stream_ps(dst + i, f);
                 } else {
                     _mm256_storeu_ps(dst + i, f);
                 }
             }
 
-            for (; i < end_l; ++i) {
-                dst[i] = unaccel_fp16_to_fp32_tracked(src[i], local_flag, method);
-            }
+            // Scalar tail — semantics live in scalar_tail (scalar_convert).
+            scalar_tail<float16_t, float32_t>(src, dst, i, end_l, local_flag, method);
 
-            if (aligned) {
+            if (use_nt) {
                 _mm_sfence();
             }
             if (local_flag) {
@@ -830,16 +1051,36 @@ namespace BeanTensor::Intrinsics::detail {
         static auto& threadMgr = Threading::GetCPUThreadPool();
         const auto chunk_size = ((end + t - 1) / t + 7) / 8 * 8;
 
-        for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
-            const auto start = thread_id * chunk_size;
-            const auto end_worker = std::min(start + chunk_size, end);
-            if (start >= end_worker) {
-                break;
+        // Cross-CCD writes cost ~8x — cache-sized work stays on the current CCD group.
+        if (
+            const auto keep_local = KeepWorkLocal(end * sizeof(float32_t));
+            keep_local
+        ) {
+            const auto group = CcdGroupOfCurrentCpu();
+            for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
+                const auto start = thread_id * chunk_size;
+                const auto end_worker = std::min(start + chunk_size, end);
+                if (start >= end_worker) {
+                    break;
+                }
+                futures.push_back(threadMgr.submit_to_group(
+                    [=] { compute(start, end_worker); },
+                    group,
+                    Threading::TaskPriority::Normal
+                ).share());
             }
-            futures.push_back(threadMgr.submit(
-                [=] { compute(start, end_worker); },
-                Threading::TaskPriority::Normal
-            ).share());
+        } else {
+            for (auto thread_id = size_t{0}; thread_id < t; ++thread_id) {
+                const auto start = thread_id * chunk_size;
+                const auto end_worker = std::min(start + chunk_size, end);
+                if (start >= end_worker) {
+                    break;
+                }
+                futures.push_back(threadMgr.submit(
+                    [=] { compute(start, end_worker); },
+                    Threading::TaskPriority::Normal
+                ).share());
+            }
         }
         return futures;
     }

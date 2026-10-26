@@ -17,8 +17,14 @@
  * ElementwiseG node to the output whenever an input has requires_grad=true
  * (Math/Autograd/ElementwiseG), so elementwise chains join the computation
  * graph; the tensor-scalar ops persist the scalar in Node::_scalar.
- * @version 0.6
- * @date 2026-10-23
+ *
+ * Scheduling: pool-chunked launches route through a local twin of
+ * linearalgebra_shared::launch_elementwise that submits chunks to the calling
+ * thread's CCD group (submit_to_group) whenever the output buffer fits one
+ * CCD's LLC — cross-CCD writes of cache-resident buffers cost ~8x. Outputs
+ * larger than the LLC keep the unrestricted whole-pool submit.
+ * @version 0.7
+ * @date 2026-10-25
  */
 #include <algorithm>
 #include <cmath>
@@ -33,6 +39,7 @@
 #include "Math/Elementwise/ElementwiseShared.h"
 #include "Tensor/Tensor.h"
 
+#include "Helpers/Hardware.h"
 #include "Intrinsics/Native/DTypeConversions.h"
 
 namespace BeanTensor::Tensors::detail {
@@ -1114,6 +1121,53 @@ namespace BeanTensor::Tensors::detail {
         };
 
         /**
+         * Local twin of linearalgebra_shared::launch_elementwise with CCD-aware
+         * scheduling: when the output span being written fits one CCD's LLC the
+         * chunks are submitted to the calling thread's CCD group (submit_to_group)
+         * so the cache-resident destination is written locally; otherwise they go
+         * to the whole pool exactly as before. The chunk count still assumes all
+         * t_count threads — group workers simply claim multiple chunks from the
+         * queue, so restricting the submit never starves the decomposition.
+         * @brief Threaded elementwise launcher with CCD-local routing.
+         * @param worker Callable taking (begin, end); copied into each task.
+         * @param numel Total element count to cover.
+         * @param out_bytes Bytes of the output buffer actually written by the workers.
+         * @param a First tensor the workers read.
+         * @param b Second tensor the workers read.
+         * @param out Tensor the workers write.
+         */
+        template<typename Worker>
+        void launch_elementwise_ccd(Worker&& worker, const size_t numel, const size_t out_bytes,
+                                    const Tensor& a, const Tensor& b, const Tensor& out) {
+            const auto t_count = static_cast<size_t>(IncludedCPUFeatures().threads);
+            if (t_count <= 1 || numel <= t_count * 1024) {
+                worker(0, numel);
+                return;
+            }
+            auto& threadMgr = Threading::GetCPUThreadPool();
+            std::vector<std::shared_future<void>> futures;
+            const auto chunk = (numel + t_count - 1) / t_count;
+            const bool keep_local = KeepWorkLocal(out_bytes);
+            const auto group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
+            for (auto t = size_t{0}; t < t_count; ++t) {
+                const auto begin = t * chunk;
+                if (begin >= numel) {
+                    break;
+                }
+                // worker is captured BY VALUE: these futures outlive this call
+                // (they land on the tensors), so a reference would dangle.
+                if (keep_local) {
+                    futures.push_back(threadMgr.submit_to_group([worker, begin, end = std::min(begin + chunk, numel)] { worker(begin, end); }, group, Threading::TaskPriority::Normal).share());
+                } else {
+                    futures.push_back(threadMgr.submit([worker, begin, end = std::min(begin + chunk, numel)] { worker(begin, end); }, Threading::TaskPriority::Normal).share());
+                }
+            }
+            a.give_futures(futures);
+            b.give_futures(futures);
+            out.give_futures(futures);
+        }
+
+        /**
          * Exact plan (identical shapes): both operands are dense and contiguous,
          * so the flat index addresses all three buffers and the contiguous SIMD
          * dispatch applies. Non-exact plans with a row-decomposable shape (inner
@@ -1137,7 +1191,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param y One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([=](const size_t x, const size_t y) { contig_range<T, Op>(out_ptr, a_ptr, b_ptr, x, y); }, raw.numel, a, b, out);
+                launch_elementwise_ccd([=](const size_t x, const size_t y) { contig_range<T, Op>(out_ptr, a_ptr, b_ptr, x, y); }, raw.numel, raw.numel * sizeof(T), a, b, out);
             } else if (row_decomposable(plan)) {
                 /**
                  * Forwards the captured elementwise pointers to the row-decomposition kernel.
@@ -1146,7 +1200,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param y One past the last output row computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([=](const size_t x, const size_t y) { bcast_rows_range<T, Op>(out_ptr, a_ptr, b_ptr, plan, x, y); }, raw.numel / plan.out_shape[plan.out_ndim - 1], a, b, out);
+                launch_elementwise_ccd([=](const size_t x, const size_t y) { bcast_rows_range<T, Op>(out_ptr, a_ptr, b_ptr, plan, x, y); }, raw.numel / plan.out_shape[plan.out_ndim - 1], raw.numel * sizeof(T), a, b, out);
             } else {
                 /**
                  * Forwards the captured elementwise pointers to the range kernel.
@@ -1155,7 +1209,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param y One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([=](const size_t x, const size_t y) { binary_range<T, Op>(out_ptr, a_ptr, b_ptr, plan, x, y); }, raw.numel, a, b, out);
+                launch_elementwise_ccd([=](const size_t x, const size_t y) { binary_range<T, Op>(out_ptr, a_ptr, b_ptr, plan, x, y); }, raw.numel, raw.numel * sizeof(T), a, b, out);
             }
         }
 
@@ -1178,7 +1232,7 @@ namespace BeanTensor::Tensors::detail {
              * @param y One past the last element computed.
              * @note Lambda subcall. Self-execution prohibited.
              */
-            launch_elementwise([out_ptr, a_ptr, narrowed = narrow_scalar<T>(scalar)](const size_t x, const size_t y) { contig_splat_range<T, Op, true>(out_ptr, a_ptr, narrowed, x, y); }, raw.numel, a, a, out);
+            launch_elementwise_ccd([out_ptr, a_ptr, narrowed = narrow_scalar<T>(scalar)](const size_t x, const size_t y) { contig_splat_range<T, Op, true>(out_ptr, a_ptr, narrowed, x, y); }, raw.numel, raw.numel * sizeof(T), a, a, out);
         }
 
         /**
@@ -1195,7 +1249,7 @@ namespace BeanTensor::Tensors::detail {
              * @param y One past the last element computed.
              * @note Lambda subcall. Self-execution prohibited.
              */
-            launch_elementwise([=](const size_t x, const size_t y) { unary_range<T, Op>(out_ptr, in_ptr, x, y); }, raw.numel, a, a, out);
+            launch_elementwise_ccd([=](const size_t x, const size_t y) { unary_range<T, Op>(out_ptr, in_ptr, x, y); }, raw.numel, raw.numel * sizeof(T), a, a, out);
         }
 
         // --------------------------- dtype dispatch ---------------------------

@@ -10,7 +10,7 @@
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same fp32/fp64 compute widths, same RNE narrowing
  * (CPU unaccel pathway), same wrap integer ops, same div-by-zero/min-rules.
- * @version 0.1.1
+ * @version 0.1.2
  * @date 2026-10-22
  */
 #pragma once
@@ -52,7 +52,7 @@ namespace BeanTensor::Tensors::detail::elementwise_kernels {
     // --------------------------- narrowing twins ---------------------------
     // Both mirror the CPU unaccel pathway (Intrinsics/Native/DTypeConversions.h)
     // bit-for-bit so GPU results are identical to the CPU dispatcher's, per the
-    // AGENTS.md parity invariant. Pure bit manipulation — no intrinsics.
+    // Project parity invariant. Pure bit manipulation — no intrinsics.
 
     /**
      * Mirror of unaccel_fp32_to_bf16: NaN/Inf truncate the payload (NaN sets

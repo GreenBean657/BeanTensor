@@ -16,7 +16,7 @@
  * and phase 2's additions: tensor-scalar splat kernels (plain and
  * scalar-on-the-left) exercised directly and end to end, row-decomposition
  * broadcast dispatch, and the per-nibble Int4x2 kernels.
- * @version 0.5
+ * @version 0.6
  * @date 2026-10-23
  */
 #include <cmath>
@@ -1017,7 +1017,7 @@ static void test_gpu_edge_semantics() {
 }
 
 // ==================== CPU<->GPU bit-exact parity ====================
-// The AGENTS.md parity invariant: GPU kernels must match the CPU dispatcher
+// The project parity invariant: GPU kernels must match the CPU dispatcher
 // bit-for-bit. These tests feed identical input bytes through both backends
 // and compare result BITS (never approximate equality). Float inputs keep
 // divisors non-zero: 0/0 NaN payloads are ISA-defined and out of scope, while

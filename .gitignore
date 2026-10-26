@@ -2,8 +2,9 @@ build/
 build-verify/
 cmake-build-debug/
 scratch/
+safe-delete.sh
+/benchmark/
 .idea/
-AGENTS.md
 *.d
 *.ddi
 .clangd

@@ -4,8 +4,8 @@
  * @brief Reduction, optimization and shape ops tests - framework-free assertion suite.
  * Covers reshape, sgd_update/sgd_step, sum and argmax across the full dtype family (CPU threaded + SIMD tiers),
  * and the GPU (CUDA/HIP) paths for all four ops when a backend and device exist.
- * @version 0.2
- * @date 2026-10-18
+ * @version 0.3
+ * @date 2026-10-26
  */
 #include <cmath>
 #include <cstdint>
@@ -431,6 +431,34 @@ static void test_argmax_cpu() {
         t.set<int4x2_t>({0}, i4x2(int8_t{-1}, int8_t{3}));
         t.set<int4x2_t>({1}, i4x2(int8_t{-1}, int8_t{4}));
         CHECK(t.argmax() == uint64_t{1});
+    }
+    {
+        // Regression: argmax(axis=1) async path must not use-after-free the
+        // axis locals captured by the worker lambdas. out_numel 40000 exceeds
+        // threads*1024, so launch_axis queues futures that outlive this frame.
+        constexpr auto rows = size_t{40000};
+        auto t = Tensor({rows, 2}, DType::Float32, Device::CPU);
+        t.set_zero();
+        for (auto r = size_t{0}; r < rows; ++r) {
+            t.set<float32_t>({r, 1}, 2.0f);
+        }
+        auto idx = t.argmax(1);
+        for (auto r = size_t{0}; r < rows; ++r) {
+            CHECK(idx.at<int64_t>({r}) == int64_t{1});
+        }
+    }
+    {
+        // Same async-path regression check for an integer dtype.
+        constexpr auto rows = size_t{40000};
+        auto t = Tensor({rows, 2}, DType::Int32, Device::CPU);
+        t.set_zero();
+        for (auto r = size_t{0}; r < rows; ++r) {
+            t.set<int32_t>({r, 1}, int32_t{100});
+        }
+        auto idx = t.argmax(1);
+        for (auto r = size_t{0}; r < rows; ++r) {
+            CHECK(idx.at<int64_t>({r}) == int64_t{1});
+        }
     }
 }
 

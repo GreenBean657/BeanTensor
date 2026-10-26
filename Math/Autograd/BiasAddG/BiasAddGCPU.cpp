@@ -3,8 +3,8 @@
  * @author GreenBean
  * @brief CPU backend for bias_add backward (column sums of dy), plus the
  * bias_add backward trampoline (bias_add_g_node).
- * @version 0.2
- * @date 2026-10-23
+ * @version 0.4
+ * @date 2026-10-26
  */
 #include <algorithm>
 #include <future>
@@ -204,15 +204,25 @@ namespace BeanTensor::Tensors::detail {
          * returning the futures for the caller to drain on its own thread
          * (this runs in a node fn under backward(), never inside a pool
          * worker, so waiting there is legal). Small inputs run inline and return no futures.
+         * CCD-aware: the column-sum is a reduction — the per-slot partials and
+         * the dbias output are tiny, but every worker reads its slice of the
+         * whole dy span, and cross-CCD reads are the cheap direction (~15-20%
+         * vs ~8x for writes), so the gate is the INPUT span, not the output.
+         * Chunks are restricted to the submitting thread's CCD group only when
+         * dy fits one CCD's LLC (that CCD typically produced or last warmed
+         * dy); larger inputs stay on the whole pool for bandwidth. The chunk
+         * count still assumes all t_count threads — group workers simply claim
+         * multiple chunks from the queue.
          * @brief Threaded row launcher with per-slot partials. Returns the futures for the caller to drain.
          * @param rows Total row count.
          * @param range_fn Callable (slot, begin, end) over a row range; copied into each task.
+         * @param reduce_bytes Size in bytes of the dy span the workers read.
          * @param t First tensor the workers touch (receives the futures).
          * @param extra Second tensor the workers touch (receives the futures).
          * @return Futures of the submitted chunks; empty if the work ran inline.
          */
         template<typename RangeFn>
-        std::vector<std::shared_future<void>> launch_rows_partial(const size_t rows, RangeFn&& range_fn, const Tensor& t, const Tensor& extra) {
+        std::vector<std::shared_future<void>> launch_rows_partial(const size_t rows, RangeFn&& range_fn, const size_t reduce_bytes, const Tensor& t, const Tensor& extra) {
             const auto t_count = static_cast<size_t>(IncludedCPUFeatures().threads);
             if (t_count <= 1 || rows <= t_count * 8) {
                 range_fn(0, 0, rows);
@@ -221,6 +231,8 @@ namespace BeanTensor::Tensors::detail {
             auto& threadMgr = Threading::GetCPUThreadPool();
             std::vector<std::shared_future<void>> futures;
             const auto chunk = (rows + t_count - 1) / t_count;
+            const bool keep_local = KeepWorkLocal(reduce_bytes);
+            const auto group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
             auto slot = size_t{0};
             for (auto ti = size_t{0}; ti < t_count; ++ti) {
                 const auto begin = ti * chunk;
@@ -229,7 +241,11 @@ namespace BeanTensor::Tensors::detail {
                 }
                 // range_fn is captured by value; its own captures reference the
                 // caller's partials, which stay alive until drain() returns.
-                futures.push_back(threadMgr.submit([range_fn, slot, begin, end = std::min(begin + chunk, rows)] { range_fn(slot, begin, end); }, Threading::TaskPriority::Normal).share());
+                if (keep_local) {
+                    futures.push_back(threadMgr.submit_to_group([range_fn, slot, begin, end = std::min(begin + chunk, rows)] { range_fn(slot, begin, end); }, group, Threading::TaskPriority::Normal).share());
+                } else {
+                    futures.push_back(threadMgr.submit([range_fn, slot, begin, end = std::min(begin + chunk, rows)] { range_fn(slot, begin, end); }, Threading::TaskPriority::Normal).share());
+                }
                 ++slot;
             }
             t.give_futures(futures);
@@ -271,7 +287,7 @@ namespace BeanTensor::Tensors::detail {
         switch (dy.dtype) {
             case DType::Float32: {
                 const auto* dy_ptr = static_cast<const float32_t*>(dy.data) + dy.offset;
-                std::vector partials(slots * cols, 0.0f);
+                std::vector<float32_t> partials(slots * cols, 0.0f);
                 const ColsumScalarFn<float32_t> kernel = Math::Autograd::bias_add_g_avx512_available()
                     ? Math::Autograd::bias_add_g_f32_colsum_avx512
                     : Math::Autograd::bias_add_g_avx2_available() ? Math::Autograd::bias_add_g_f32_colsum_avx2 : bias_add_g_colsum_scalar<float32_t>;
@@ -283,13 +299,13 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First row index of the range (inclusive).
                  * @param e One past the last row index of the range.
                  */
-                drain(launch_rows_partial(rows, [&](const size_t slot, const size_t b, const size_t e) { kernel(partials.data() + slot * cols, dy_ptr, cols, b, e); }, dy, dbias));
+                drain(launch_rows_partial(rows, [&](const size_t slot, const size_t b, const size_t e) { kernel(partials.data() + slot * cols, dy_ptr, cols, b, e); }, dy.numel * sizeof(float32_t), dy, dbias));
                 bias_add_g_store<float32_t, float32_t>(static_cast<float32_t*>(dbias.data) + dbias.offset, partials, slots, cols);
                 break;
             }
             case DType::Float64: {
                 const auto* dy_ptr = static_cast<const float64_t*>(dy.data) + dy.offset;
-                std::vector partials(slots * cols, 0.0);
+                std::vector<float64_t> partials(slots * cols, 0.0);
                 const ColsumScalarFn<float64_t> kernel = Math::Autograd::bias_add_g_avx512_available()
                     ? Math::Autograd::bias_add_g_f64_colsum_avx512
                     : Math::Autograd::bias_add_g_avx2_available() ? Math::Autograd::bias_add_g_f64_colsum_avx2 : bias_add_g_colsum_scalar<float64_t>;
@@ -301,13 +317,13 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First row index of the range (inclusive).
                  * @param e One past the last row index of the range.
                  */
-                drain(launch_rows_partial(rows, [&](const size_t slot, const size_t b, const size_t e) { kernel(partials.data() + slot * cols, dy_ptr, cols, b, e); }, dy, dbias));
+                drain(launch_rows_partial(rows, [&](const size_t slot, const size_t b, const size_t e) { kernel(partials.data() + slot * cols, dy_ptr, cols, b, e); }, dy.numel * sizeof(float64_t), dy, dbias));
                 bias_add_g_store<float64_t, float64_t>(static_cast<float64_t*>(dbias.data) + dbias.offset, partials, slots, cols);
                 break;
             }
             case DType::Float16: {
                 const auto* dy_ptr = static_cast<const float16_t*>(dy.data) + dy.offset;
-                std::vector partials(slots * cols, 0.0f);
+                std::vector<float32_t> partials(slots * cols, 0.0f);
                 /**
                  * Runs on a pool worker (or inline, slot 0, for small inputs) over the row range [b, e). Captures by reference (partials and dy_ptr outlive it: the caller drains before returning).
                  * Adds the column sums of those rows of dy into its own slot of partials (partials + slot * cols), so chunks never race; the partials are merged afterwards. Accumulates in fp32.
@@ -316,13 +332,13 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First row index of the range (inclusive).
                  * @param e One past the last row index of the range.
                  */
-                drain(launch_rows_partial(rows, [&](const size_t slot, const size_t b, const size_t e) { bias_add_g_colsum_half<float16_t>(partials.data() + slot * cols, dy_ptr, cols, b, e); }, dy, dbias));
+                drain(launch_rows_partial(rows, [&](const size_t slot, const size_t b, const size_t e) { bias_add_g_colsum_half<float16_t>(partials.data() + slot * cols, dy_ptr, cols, b, e); }, dy.numel * sizeof(float16_t), dy, dbias));
                 bias_add_g_store<float16_t, float32_t>(static_cast<float16_t*>(dbias.data) + dbias.offset, partials, slots, cols);
                 break;
             }
             case DType::BFloat16: {
                 const auto* dy_ptr = static_cast<const bfloat16_t*>(dy.data) + dy.offset;
-                std::vector partials(slots * cols, 0.0f);
+                std::vector<float32_t> partials(slots * cols, 0.0f);
                 /**
                  * Runs on a pool worker (or inline, slot 0, for small inputs) over the row range [b, e). Captures by reference (partials and dy_ptr outlive it: the caller drains before returning).
                  * Adds the column sums of those rows of dy into its own slot of partials (partials + slot * cols), so chunks never race; the partials are merged afterwards. Accumulates in fp32.
@@ -331,13 +347,13 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First row index of the range (inclusive).
                  * @param e One past the last row index of the range.
                  */
-                drain(launch_rows_partial(rows, [&](const size_t slot, const size_t b, const size_t e) { bias_add_g_colsum_half<bfloat16_t>(partials.data() + slot * cols, dy_ptr, cols, b, e); }, dy, dbias));
+                drain(launch_rows_partial(rows, [&](const size_t slot, const size_t b, const size_t e) { bias_add_g_colsum_half<bfloat16_t>(partials.data() + slot * cols, dy_ptr, cols, b, e); }, dy.numel * sizeof(bfloat16_t), dy, dbias));
                 bias_add_g_store<bfloat16_t, float32_t>(static_cast<bfloat16_t*>(dbias.data) + dbias.offset, partials, slots, cols);
                 break;
             }
             case DType::Float16x2: {
                 const auto* dy_ptr = static_cast<const float16x2_t*>(dy.data) + dy.offset;
-                std::vector partials(slots * 2 * cols, 0.0f);
+                std::vector<float32_t> partials(slots * 2 * cols, 0.0f);
                 /**
                  * Runs on a pool worker (or inline, slot 0, for small inputs) over the row range [b, e). Captures by reference (partials and dy_ptr outlive it: the caller drains before returning).
                  * Adds the column sums of those rows of dy into its own slot of partials (partials + slot * 2 * cols), so chunks never race; the partials are merged afterwards. Each element carries two columns, so each slot holds 2 * cols fp32 sums.
@@ -346,13 +362,13 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First row index of the range (inclusive).
                  * @param e One past the last row index of the range.
                  */
-                drain(launch_rows_partial(rows, [&](const size_t slot, const size_t b, const size_t e) { bias_add_g_colsum_packed<float16x2_t>(partials.data() + slot * 2 * cols, dy_ptr, cols, b, e); }, dy, dbias));
+                drain(launch_rows_partial(rows, [&](const size_t slot, const size_t b, const size_t e) { bias_add_g_colsum_packed<float16x2_t>(partials.data() + slot * 2 * cols, dy_ptr, cols, b, e); }, dy.numel * sizeof(float16x2_t), dy, dbias));
                 bias_add_g_store<float16x2_t, float32_t>(static_cast<float16x2_t*>(dbias.data) + dbias.offset, partials, slots, 2 * cols);
                 break;
             }
             case DType::BFloat16x2: {
                 const auto* dy_ptr = static_cast<const bfloat16x2_t*>(dy.data) + dy.offset;
-                std::vector partials(slots * 2 * cols, 0.0f);
+                std::vector<float32_t> partials(slots * 2 * cols, 0.0f);
                 /**
                  * Runs on a pool worker (or inline, slot 0, for small inputs) over the row range [b, e). Captures by reference (partials and dy_ptr outlive it: the caller drains before returning).
                  * Adds the column sums of those rows of dy into its own slot of partials (partials + slot * 2 * cols), so chunks never race; the partials are merged afterwards. Each element carries two columns, so each slot holds 2 * cols fp32 sums.
@@ -361,13 +377,13 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First row index of the range (inclusive).
                  * @param e One past the last row index of the range.
                  */
-                drain(launch_rows_partial(rows, [&](const size_t slot, const size_t b, const size_t e) { bias_add_g_colsum_packed<bfloat16x2_t>(partials.data() + slot * 2 * cols, dy_ptr, cols, b, e); }, dy, dbias));
+                drain(launch_rows_partial(rows, [&](const size_t slot, const size_t b, const size_t e) { bias_add_g_colsum_packed<bfloat16x2_t>(partials.data() + slot * 2 * cols, dy_ptr, cols, b, e); }, dy.numel * sizeof(bfloat16x2_t), dy, dbias));
                 bias_add_g_store<bfloat16x2_t, float32_t>(static_cast<bfloat16x2_t*>(dbias.data) + dbias.offset, partials, slots, 2 * cols);
                 break;
             }
             case DType::Int4x2: {
                 const auto* dy_ptr = static_cast<const int4x2_t*>(dy.data) + dy.offset;
-                std::vector partials(slots * 2 * cols, 0);
+                std::vector<int32_t> partials(slots * 2 * cols, 0);
                 /**
                  * Runs on a pool worker (or inline, slot 0, for small inputs) over the row range [b, e). Captures by reference (partials and dy_ptr outlive it: the caller drains before returning).
                  * Adds the column sums of those rows of dy into its own slot of partials (partials + slot * 2 * cols), so chunks never race; the partials are merged afterwards. Each element carries two nibbles, so each slot holds 2 * cols int32 sums.
@@ -376,7 +392,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First row index of the range (inclusive).
                  * @param e One past the last row index of the range.
                  */
-                drain(launch_rows_partial(rows, [&](const size_t slot, const size_t b, const size_t e) { bias_add_g_colsum_int4x2(partials.data() + slot * 2 * cols, dy_ptr, cols, b, e); }, dy, dbias));
+                drain(launch_rows_partial(rows, [&](const size_t slot, const size_t b, const size_t e) { bias_add_g_colsum_int4x2(partials.data() + slot * 2 * cols, dy_ptr, cols, b, e); }, dy.numel * sizeof(int4x2_t), dy, dbias));
                 bias_add_g_store_int4x2(static_cast<int4x2_t*>(dbias.data) + dbias.offset, partials, slots, cols);
                 break;
             }
@@ -398,7 +414,7 @@ namespace BeanTensor::Tensors::detail {
                      * @param b First row index of the range (inclusive).
                      * @param e One past the last row index of the range.
                      */
-                    drain(launch_rows_partial(rows, [&](const size_t slot, const size_t b, const size_t e) { bias_add_g_colsum_int<T>(partials.data() + slot * cols, dy_ptr, cols, b, e); }, dy, dbias));
+                    drain(launch_rows_partial(rows, [&](const size_t slot, const size_t b, const size_t e) { bias_add_g_colsum_int<T>(partials.data() + slot * cols, dy_ptr, cols, b, e); }, dy.numel * sizeof(T), dy, dbias));
                     bias_add_g_store<T, T>(static_cast<T*>(dbias.data) + dbias.offset, partials, slots, cols);
                 };
                 switch (dy.dtype) {

@@ -4,8 +4,8 @@
  * @brief Shared scalar/packed lane helpers and the threaded elementwise launcher
  * used by the comparison ops (equal). Header-only: everything here is a
  * template or inline.
- * @version 0.1
- * @date 2026-10-22
+ * @version 0.2
+ * @date 2026-10-25
  */
 #pragma once
 
@@ -86,16 +86,21 @@ namespace BeanTensor::Tensors::detail::compare_shared {
     /**
      * Chunks an elementwise range worker across the CPU thread pool. Futures land on every tensor the
      * workers touch so teardown drains them (they hold raw buffer pointers). Small inputs run inline.
+     * When the output span being written fits one CCD's LLC the chunks are submitted to the calling
+     * thread's CCD group (submit_to_group) so the cache-resident destination is written locally;
+     * otherwise they go to the whole pool exactly as before. The chunk count still assumes all
+     * t_count threads — group workers simply claim multiple chunks from the queue.
      * Mirrors linearalgebra_shared::launch_elementwise.
-     * @brief Threaded elementwise launcher.
+     * @brief Threaded elementwise launcher with CCD-local routing.
      * @param worker Callable taking (begin, end); copied into each task.
      * @param numel Total element count to cover.
+     * @param out_bytes Bytes of the output buffer actually written by the workers.
      * @param a First tensor the workers read.
      * @param b Second tensor the workers read.
      * @param out Tensor the workers write.
      */
     template<typename Worker>
-    void launch_compare(Worker&& worker, const size_t numel, const Tensor& a, const Tensor& b, const Tensor& out) {
+    void launch_compare(Worker&& worker, const size_t numel, const size_t out_bytes, const Tensor& a, const Tensor& b, const Tensor& out) {
         const auto t_count = static_cast<size_t>(IncludedCPUFeatures().threads);
         if (t_count <= 1 || numel <= t_count * 1024) {
             worker(0, numel);
@@ -104,6 +109,8 @@ namespace BeanTensor::Tensors::detail::compare_shared {
         auto& threadMgr = Threading::GetCPUThreadPool();
         std::vector<std::shared_future<void>> futures;
         const auto chunk = (numel + t_count - 1) / t_count;
+        const bool keep_local = KeepWorkLocal(out_bytes);
+        const auto group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
         for (auto t = size_t{0}; t < t_count; ++t) {
             const auto begin = t * chunk;
             if (begin >= numel) {
@@ -111,7 +118,11 @@ namespace BeanTensor::Tensors::detail::compare_shared {
             }
             // worker is captured BY VALUE: these futures outlive this call
             // (they land on the tensors), so a reference would dangle.
-            futures.push_back(threadMgr.submit([worker, begin, end = std::min(begin + chunk, numel)] { worker(begin, end); }, Threading::TaskPriority::Normal).share());
+            if (keep_local) {
+                futures.push_back(threadMgr.submit_to_group([worker, begin, end = std::min(begin + chunk, numel)] { worker(begin, end); }, group, Threading::TaskPriority::Normal).share());
+            } else {
+                futures.push_back(threadMgr.submit([worker, begin, end = std::min(begin + chunk, numel)] { worker(begin, end); }, Threading::TaskPriority::Normal).share());
+            }
         }
         a.give_futures(futures);
         b.give_futures(futures);

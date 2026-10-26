@@ -1,0 +1,38 @@
+# CI — CPU build + test matrix.
+# HIP/CUDA jobs intentionally absent: GitHub-hosted runners have no AMD/NVIDIA
+# GPUs, and this project's HIP test runs require the flock-serialized desktop
+# GPU gate (see gpu-test.sh and the project build notes). Compile/run coverage for GPU backends
+# stays local until a self-hosted runner exists.
+name: ci
+
+permissions:
+  contents: read
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cpu:
+    name: cpu-build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout v4
+
+      - name: Toolchain (cmake >= 4.2 required by CMakeLists, g++-14 for C++23)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-14
+          python3 -m pip install --user "cmake>=4.2"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure (CPU-only)
+        env:
+          CXX: g++-14
+        run: cmake -S . -B build -DUSE_HIP=OFF -DUSE_CUDA=OFF -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j "$(nproc)"
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

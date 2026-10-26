@@ -4,8 +4,8 @@
  * @brief CPU backend for softmax_ce.
  * Hosts the Tensor::softmax_ce method definition (mirrors how Tensor::matmul
  * lives in MatmulCPU.cpp).
- * @version 0.1.1
- * @date 2026-10-20
+ * @version 0.1.3
+ * @date 2026-10-25
  */
 #include <algorithm>
 #include <cmath>
@@ -141,16 +141,21 @@ namespace BeanTensor::Tensors::detail {
 
         /**
          * Chunks a row-indexed worker across the pool. Runs in the Tensor method, never inside a pool
-         * worker, so the caller waiting on the returned futures is legal.
-         * @brief Threaded row launcher. Returns the futures for the caller to drain.
+         * worker, so the caller waiting on the returned futures is legal. When the logits span the
+         * region touches fits one CCD's LLC the chunks are submitted to the calling thread's CCD group
+         * (submit_to_group) so the cache-resident activations are read locally; otherwise they go to the
+         * whole pool exactly as before. The chunk count still assumes all t_count threads — group
+         * workers simply claim multiple chunks from the queue.
+         * @brief Threaded row launcher with CCD-local routing. Returns the futures for the caller to drain.
          * @param rows Total row count to cover.
+         * @param work_bytes Bytes of the logits span the workers touch.
          * @param range_fn Callable taking (slot, begin, end); copied into each task.
          * @param t Logits tensor the workers read.
          * @param targets Targets tensor the workers read.
          * @return Futures of every submitted chunk; empty when the work ran inline.
          */
         template<typename RangeFn>
-        std::vector<std::shared_future<void>> launch_rows(const size_t rows, RangeFn&& range_fn, const Tensor& t, const Tensor& targets) {
+        std::vector<std::shared_future<void>> launch_rows(const size_t rows, const size_t work_bytes, RangeFn&& range_fn, const Tensor& t, const Tensor& targets) {
             const auto t_count = static_cast<size_t>(IncludedCPUFeatures().threads);
             if (t_count <= 1 || rows <= t_count * 8) {
                 range_fn(0, 0, rows);
@@ -159,6 +164,8 @@ namespace BeanTensor::Tensors::detail {
             auto& threadMgr = Threading::GetCPUThreadPool();
             std::vector<std::shared_future<void>> futures;
             const auto chunk = (rows + t_count - 1) / t_count;
+            const bool keep_local = KeepWorkLocal(work_bytes);
+            const auto group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
             auto slot = size_t{0};
             for (auto tid = size_t{0}; tid < t_count; ++tid) {
                 const auto begin = tid * chunk;
@@ -167,7 +174,11 @@ namespace BeanTensor::Tensors::detail {
                 }
                 // range_fn is captured by value; its own captures reference the
                 // caller's partials, which stay alive until drain() returns.
-                futures.push_back(threadMgr.submit([range_fn, slot, begin, end = std::min(begin + chunk, rows)] { range_fn(slot, begin, end); }, Threading::TaskPriority::Normal).share());
+                if (keep_local) {
+                    futures.push_back(threadMgr.submit_to_group([range_fn, slot, begin, end = std::min(begin + chunk, rows)] { range_fn(slot, begin, end); }, group, Threading::TaskPriority::Normal).share());
+                } else {
+                    futures.push_back(threadMgr.submit([range_fn, slot, begin, end = std::min(begin + chunk, rows)] { range_fn(slot, begin, end); }, Threading::TaskPriority::Normal).share());
+                }
                 ++slot;
             }
             t.give_futures(futures);
@@ -176,13 +187,28 @@ namespace BeanTensor::Tensors::detail {
         }
 
         /**
-         * Rethrows the first task error through future::get.
-         * @brief Drain futures on the caller thread.
+         * Drains EVERY future before rethrowing the first stored task error:
+         * a chunk's range_fn may reference the caller's stack (the partials
+         * vector), so the caller's frame must outlive ALL chunks even when one
+         * of them threw — rethrowing on the first get() would let the remaining
+         * chunks run against a destroyed stack frame.
+         * @brief Drain futures on the caller thread, rethrowing the first error after all join.
          * @param futures Futures to wait on.
          */
         void drain(const std::vector<std::shared_future<void>>& futures) {
+            auto first_error = std::exception_ptr{};
             for (const auto& f : futures) {
-                f.get();
+                try {
+                    f.get();
+                }
+                catch (...) {
+                    if (!first_error) {
+                        first_error = std::current_exception();
+                    }
+                }
+            }
+            if (first_error) {
+                std::rethrow_exception(first_error);
             }
         }
 
@@ -338,32 +364,32 @@ namespace BeanTensor::Tensors::detail {
         switch (t.dtype) {
             case DType::Float32: {
                 const auto* logits = static_cast<const float32_t*>(t.data) + t.offset;
-                drain(launch_rows(rows, [&](const size_t slot, const size_t b, const size_t e) { softmax_ce_rows<float32_t, float32_t>(logits, tgt_dtype, tgt_data, tgt_offset, cols_store, cols_eff, slot, b, e, partials); }, t, targets));
+                drain(launch_rows(rows, rows * cols_store * sizeof(float32_t), [&](const size_t slot, const size_t b, const size_t e) { softmax_ce_rows<float32_t, float32_t>(logits, tgt_dtype, tgt_data, tgt_offset, cols_store, cols_eff, slot, b, e, partials); }, t, targets));
                 break;
             }
             case DType::Float64: {
                 const auto* logits = static_cast<const float64_t*>(t.data) + t.offset;
-                drain(launch_rows(rows, [&](const size_t slot, const size_t b, const size_t e) { softmax_ce_rows<float64_t, float64_t>(logits, tgt_dtype, tgt_data, tgt_offset, cols_store, cols_eff, slot, b, e, partials); }, t, targets));
+                drain(launch_rows(rows, rows * cols_store * sizeof(float64_t), [&](const size_t slot, const size_t b, const size_t e) { softmax_ce_rows<float64_t, float64_t>(logits, tgt_dtype, tgt_data, tgt_offset, cols_store, cols_eff, slot, b, e, partials); }, t, targets));
                 break;
             }
             case DType::Float16: {
                 const auto* logits = static_cast<const float16_t*>(t.data) + t.offset;
-                drain(launch_rows(rows, [&](const size_t slot, const size_t b, const size_t e) { softmax_ce_rows<float16_t, float32_t>(logits, tgt_dtype, tgt_data, tgt_offset, cols_store, cols_eff, slot, b, e, partials); }, t, targets));
+                drain(launch_rows(rows, rows * cols_store * sizeof(float16_t), [&](const size_t slot, const size_t b, const size_t e) { softmax_ce_rows<float16_t, float32_t>(logits, tgt_dtype, tgt_data, tgt_offset, cols_store, cols_eff, slot, b, e, partials); }, t, targets));
                 break;
             }
             case DType::BFloat16: {
                 const auto* logits = static_cast<const bfloat16_t*>(t.data) + t.offset;
-                drain(launch_rows(rows, [&](const size_t slot, const size_t b, const size_t e) { softmax_ce_rows<bfloat16_t, float32_t>(logits, tgt_dtype, tgt_data, tgt_offset, cols_store, cols_eff, slot, b, e, partials); }, t, targets));
+                drain(launch_rows(rows, rows * cols_store * sizeof(bfloat16_t), [&](const size_t slot, const size_t b, const size_t e) { softmax_ce_rows<bfloat16_t, float32_t>(logits, tgt_dtype, tgt_data, tgt_offset, cols_store, cols_eff, slot, b, e, partials); }, t, targets));
                 break;
             }
             case DType::Float16x2: {
                 const auto* logits = static_cast<const float16x2_t*>(t.data) + t.offset;
-                drain(launch_rows(rows, [&](const size_t slot, const size_t b, const size_t e) { softmax_ce_rows<float16x2_t, float32_t>(logits, tgt_dtype, tgt_data, tgt_offset, cols_store, cols_eff, slot, b, e, partials); }, t, targets));
+                drain(launch_rows(rows, rows * cols_store * sizeof(float16x2_t), [&](const size_t slot, const size_t b, const size_t e) { softmax_ce_rows<float16x2_t, float32_t>(logits, tgt_dtype, tgt_data, tgt_offset, cols_store, cols_eff, slot, b, e, partials); }, t, targets));
                 break;
             }
             case DType::BFloat16x2: {
                 const auto* logits = static_cast<const bfloat16x2_t*>(t.data) + t.offset;
-                drain(launch_rows(rows, [&](const size_t slot, const size_t b, const size_t e) { softmax_ce_rows<bfloat16x2_t, float32_t>(logits, tgt_dtype, tgt_data, tgt_offset, cols_store, cols_eff, slot, b, e, partials); }, t, targets));
+                drain(launch_rows(rows, rows * cols_store * sizeof(bfloat16x2_t), [&](const size_t slot, const size_t b, const size_t e) { softmax_ce_rows<bfloat16x2_t, float32_t>(logits, tgt_dtype, tgt_data, tgt_offset, cols_store, cols_eff, slot, b, e, partials); }, t, targets));
                 break;
             }
             case DType::Int8: case DType::UInt8: case DType::Int16: case DType::UInt16:
@@ -376,7 +402,7 @@ namespace BeanTensor::Tensors::detail {
                  * @note Lambda subcall. Self-execution prohibited.
                  */
                 auto launch_int = [&]<typename T>(const T* logits) {
-                    drain(launch_rows(rows, [&](const size_t slot, const size_t b, const size_t e) { softmax_ce_rows<T, float64_t>(logits, tgt_dtype, tgt_data, tgt_offset, cols_store, cols_eff, slot, b, e, partials); }, t, targets));
+                    drain(launch_rows(rows, rows * cols_store * sizeof(T), [&](const size_t slot, const size_t b, const size_t e) { softmax_ce_rows<T, float64_t>(logits, tgt_dtype, tgt_data, tgt_offset, cols_store, cols_eff, slot, b, e, partials); }, t, targets));
                 };
                 switch (t.dtype) {
                     case DType::Int8: launch_int(static_cast<const int8_t*>(t.data) + t.offset); break;

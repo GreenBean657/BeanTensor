@@ -5,8 +5,8 @@
  * bias_add_g, softmax_ce_g, transpose_last2): half/packed/int4 lane widening
  * and packing, plus the threaded launchers used by more than one op.
  * Header-only: everything here is a template or inline.
- * @version 0.1
- * @date 2026-10-20
+ * @version 0.2
+ * @date 2026-10-25
  */
 #pragma once
 
@@ -194,13 +194,27 @@ namespace BeanTensor::Tensors::detail::autograd_shared {
     }
 
     /**
-     * Rethrows the first worker error encountered.
-     * @brief Drain futures on the caller thread.
+     * Drains EVERY future before rethrowing the first worker error: a chunk's
+     * worker may reference the caller's stack, so the caller's frame must
+     * outlive ALL chunks even when one threw — rethrowing on the first get()
+     * would let the rest run against a destroyed frame.
+     * @brief Drain futures on the caller thread, rethrowing the first error after all join.
      * @param futures Futures to wait on.
      */
     inline void drain(const std::vector<std::shared_future<void>>& futures) {
+        auto first_error = std::exception_ptr{};
         for (const auto& f : futures) {
-            f.get();
+            try {
+                f.get();
+            }
+            catch (...) {
+                if (!first_error) {
+                    first_error = std::current_exception();
+                }
+            }
+        }
+        if (first_error) {
+            std::rethrow_exception(first_error);
         }
     }
 }

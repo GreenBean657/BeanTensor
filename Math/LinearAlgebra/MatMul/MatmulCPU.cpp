@@ -2,8 +2,8 @@
  * @file MatmulCPU.cpp
  * @author GreenBean
  * @brief CPU backend for matmul.
- * @version 0.1
- * @date 2026-10-18
+ * @version 0.2
+ * @date 2026-10-25
  */
 #include <algorithm>
 #include <future>
@@ -385,7 +385,11 @@ namespace BeanTensor::Tensors::detail {
          * Splits the flattened (batch x row) unit space across the CPU thread pool; small products run inline.
          * Chunks are re-split at batch boundaries inside the worker. The shared futures are registered on all three tensors,
          * so freeing or syncing any of them drains the workers first, as the workers hold raw buffer pointers.
-         * @brief Batched, row-blocked GEMM launcher.
+         * When the C output span fits one CCD's LLC the chunks are submitted to the calling thread's CCD group
+         * (submit_to_group) so the cache-resident destination is written locally; otherwise they go to the whole
+         * pool exactly as before. The chunk count still assumes all t_count threads — group workers simply claim
+         * multiple chunks from the queue.
+         * @brief Batched, row-blocked GEMM launcher with CCD-local routing.
          * @tparam T Element type.
          * @param kernel Row kernel chosen for the dtype.
          * @param a_data A buffer, batch x m x k.
@@ -430,6 +434,8 @@ namespace BeanTensor::Tensors::detail {
             auto& threadMgr = Threading::GetCPUThreadPool();
             std::vector<std::shared_future<void>> futures;
             const auto chunk = (total + t_count - 1) / t_count;
+            const bool keep_local = KeepWorkLocal(total * n * sizeof(T));
+            const auto group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
             for (auto t = size_t{0}; t < t_count; ++t) {
                 const auto unit_begin = t * chunk;
                 if (unit_begin >= total) {
@@ -440,7 +446,11 @@ namespace BeanTensor::Tensors::detail {
                  * @note Lambda subcall. Self-execution prohibited.
                  * @brief Thread pool task for one chunk of GEMM units.
                  */
-                futures.push_back(threadMgr.submit([=] { worker(unit_begin, std::min(unit_begin + chunk, total)); }, Threading::TaskPriority::Normal).share());
+                if (keep_local) {
+                    futures.push_back(threadMgr.submit_to_group([=] { worker(unit_begin, std::min(unit_begin + chunk, total)); }, group, Threading::TaskPriority::Normal).share());
+                } else {
+                    futures.push_back(threadMgr.submit([=] { worker(unit_begin, std::min(unit_begin + chunk, total)); }, Threading::TaskPriority::Normal).share());
+                }
             }
             a.give_futures(futures);
             b.give_futures(futures);

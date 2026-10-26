@@ -5,8 +5,8 @@
  * Divergent twin of Math/Optimization/Adam/AdamCUDA.cu — the two backends are
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same fp32/fp64 compute widths, same RNE narrowing.
- * @version 0.1
- * @date 2026-10-23
+ * @version 0.2
+ * @date 2026-10-26
  */
 #if defined(USE_HIP)
 #include <cstdint>
@@ -56,10 +56,10 @@ namespace BeanTensor::Tensors::detail {
             const auto bc1_32 = static_cast<float32_t>(beta1_corr);
             const auto bc2_32 = static_cast<float32_t>(beta2_corr);
             const auto eps32 = static_cast<float32_t>(epsilon);
-            const auto omb1_32 = 1.0f - b1_32;
-            const auto omb2_32 = 1.0f - b2_32;
-            const auto omb1_64 = 1.0 - beta1;
-            const auto omb2_64 = 1.0 - beta2;
+            const float32_t omb1_32 = 1.0f - b1_32;
+            const float32_t omb2_32 = 1.0f - b2_32;
+            const float64_t omb1_64 = 1.0 - beta1;
+            const float64_t omb2_64 = 1.0 - beta2;
             for (size_t i = tid; i < numel; i += stride) {
                 if constexpr (std::is_same_v<T, float32_t>) {
                     const auto mm = __fmaf_rn(b1_32, m[i], omb1_32 * g[i]);

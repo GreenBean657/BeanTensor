@@ -6,12 +6,13 @@
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same fp32/fp64 compute widths, same RNE narrowing,
  * same fp64 integer accumulation with truncate-toward-zero + clamp narrowing.
- * @version 0.2
- * @date 2026-10-22
+ * @version 0.3
+ * @date 2026-10-25
  */
 #if defined(USE_HIP)
 #include <cstdint>
 #include <limits>
+#include <string>
 #include <type_traits>
 
 #include <hip/hip_runtime.h>
@@ -21,6 +22,7 @@
 #include "Tensor/Tensor.h"
 
 #include "Helpers/CPUThreading.h"
+#include "Helpers/KernelTune.h"
 
 namespace BeanTensor::Tensors::detail {
     using namespace reductions_gpu;
@@ -188,7 +190,7 @@ namespace BeanTensor::Tensors::detail {
          */
         template<typename T, typename Acc>
         __global__ void mean_partial_kernel(const T* __restrict__ data, Acc* __restrict__ partials, const size_t numel) {
-            __shared__ Acc shared[BT_GPU_THREADS];
+            auto* const shared = reduction_shared<Acc>();
             const auto tid = threadIdx.x;
             const size_t gid = threadIdx.x + blockIdx.x * blockDim.x;
             const size_t stride = blockDim.x * gridDim.x;
@@ -203,7 +205,7 @@ namespace BeanTensor::Tensors::detail {
             }
             shared[tid] = acc;
             __syncthreads();
-            for (auto s = BT_GPU_THREADS / 2; s > 0; s >>= 1) {
+            for (auto s = blockDim.x / 2; s > 0; s >>= 1) {
                 if (tid < s) {
                     shared[tid] = mean_add(shared[tid], shared[tid + s]);
                 }
@@ -226,7 +228,7 @@ namespace BeanTensor::Tensors::detail {
          */
         template<typename T, typename Acc>
         __global__ void mean_final_kernel(const Acc* __restrict__ partials, const size_t count, T* __restrict__ out, const size_t numel) {
-            __shared__ Acc shared[BT_GPU_THREADS];
+            auto* const shared = reduction_shared<Acc>();
             const auto tid = threadIdx.x;
             Acc acc;
             if constexpr (std::is_same_v<Acc, float2>) {
@@ -234,12 +236,12 @@ namespace BeanTensor::Tensors::detail {
             } else {
                 acc = mean_zero_of<Acc>::value;
             }
-            for (auto i = tid; i < count; i += BT_GPU_THREADS) {
+            for (auto i = tid; i < count; i += blockDim.x) {
                 acc = mean_add(acc, partials[i]);
             }
             shared[tid] = acc;
             __syncthreads();
-            for (auto s = BT_GPU_THREADS / 2; s > 0; s >>= 1) {
+            for (auto s = blockDim.x / 2; s > 0; s >>= 1) {
                 if (tid < s) {
                     shared[tid] = mean_add(shared[tid], shared[tid + s]);
                 }
@@ -260,12 +262,15 @@ namespace BeanTensor::Tensors::detail {
          * @param out Output element.
          */
         template<typename T, typename Acc>
-        __host__ void run_mean(const T* data, const size_t numel, T* out) {
-            const auto blocks = grid_for(numel);
+        __host__ void run_mean(const T* data, const size_t numel, T* out, const size_t bt) {
+            if (bt < 1 || bt > BT_GPU_MAX_BLOCK_SIZE || (bt & (bt - 1)) != 0) {
+                throw ErrorHandling::InvalidKernelBlockSize(std::to_string(bt));
+            }
+            const auto blocks = grid_for(numel, bt);
             Acc* partials = nullptr;
             HIP_CHECK_ERROR(hipMalloc(&partials, blocks * sizeof(Acc)));
-            mean_partial_kernel<T, Acc><<<blocks, BT_GPU_THREADS>>>(data, partials, numel);
-            mean_final_kernel<T, Acc><<<1, BT_GPU_THREADS>>>(partials, blocks, out, numel);
+            mean_partial_kernel<T, Acc><<<blocks, bt, bt * sizeof(Acc)>>>(data, partials, numel);
+            mean_final_kernel<T, Acc><<<1, bt, bt * sizeof(Acc)>>>(partials, blocks, out, numel);
             HIP_CHECK_ERROR(hipGetLastError());
             HIP_CHECK_ERROR(hipFree(partials));
         }
@@ -293,23 +298,24 @@ namespace BeanTensor::Tensors::detail {
          * @note Lambda subcall. Self-execution prohibited.
          */
         const auto worker = [=] {
+            const auto bt = BeanTensor::KernelTune::block_size_for(BeanTensor::KernelTune::GpuFamily::Reduction, numel);
             using DType = DataTypes::DType;
             switch (dtype) {
-                case DType::Float32: run_mean<float32_t, float32_t>(static_cast<const float32_t*>(t_data) + t_offset, numel, static_cast<float32_t*>(out_data)); break;
-                case DType::Float64: run_mean<float64_t, float64_t>(static_cast<const float64_t*>(t_data) + t_offset, numel, static_cast<float64_t*>(out_data)); break;
-                case DType::Float16: run_mean<float16_t, float32_t>(static_cast<const float16_t*>(t_data) + t_offset, numel, static_cast<float16_t*>(out_data)); break;
-                case DType::BFloat16: run_mean<bfloat16_t, float32_t>(static_cast<const bfloat16_t*>(t_data) + t_offset, numel, static_cast<bfloat16_t*>(out_data)); break;
-                case DType::Float16x2: run_mean<float16x2_t, float2>(static_cast<const float16x2_t*>(t_data) + t_offset, numel, static_cast<float16x2_t*>(out_data)); break;
-                case DType::BFloat16x2: run_mean<bfloat16x2_t, float2>(static_cast<const bfloat16x2_t*>(t_data) + t_offset, numel, static_cast<bfloat16x2_t*>(out_data)); break;
-                case DType::Int8: run_mean<int8_t, float64_t>(static_cast<const int8_t*>(t_data) + t_offset, numel, static_cast<int8_t*>(out_data)); break;
-                case DType::UInt8: run_mean<uint8_t, float64_t>(static_cast<const uint8_t*>(t_data) + t_offset, numel, static_cast<uint8_t*>(out_data)); break;
-                case DType::Int16: run_mean<int16_t, float64_t>(static_cast<const int16_t*>(t_data) + t_offset, numel, static_cast<int16_t*>(out_data)); break;
-                case DType::UInt16: run_mean<uint16_t, float64_t>(static_cast<const uint16_t*>(t_data) + t_offset, numel, static_cast<uint16_t*>(out_data)); break;
-                case DType::Int32: run_mean<int32_t, float64_t>(static_cast<const int32_t*>(t_data) + t_offset, numel, static_cast<int32_t*>(out_data)); break;
-                case DType::UInt32: run_mean<uint32_t, float64_t>(static_cast<const uint32_t*>(t_data) + t_offset, numel, static_cast<uint32_t*>(out_data)); break;
-                case DType::Int64: run_mean<int64_t, float64_t>(static_cast<const int64_t*>(t_data) + t_offset, numel, static_cast<int64_t*>(out_data)); break;
-                case DType::UInt64: run_mean<uint64_t, float64_t>(static_cast<const uint64_t*>(t_data) + t_offset, numel, static_cast<uint64_t*>(out_data)); break;
-                case DType::Int4x2: run_mean<int4x2_t, float2>(static_cast<const int4x2_t*>(t_data) + t_offset, numel, static_cast<int4x2_t*>(out_data)); break;
+                case DType::Float32: run_mean<float32_t, float32_t>(static_cast<const float32_t*>(t_data) + t_offset, numel, static_cast<float32_t*>(out_data), bt); break;
+                case DType::Float64: run_mean<float64_t, float64_t>(static_cast<const float64_t*>(t_data) + t_offset, numel, static_cast<float64_t*>(out_data), bt); break;
+                case DType::Float16: run_mean<float16_t, float32_t>(static_cast<const float16_t*>(t_data) + t_offset, numel, static_cast<float16_t*>(out_data), bt); break;
+                case DType::BFloat16: run_mean<bfloat16_t, float32_t>(static_cast<const bfloat16_t*>(t_data) + t_offset, numel, static_cast<bfloat16_t*>(out_data), bt); break;
+                case DType::Float16x2: run_mean<float16x2_t, float2>(static_cast<const float16x2_t*>(t_data) + t_offset, numel, static_cast<float16x2_t*>(out_data), bt); break;
+                case DType::BFloat16x2: run_mean<bfloat16x2_t, float2>(static_cast<const bfloat16x2_t*>(t_data) + t_offset, numel, static_cast<bfloat16x2_t*>(out_data), bt); break;
+                case DType::Int8: run_mean<int8_t, float64_t>(static_cast<const int8_t*>(t_data) + t_offset, numel, static_cast<int8_t*>(out_data), bt); break;
+                case DType::UInt8: run_mean<uint8_t, float64_t>(static_cast<const uint8_t*>(t_data) + t_offset, numel, static_cast<uint8_t*>(out_data), bt); break;
+                case DType::Int16: run_mean<int16_t, float64_t>(static_cast<const int16_t*>(t_data) + t_offset, numel, static_cast<int16_t*>(out_data), bt); break;
+                case DType::UInt16: run_mean<uint16_t, float64_t>(static_cast<const uint16_t*>(t_data) + t_offset, numel, static_cast<uint16_t*>(out_data), bt); break;
+                case DType::Int32: run_mean<int32_t, float64_t>(static_cast<const int32_t*>(t_data) + t_offset, numel, static_cast<int32_t*>(out_data), bt); break;
+                case DType::UInt32: run_mean<uint32_t, float64_t>(static_cast<const uint32_t*>(t_data) + t_offset, numel, static_cast<uint32_t*>(out_data), bt); break;
+                case DType::Int64: run_mean<int64_t, float64_t>(static_cast<const int64_t*>(t_data) + t_offset, numel, static_cast<int64_t*>(out_data), bt); break;
+                case DType::UInt64: run_mean<uint64_t, float64_t>(static_cast<const uint64_t*>(t_data) + t_offset, numel, static_cast<uint64_t*>(out_data), bt); break;
+                case DType::Int4x2: run_mean<int4x2_t, float2>(static_cast<const int4x2_t*>(t_data) + t_offset, numel, static_cast<int4x2_t*>(out_data), bt); break;
                 [[unlikely]] default: throw ErrorHandling::NotImplemented();
             }
             // run_mean's hipFree already synced the default stream.

@@ -7,8 +7,8 @@
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same fp32/fp64 compute widths, same RNE narrowing,
  * same NaN-wins argmax rule, same uint64 wrap integer sums.
- * @version 0.1
- * @date 2026-10-22
+ * @version 0.2
+ * @date 2026-10-25
  */
 #pragma once
 
@@ -39,6 +39,18 @@ namespace BeanTensor::Tensors::detail::reductions_gpu {
      */
     [[nodiscard]] inline __host__ size_t grid_for(const size_t numel) {
         const auto blocks = (numel + BT_GPU_THREADS - 1) / BT_GPU_THREADS;
+        return blocks < 1 ? 1 : blocks > BT_GPU_MAX_BLOCKS ? BT_GPU_MAX_BLOCKS : blocks;
+    }
+
+    /**
+     * Runtime-block-size variant, clamped to [1, BT_GPU_MAX_BLOCKS].
+     * @brief Block count for a grid-stride kernel using a caller-supplied block size.
+     * @param numel Element count to cover.
+     * @param block_size Threads per block (already capped by the caller at 1024).
+     * @return Number of blocks to launch.
+     */
+    [[nodiscard]] inline __host__ size_t grid_for(const size_t numel, const size_t block_size) {
+        const auto blocks = (numel + block_size - 1) / block_size;
         return blocks < 1 ? 1 : blocks > BT_GPU_MAX_BLOCKS ? BT_GPU_MAX_BLOCKS : blocks;
     }
 

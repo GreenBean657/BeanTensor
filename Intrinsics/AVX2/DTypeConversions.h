@@ -1,9 +1,11 @@
 /**
  * @file DTypeConversions.h
  * @author GreenBean
- * @brief AVX2 dtype conversion kernel declarations.
- * @version 0.1
- * @date 2026-10-14
+ * @brief AVX2 dtype conversion kernel declarations. Kernels gate non-temporal
+ * stores on alignment plus a destination-size threshold, open with a scalar
+ * alignment prologue, and submit cache-sized chunks to the current CCD group.
+ * @version 0.2
+ * @date 2026-10-24
  */
 #pragma once
 

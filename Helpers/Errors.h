@@ -2,12 +2,13 @@
  * @file Errors.h
  * @author GreenBean
  * @brief ErrorHandling exception types and GPU API error-check macros.
- * @version 0.4
- * @date 2026-10-23
+ * @version 0.7
+ * @date 2026-10-26
  */
 #pragma once
 
 #include <stdexcept>
+#include <string>
 
 #if defined(USE_HIP)
 #include <hip/hip_runtime.h>
@@ -42,6 +43,26 @@ namespace BeanTensor::ErrorHandling {
          */
         OutOfMemory() = default;
     };
+
+    class CacheWriteFailed : public std::runtime_error {
+    public:
+        CacheWriteFailed() = delete;
+        /**
+         * @brief Exception thrown when the kernel-tuning cache file cannot be written.
+         * @param path Path of the cache file that could not be written.
+         */
+        explicit CacheWriteFailed(const std::string& path) : std::runtime_error("Failed to write kernel-tuning cache file: " + path) { }
+    };
+    class InvalidKernelBlockSize final : public std::runtime_error {
+    public:
+        InvalidKernelBlockSize() = delete;
+        /**
+         * @brief Exception thrown when a GPU kernel is launched with an invalid block size.
+         * @param detail Description of the invalid block size.
+         */
+        explicit InvalidKernelBlockSize(const std::string& detail) : std::runtime_error("InvalidKernelBlockSize: " + detail) { }
+    };
+
     class CPUIllegalInstruction : public std::logic_error {
     public:
         CPUIllegalInstruction() = delete;
@@ -88,6 +109,88 @@ namespace BeanTensor::ErrorHandling {
          * @param message Library name and status text.
          */
         explicit GPULibraryError(const std::string& message) : std::runtime_error(message) { }
+    };
+
+    class GPUError : public std::runtime_error {
+    public:
+        GPUError() = delete;
+        /**
+         * @brief Base/fallback exception for the GPU API error family.
+         * Derived types supply their own class-name prefix in @p message; the
+         * fallback path in throw_gpu_error prefixes "GPUError: " itself.
+         * @param message Fully formatted error message (including any prefix).
+         */
+        explicit GPUError(const std::string& message) : std::runtime_error(message) { }
+    };
+
+    class GPUOutOfMemory final : public GPUError {
+    public:
+        GPUOutOfMemory() = delete;
+        /**
+         * @brief Exception thrown when a GPU allocation request cannot be satisfied.
+         * @param detail Backend error string and context.
+         */
+        explicit GPUOutOfMemory(const std::string& detail) : GPUError("GPUOutOfMemory: " + detail) { }
+    };
+
+    class GPUIllegalAddress final : public GPUError {
+    public:
+        GPUIllegalAddress() = delete;
+        /**
+         * @brief Exception thrown when a GPU kernel accesses an illegal address.
+         * @param detail Backend error string and context.
+         */
+        explicit GPUIllegalAddress(const std::string& detail) : GPUError("GPUIllegalAddress: " + detail) { }
+    };
+
+    class GPULaunchFailure final : public GPUError {
+    public:
+        GPULaunchFailure() = delete;
+        /**
+         * @brief Exception thrown when a GPU kernel launch fails.
+         * @param detail Backend error string and context.
+         */
+        explicit GPULaunchFailure(const std::string& detail) : GPUError("GPULaunchFailure: " + detail) { }
+    };
+
+    class GPUInvalidValue final : public GPUError {
+    public:
+        GPUInvalidValue() = delete;
+        /**
+         * @brief Exception thrown when a GPU API call receives an invalid argument.
+         * @param detail Backend error string and context.
+         */
+        explicit GPUInvalidValue(const std::string& detail) : GPUError("GPUInvalidValue: " + detail) { }
+    };
+
+    class GPUNotInitialized final : public GPUError {
+    public:
+        GPUNotInitialized() = delete;
+        /**
+         * @brief Exception thrown when a GPU API call is made before the runtime is initialized.
+         * @param detail Backend error string and context.
+         */
+        explicit GPUNotInitialized(const std::string& detail) : GPUError("GPUNotInitialized: " + detail) { }
+    };
+
+    class ThreadPoolStopped final : public std::runtime_error {
+    public:
+        ThreadPoolStopped() = delete;
+        /**
+         * @brief Exception thrown when a task is submitted to a stopped thread pool.
+         * @param detail Which submit path was used.
+         */
+        explicit ThreadPoolStopped(const std::string& detail) : std::runtime_error("ThreadPoolStopped: " + detail) { }
+    };
+
+    class ThreadingUnsupported final : public std::runtime_error {
+    public:
+        ThreadingUnsupported() = delete;
+        /**
+         * @brief Exception thrown when the build cannot support thread-safe static initialization.
+         * @param detail What the caller must change.
+         */
+        explicit ThreadingUnsupported(const std::string& detail) : std::runtime_error("ThreadingUnsupported: " + detail) { }
     };
 
     class MismatchedShapes : public std::invalid_argument {
@@ -172,27 +275,68 @@ namespace BeanTensor::ErrorHandling {
          */
         EmptyModule() : std::logic_error("Module has no child modules to run") { }
     };
+
+    namespace detail {
+        /**
+         * @brief Map a GPU API error code to the typed exception family and throw.
+         * @param code Backend error code cast to int32_t.
+         * @param api Stringified GPU API expression that failed.
+         * @param file Source file where the check occurred.
+         * @param line Source line where the check occurred.
+         */
+        [[noreturn]] inline void throw_gpu_error(const int32_t code, const char* api, const char* file, const int32_t line) {
+            const auto detail = std::string(api) + " failed at " + file + ":" + std::to_string(line) + " - " +
+#if defined(USE_HIP)
+                                hipGetErrorString(static_cast<hipError_t>(code));
+#elif defined(USE_CUDA)
+                                cudaGetErrorString(static_cast<cudaError_t>(code));
+#else
+                                "code " + std::to_string(code);
+#endif
+#if defined(USE_HIP)
+            switch (static_cast<hipError_t>(code)) {
+                case hipErrorOutOfMemory: throw GPUOutOfMemory(detail);
+                case hipErrorIllegalAddress: throw GPUIllegalAddress(detail);
+                case hipErrorLaunchFailure: throw GPULaunchFailure(detail);
+                case hipErrorInvalidValue: throw GPUInvalidValue(detail);
+                case hipErrorNotInitialized: throw GPUNotInitialized(detail);
+                default: throw GPUError("GPUError: " + detail);
+            }
+#elif defined(USE_CUDA)
+            switch (static_cast<cudaError_t>(code)) {
+                case cudaErrorMemoryAllocation: throw GPUOutOfMemory(detail);
+                case cudaErrorIllegalAddress: throw GPUIllegalAddress(detail);
+                case cudaErrorLaunchFailure: throw GPULaunchFailure(detail);
+                case cudaErrorInvalidValue: throw GPUInvalidValue(detail);
+                case cudaErrorInitializationError: throw GPUNotInitialized(detail);
+                default: throw GPUError("GPUError: " + detail);
+            }
+#else
+            static_cast<void>(code);
+            throw GPUError("GPUError: " + detail);
+#endif
+        }
+    }
 }
 
 #if defined(USE_HIP)
-#define HIP_CHECK_ERROR(err) \
-    if ((err) != hipSuccess) { \
-        if ((err) == hipErrorMemoryAllocation) { \
-        throw BeanTensor::ErrorHandling::OutOfMemory(); \
+#define HIP_CHECK_ERROR(expr) \
+    do { \
+        const auto bt_gpu_err = (expr); \
+        if (bt_gpu_err != hipSuccess) { \
+            BeanTensor::ErrorHandling::detail::throw_gpu_error(static_cast<int32_t>(bt_gpu_err), #expr, __FILE__, __LINE__); \
         } \
-        throw std::runtime_error(std::string("HIP Error: ") + hipGetErrorString(err)); \
-    }
+    } while (0)
 #endif
 
 #if defined(USE_CUDA)
-#define CUDA_CHECK_ERROR(err) { \
-    if ((err) != cudaSuccess) { \
-    if ((err) == cudaErrorMemoryAllocation) { \
-    throw BeanTensor::ErrorHandling::OutOfMemory(); \
-    } \
-    throw std::runtime_error(std::string("CUDA Error: ") + cudaGetErrorString(err)); \
-    } \
-}
+#define CUDA_CHECK_ERROR(expr) \
+    do { \
+        const auto bt_gpu_err = (expr); \
+        if (bt_gpu_err != cudaSuccess) { \
+            BeanTensor::ErrorHandling::detail::throw_gpu_error(static_cast<int32_t>(bt_gpu_err), #expr, __FILE__, __LINE__); \
+        } \
+    } while (0)
 #endif
 
 // BLAS status checks. The status types/stringify functions resolve at the use

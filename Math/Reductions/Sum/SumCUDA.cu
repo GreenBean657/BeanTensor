@@ -6,12 +6,14 @@
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same fp32/fp64 compute widths, same RNE narrowing,
  * same uint64 wrap integer sums.
- * @version 0.2
- * @date 2026-10-20
+ * @version 0.3
+ * @date 2026-10-25
  */
 #if defined(USE_CUDA)
+#include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <type_traits>
 
 #include <cuda_fp16.h>
@@ -22,6 +24,7 @@
 #include "Tensor/Tensor.h"
 
 #include "Helpers/CPUThreading.h"
+#include "Helpers/KernelTune.h"
 
 namespace BeanTensor::Tensors::detail {
     using namespace reductions_gpu;
@@ -134,6 +137,32 @@ namespace BeanTensor::Tensors::detail {
         template<> struct acc_zero_of<uint64_t> { static constexpr uint64_t value = 0; };
 
         /**
+         * Dynamic shared memory is allocated untyped; each kernel casts to its Acc.
+         * @brief Typed pointer to the block's dynamic shared memory.
+         * @tparam Acc Accumulator type for this reduction.
+         * @return Pointer to the launch-supplied shared memory.
+         */
+        template<typename Acc>
+        __device__ __forceinline__ Acc* dyn_shared() {
+            extern __shared__ uint8_t s_base[];
+            return reinterpret_cast<Acc*>(s_base);
+        }
+
+        /**
+         * The tree reduction requires a power-of-two block size in [1, 1024].
+         * @brief Validate the runtime block size before launch.
+         * @param bt Block size returned by KernelTune.
+         * @return The same block size if valid.
+         * @throws ErrorHandling::InvalidKernelBlockSize if out of range or not a power of two.
+         */
+        [[nodiscard]] __host__ size_t validate_block_size(const size_t bt) {
+            if (bt < 1 || bt > 1024 || (bt & (bt - 1)) != 0) {
+                throw ErrorHandling::InvalidKernelBlockSize("block size must be a power of two in [1, 1024], got " + std::to_string(bt));
+            }
+            return bt;
+        }
+
+        /**
          * Grid-stride per-thread partials, shared-memory tree reduction per block, one partial per block.
          * @note Stage 1 of the two-stage sum.
          * @brief Sum partial kernel (all dtypes).
@@ -143,7 +172,7 @@ namespace BeanTensor::Tensors::detail {
          */
         template<typename T, typename Acc>
         __global__ void sum_partial_kernel(const T* __restrict__ data, Acc* __restrict__ partials, const size_t numel) {
-            __shared__ Acc shared[BT_GPU_THREADS];
+            auto* const s_shared = dyn_shared<Acc>();
             const auto tid = threadIdx.x;
             const size_t gid = threadIdx.x + blockIdx.x * blockDim.x;
             const size_t stride = blockDim.x * gridDim.x;
@@ -158,16 +187,16 @@ namespace BeanTensor::Tensors::detail {
             for (size_t i = gid; i < numel; i += stride) {
                 acc = acc_add(acc, widen_acc(data[i]));
             }
-            shared[tid] = acc;
+            s_shared[tid] = acc;
             __syncthreads();
-            for (auto s = BT_GPU_THREADS / 2; s > 0; s >>= 1) {
+            for (auto s = blockDim.x / 2; s > 0; s >>= 1) {
                 if (tid < s) {
-                    shared[tid] = acc_add(shared[tid], shared[tid + s]);
+                    s_shared[tid] = acc_add(s_shared[tid], s_shared[tid + s]);
                 }
                 __syncthreads();
             }
             if (tid == 0) {
-                partials[blockIdx.x] = shared[0];
+                partials[blockIdx.x] = s_shared[0];
             }
         }
 
@@ -204,7 +233,7 @@ namespace BeanTensor::Tensors::detail {
          */
         template<typename T, typename Acc>
         __global__ void sum_final_kernel(const Acc* __restrict__ partials, const size_t count, T* __restrict__ out) {
-            __shared__ Acc shared[BT_GPU_THREADS];
+            auto* const s_shared = dyn_shared<Acc>();
             const auto tid = threadIdx.x;
             auto acc = Acc{};
             if constexpr (std::is_same_v<Acc, float2>) {
@@ -214,19 +243,19 @@ namespace BeanTensor::Tensors::detail {
             } else {
                 acc = acc_zero_of<Acc>::value;
             }
-            for (auto i = tid; i < count; i += BT_GPU_THREADS) {
+            for (auto i = tid; i < count; i += blockDim.x) {
                 acc = acc_add(acc, partials[i]);
             }
-            shared[tid] = acc;
+            s_shared[tid] = acc;
             __syncthreads();
-            for (auto s = BT_GPU_THREADS / 2; s > 0; s >>= 1) {
+            for (auto s = blockDim.x / 2; s > 0; s >>= 1) {
                 if (tid < s) {
-                    shared[tid] = acc_add(shared[tid], shared[tid + s]);
+                    s_shared[tid] = acc_add(s_shared[tid], s_shared[tid + s]);
                 }
                 __syncthreads();
             }
             if (tid == 0) {
-                store_sum<T>(out, shared[0]);
+                store_sum<T>(out, s_shared[0]);
             }
         }
 
@@ -238,12 +267,14 @@ namespace BeanTensor::Tensors::detail {
          * @param out Output element.
          */
         template<typename T, typename Acc>
-        __host__ void run_sum(const T* data, const size_t numel, T* out) {
-            const auto blocks = grid_for(numel);
+        __host__ void run_sum(const T* data, const size_t numel, const size_t bt, T* out) {
+            const auto blocks = grid_for(numel, bt);
             Acc* partials = nullptr;
             CUDA_CHECK_ERROR(cudaMalloc(&partials, blocks * sizeof(Acc)));
-            sum_partial_kernel<T, Acc><<<blocks, BT_GPU_THREADS>>>(data, partials, numel);
-            sum_final_kernel<T, Acc><<<1, BT_GPU_THREADS>>>(partials, blocks, out);
+            // Largest Acc (float2/uint2) is 8 B; 1024 * 8 B = 8 KB, under the 48 KB default.
+            const auto shared_bytes = bt * sizeof(Acc);
+            sum_partial_kernel<T, Acc><<<blocks, bt, shared_bytes>>>(data, partials, numel);
+            sum_final_kernel<T, Acc><<<1, bt, shared_bytes>>>(partials, blocks, out);
             CUDA_CHECK_ERROR(cudaGetLastError());
             CUDA_CHECK_ERROR(cudaFree(partials));
         }
@@ -271,23 +302,24 @@ namespace BeanTensor::Tensors::detail {
          * @note Lambda subcall. Self-execution prohibited.
          */
         const auto worker = [=] {
+            const auto bt = validate_block_size(BeanTensor::KernelTune::block_size_for(BeanTensor::KernelTune::GpuFamily::Reduction, numel));
             using DType = DataTypes::DType;
             switch (dtype) {
-                case DType::Float32: run_sum<float32_t, float32_t>(static_cast<const float32_t*>(t_data) + t_offset, numel, static_cast<float32_t*>(out_data)); break;
-                case DType::Float64: run_sum<float64_t, float64_t>(static_cast<const float64_t*>(t_data) + t_offset, numel, static_cast<float64_t*>(out_data)); break;
-                case DType::Float16: run_sum<float16_t, float32_t>(static_cast<const float16_t*>(t_data) + t_offset, numel, static_cast<float16_t*>(out_data)); break;
-                case DType::BFloat16: run_sum<bfloat16_t, float32_t>(static_cast<const bfloat16_t*>(t_data) + t_offset, numel, static_cast<bfloat16_t*>(out_data)); break;
-                case DType::Float16x2: run_sum<float16x2_t, float2>(static_cast<const float16x2_t*>(t_data) + t_offset, numel, static_cast<float16x2_t*>(out_data)); break;
-                case DType::BFloat16x2: run_sum<bfloat16x2_t, float2>(static_cast<const bfloat16x2_t*>(t_data) + t_offset, numel, static_cast<bfloat16x2_t*>(out_data)); break;
-                case DType::Int8: run_sum<int8_t, uint64_t>(static_cast<const int8_t*>(t_data) + t_offset, numel, static_cast<int8_t*>(out_data)); break;
-                case DType::UInt8: run_sum<uint8_t, uint64_t>(static_cast<const uint8_t*>(t_data) + t_offset, numel, static_cast<uint8_t*>(out_data)); break;
-                case DType::Int16: run_sum<int16_t, uint64_t>(static_cast<const int16_t*>(t_data) + t_offset, numel, static_cast<int16_t*>(out_data)); break;
-                case DType::UInt16: run_sum<uint16_t, uint64_t>(static_cast<const uint16_t*>(t_data) + t_offset, numel, static_cast<uint16_t*>(out_data)); break;
-                case DType::Int32: run_sum<int32_t, uint64_t>(static_cast<const int32_t*>(t_data) + t_offset, numel, static_cast<int32_t*>(out_data)); break;
-                case DType::UInt32: run_sum<uint32_t, uint64_t>(static_cast<const uint32_t*>(t_data) + t_offset, numel, static_cast<uint32_t*>(out_data)); break;
-                case DType::Int64: run_sum<int64_t, uint64_t>(static_cast<const int64_t*>(t_data) + t_offset, numel, static_cast<int64_t*>(out_data)); break;
-                case DType::UInt64: run_sum<uint64_t, uint64_t>(static_cast<const uint64_t*>(t_data) + t_offset, numel, static_cast<uint64_t*>(out_data)); break;
-                case DType::Int4x2: run_sum<int4x2_t, uint2>(static_cast<const int4x2_t*>(t_data) + t_offset, numel, static_cast<int4x2_t*>(out_data)); break;
+                case DType::Float32: run_sum<float32_t, float32_t>(static_cast<const float32_t*>(t_data) + t_offset, numel, bt, static_cast<float32_t*>(out_data)); break;
+                case DType::Float64: run_sum<float64_t, float64_t>(static_cast<const float64_t*>(t_data) + t_offset, numel, bt, static_cast<float64_t*>(out_data)); break;
+                case DType::Float16: run_sum<float16_t, float32_t>(static_cast<const float16_t*>(t_data) + t_offset, numel, bt, static_cast<float16_t*>(out_data)); break;
+                case DType::BFloat16: run_sum<bfloat16_t, float32_t>(static_cast<const bfloat16_t*>(t_data) + t_offset, numel, bt, static_cast<bfloat16_t*>(out_data)); break;
+                case DType::Float16x2: run_sum<float16x2_t, float2>(static_cast<const float16x2_t*>(t_data) + t_offset, numel, bt, static_cast<float16x2_t*>(out_data)); break;
+                case DType::BFloat16x2: run_sum<bfloat16x2_t, float2>(static_cast<const bfloat16x2_t*>(t_data) + t_offset, numel, bt, static_cast<bfloat16x2_t*>(out_data)); break;
+                case DType::Int8: run_sum<int8_t, uint64_t>(static_cast<const int8_t*>(t_data) + t_offset, numel, bt, static_cast<int8_t*>(out_data)); break;
+                case DType::UInt8: run_sum<uint8_t, uint64_t>(static_cast<const uint8_t*>(t_data) + t_offset, numel, bt, static_cast<uint8_t*>(out_data)); break;
+                case DType::Int16: run_sum<int16_t, uint64_t>(static_cast<const int16_t*>(t_data) + t_offset, numel, bt, static_cast<int16_t*>(out_data)); break;
+                case DType::UInt16: run_sum<uint16_t, uint64_t>(static_cast<const uint16_t*>(t_data) + t_offset, numel, bt, static_cast<uint16_t*>(out_data)); break;
+                case DType::Int32: run_sum<int32_t, uint64_t>(static_cast<const int32_t*>(t_data) + t_offset, numel, bt, static_cast<int32_t*>(out_data)); break;
+                case DType::UInt32: run_sum<uint32_t, uint64_t>(static_cast<const uint32_t*>(t_data) + t_offset, numel, bt, static_cast<uint32_t*>(out_data)); break;
+                case DType::Int64: run_sum<int64_t, uint64_t>(static_cast<const int64_t*>(t_data) + t_offset, numel, bt, static_cast<int64_t*>(out_data)); break;
+                case DType::UInt64: run_sum<uint64_t, uint64_t>(static_cast<const uint64_t*>(t_data) + t_offset, numel, bt, static_cast<uint64_t*>(out_data)); break;
+                case DType::Int4x2: run_sum<int4x2_t, uint2>(static_cast<const int4x2_t*>(t_data) + t_offset, numel, bt, static_cast<int4x2_t*>(out_data)); break;
                 [[unlikely]] default: throw ErrorHandling::NotImplemented();
             }
             // run_sum's cudaFree already synced the default stream.

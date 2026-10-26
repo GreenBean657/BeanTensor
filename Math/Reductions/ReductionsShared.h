@@ -4,15 +4,17 @@
  * @brief Shared scalar/packed lane helpers, threaded reduction launcher, and
  * function-pointer typedefs used by the reduction ops (sum, argmax).
  * Header-only: everything here is a template or inline.
- * @version 0.1
- * @date 2026-10-22
+ * @version 0.3
+ * @date 2026-10-25
  */
 #pragma once
 
 #include <algorithm>
 #include <cstdint>
 #include <future>
+#include <limits>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "Tensor/Tensor.h"
@@ -129,16 +131,25 @@ namespace BeanTensor::Tensors::detail::reductions_shared {
     }
 
     /**
+     * CCD-aware twin of the 3-arg launch_reduce. Reductions write tiny outputs
+     * but read the whole input, and cross-CCD reads are the cheap direction
+     * (~15-20% penalty vs ~8x for cross-CCD writes), so large inputs want every
+     * thread's memory bandwidth. The gate is therefore the INPUT span, not the
+     * output: chunks are restricted only when the input being reduced fits one
+     * CCD's LLC, and to the SUBMITTING thread's CCD group (that CCD typically
+     * produced or last warmed the input). The chunk count still assumes all
+     * t_count threads — group workers simply claim multiple chunks from the queue.
      * Per-chunk partials are merged on the CALLER thread (runs in the Tensor method, never inside a pool worker,
      * so waiting is legal). Deterministic merge: partials combine in chunk order. Small inputs run inline.
-     * @brief Threaded reduction launcher, chunks a reduction range worker across the pool.
+     * @brief Threaded reduction launcher with CCD-local routing by input span.
      * @param numel Element count to cover.
      * @param range_fn Callable taking (slot, begin, end); slot indexes the caller's partials.
      * @param t Tensor receiving the futures.
+     * @param reduce_bytes Size in bytes of the input span the workers read.
      * @return Futures for the caller to drain.
      */
     template<typename RangeFn>
-    std::vector<std::shared_future<void>> launch_reduce(const size_t numel, RangeFn&& range_fn, const Tensor& t) {
+    std::vector<std::shared_future<void>> launch_reduce(const size_t numel, RangeFn&& range_fn, const Tensor& t, const size_t reduce_bytes) {
         const auto t_count = static_cast<size_t>(IncludedCPUFeatures().threads);
         if (t_count <= 1 || numel <= t_count * 1024) {
             range_fn(0, 0, numel);
@@ -147,6 +158,8 @@ namespace BeanTensor::Tensors::detail::reductions_shared {
         auto& threadMgr = Threading::GetCPUThreadPool();
         std::vector<std::shared_future<void>> futures;
         const auto chunk = (numel + t_count - 1) / t_count;
+        const bool keep_local = KeepWorkLocal(reduce_bytes);
+        const auto group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
         auto slot = size_t{0};
         for (auto tid = size_t{0}; tid < t_count; ++tid) {
             const auto begin = tid * chunk;
@@ -155,7 +168,11 @@ namespace BeanTensor::Tensors::detail::reductions_shared {
             }
             // range_fn is captured by value; its own captures reference the
             // caller's partials, which stay alive until drain() returns.
-            futures.push_back(threadMgr.submit([range_fn, slot, begin, end = std::min(begin + chunk, numel)] { range_fn(slot, begin, end); }, Threading::TaskPriority::Normal).share());
+            if (keep_local) {
+                futures.push_back(threadMgr.submit_to_group([range_fn, slot, begin, end = std::min(begin + chunk, numel)] { range_fn(slot, begin, end); }, group, Threading::TaskPriority::Normal).share());
+            } else {
+                futures.push_back(threadMgr.submit([range_fn, slot, begin, end = std::min(begin + chunk, numel)] { range_fn(slot, begin, end); }, Threading::TaskPriority::Normal).share());
+            }
             ++slot;
         }
         t.give_futures(futures);
@@ -163,12 +180,43 @@ namespace BeanTensor::Tensors::detail::reductions_shared {
     }
 
     /**
-     * @brief Drain futures on the caller thread.
+     * Per-chunk partials are merged on the CALLER thread (runs in the Tensor method, never inside a pool worker,
+     * so waiting is legal). Deterministic merge: partials combine in chunk order. Small inputs run inline.
+     * This overload never restricts to a CCD group (SIZE_MAX never fits the LLC);
+     * reduction ops should prefer the 4-arg overload with the input byte span.
+     * @brief Threaded reduction launcher, chunks a reduction range worker across the pool.
+     * @param numel Element count to cover.
+     * @param range_fn Callable taking (slot, begin, end); slot indexes the caller's partials.
+     * @param t Tensor receiving the futures.
+     * @return Futures for the caller to drain.
+     */
+    template<typename RangeFn>
+    std::vector<std::shared_future<void>> launch_reduce(const size_t numel, RangeFn&& range_fn, const Tensor& t) {
+        return launch_reduce(numel, std::forward<RangeFn>(range_fn), t, std::numeric_limits<size_t>::max());
+    }
+
+    /**
+     * Drains EVERY future before rethrowing the first stored worker error: a
+     * chunk's range_fn may reference the caller's stack (partials), so the
+     * caller's frame must outlive ALL chunks even when one threw — rethrowing
+     * on the first get() would let the rest run against a destroyed frame.
+     * @brief Drain futures on the caller thread, rethrowing the first error after all join.
      * @param futures Futures to wait on; rethrows the first stored worker error.
      */
     inline void drain(const std::vector<std::shared_future<void>>& futures) {
+        auto first_error = std::exception_ptr{};
         for (const auto& f : futures) {
-            f.get();
+            try {
+                f.get();
+            }
+            catch (...) {
+                if (!first_error) {
+                    first_error = std::current_exception();
+                }
+            }
+        }
+        if (first_error) {
+            std::rethrow_exception(first_error);
         }
     }
 

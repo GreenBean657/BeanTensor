@@ -10,8 +10,8 @@
  * hand it to ew_deliver_delta, which sum-reduces it over the operand's
  * broadcast dims (bcast_sum_to) and boundary-casts it into grad_dtype per the
  * single conversion rule (GradDType.h).
- * @version 0.2
- * @date 2026-10-23
+ * @version 0.3
+ * @date 2026-10-25
  */
 #include <optional>
 #include <type_traits>
@@ -233,6 +233,55 @@ namespace BeanTensor::Tensors::detail {
                 }
             }
         }
+
+        /**
+         * Local twin of autograd_shared::launch_elementwise with CCD-aware
+         * scheduling: the broadcast gradient reduction writes the operand-shaped
+         * dx buffer, so the gate is the bytes written (numel * element size).
+         * When that fits one CCD's LLC the chunks are submitted to the calling
+         * thread's CCD group (submit_to_group) so the cache-resident buffer is
+         * written locally; otherwise they go to the whole pool exactly as
+         * before. The chunk count still assumes all t_count threads — group
+         * workers simply claim multiple chunks from the queue, so restricting
+         * the submit never starves the decomposition.
+         * @brief Threaded broadcast-gradient-reduction launcher with CCD-local routing.
+         * @param worker Callable taking (begin, end); copied into each task.
+         * @param numel Total element count to cover.
+         * @param out_bytes Bytes of the dx buffer actually written by the workers.
+         * @param a First tensor the workers touch (receives the futures).
+         * @param b Second tensor the workers touch (receives the futures).
+         * @param out Output tensor (receives the futures).
+         */
+        template<typename Worker>
+        void launch_elementwise_ccd(Worker&& worker, const size_t numel, const size_t out_bytes,
+                                    const Tensor& a, const Tensor& b, const Tensor& out) {
+            const auto t_count = static_cast<size_t>(IncludedCPUFeatures().threads);
+            if (t_count <= 1 || numel <= t_count * 1024) {
+                worker(0, numel);
+                return;
+            }
+            auto& threadMgr = Threading::GetCPUThreadPool();
+            std::vector<std::shared_future<void>> futures;
+            const auto chunk = (numel + t_count - 1) / t_count;
+            const bool keep_local = KeepWorkLocal(out_bytes);
+            const auto group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
+            for (auto t = size_t{0}; t < t_count; ++t) {
+                const auto begin = t * chunk;
+                if (begin >= numel) {
+                    break;
+                }
+                // worker is captured BY VALUE: these futures outlive this call
+                // (they land on the tensors), so a reference would dangle.
+                if (keep_local) {
+                    futures.push_back(threadMgr.submit_to_group([worker, begin, end = std::min(begin + chunk, numel)] { worker(begin, end); }, group, Threading::TaskPriority::Normal).share());
+                } else {
+                    futures.push_back(threadMgr.submit([worker, begin, end = std::min(begin + chunk, numel)] { worker(begin, end); }, Threading::TaskPriority::Normal).share());
+                }
+            }
+            a.give_futures(futures);
+            b.give_futures(futures);
+            out.give_futures(futures);
+        }
     }
 
     /**
@@ -285,7 +334,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First operand element index of the range (inclusive).
                  * @param e One past the last operand element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<float32_t*>(dx.data) + dx.offset, d_ptr = static_cast<const float32_t*>(delta.data) + delta.offset, plan](const size_t b, const size_t e) { bcast_sum_range_float<float32_t>(dx_ptr, d_ptr, plan, b, e); }, numel, delta, delta, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<float32_t*>(dx.data) + dx.offset, d_ptr = static_cast<const float32_t*>(delta.data) + delta.offset, plan](const size_t b, const size_t e) { bcast_sum_range_float<float32_t>(dx_ptr, d_ptr, plan, b, e); }, numel, numel * sizeof(float32_t), delta, delta, dx);
                 break;
             }
             case DType::Float64: {
@@ -296,7 +345,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First operand element index of the range (inclusive).
                  * @param e One past the last operand element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<float64_t*>(dx.data) + dx.offset, d_ptr = static_cast<const float64_t*>(delta.data) + delta.offset, plan](const size_t b, const size_t e) { bcast_sum_range_float<float64_t>(dx_ptr, d_ptr, plan, b, e); }, numel, delta, delta, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<float64_t*>(dx.data) + dx.offset, d_ptr = static_cast<const float64_t*>(delta.data) + delta.offset, plan](const size_t b, const size_t e) { bcast_sum_range_float<float64_t>(dx_ptr, d_ptr, plan, b, e); }, numel, numel * sizeof(float64_t), delta, delta, dx);
                 break;
             }
             case DType::Float16: {
@@ -307,7 +356,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First operand element index of the range (inclusive).
                  * @param e One past the last operand element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<float16_t*>(dx.data) + dx.offset, d_ptr = static_cast<const float16_t*>(delta.data) + delta.offset, plan](const size_t b, const size_t e) { bcast_sum_range_half<float16_t>(dx_ptr, d_ptr, plan, b, e); }, numel, delta, delta, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<float16_t*>(dx.data) + dx.offset, d_ptr = static_cast<const float16_t*>(delta.data) + delta.offset, plan](const size_t b, const size_t e) { bcast_sum_range_half<float16_t>(dx_ptr, d_ptr, plan, b, e); }, numel, numel * sizeof(float16_t), delta, delta, dx);
                 break;
             }
             case DType::BFloat16: {
@@ -318,7 +367,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First operand element index of the range (inclusive).
                  * @param e One past the last operand element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<bfloat16_t*>(dx.data) + dx.offset, d_ptr = static_cast<const bfloat16_t*>(delta.data) + delta.offset, plan](const size_t b, const size_t e) { bcast_sum_range_half<bfloat16_t>(dx_ptr, d_ptr, plan, b, e); }, numel, delta, delta, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<bfloat16_t*>(dx.data) + dx.offset, d_ptr = static_cast<const bfloat16_t*>(delta.data) + delta.offset, plan](const size_t b, const size_t e) { bcast_sum_range_half<bfloat16_t>(dx_ptr, d_ptr, plan, b, e); }, numel, numel * sizeof(bfloat16_t), delta, delta, dx);
                 break;
             }
             case DType::Float16x2: {
@@ -329,7 +378,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First operand element index of the range (inclusive).
                  * @param e One past the last operand element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<float16x2_t*>(dx.data) + dx.offset, d_ptr = static_cast<const float16x2_t*>(delta.data) + delta.offset, plan](const size_t b, const size_t e) { bcast_sum_range_packed<float16x2_t>(dx_ptr, d_ptr, plan, b, e); }, numel, delta, delta, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<float16x2_t*>(dx.data) + dx.offset, d_ptr = static_cast<const float16x2_t*>(delta.data) + delta.offset, plan](const size_t b, const size_t e) { bcast_sum_range_packed<float16x2_t>(dx_ptr, d_ptr, plan, b, e); }, numel, numel * sizeof(float16x2_t), delta, delta, dx);
                 break;
             }
             case DType::BFloat16x2: {
@@ -340,7 +389,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First operand element index of the range (inclusive).
                  * @param e One past the last operand element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<bfloat16x2_t*>(dx.data) + dx.offset, d_ptr = static_cast<const bfloat16x2_t*>(delta.data) + delta.offset, plan](const size_t b, const size_t e) { bcast_sum_range_packed<bfloat16x2_t>(dx_ptr, d_ptr, plan, b, e); }, numel, delta, delta, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<bfloat16x2_t*>(dx.data) + dx.offset, d_ptr = static_cast<const bfloat16x2_t*>(delta.data) + delta.offset, plan](const size_t b, const size_t e) { bcast_sum_range_packed<bfloat16x2_t>(dx_ptr, d_ptr, plan, b, e); }, numel, numel * sizeof(bfloat16x2_t), delta, delta, dx);
                 break;
             }
             case DType::Int4x2: {
@@ -351,7 +400,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param b First operand element index of the range (inclusive).
                  * @param e One past the last operand element index of the range.
                  */
-                launch_elementwise([dx_ptr = static_cast<int4x2_t*>(dx.data) + dx.offset, d_ptr = static_cast<const int4x2_t*>(delta.data) + delta.offset, plan](const size_t b, const size_t e) { bcast_sum_range_int4x2(dx_ptr, d_ptr, plan, b, e); }, numel, delta, delta, dx);
+                launch_elementwise_ccd([dx_ptr = static_cast<int4x2_t*>(dx.data) + dx.offset, d_ptr = static_cast<const int4x2_t*>(delta.data) + delta.offset, plan](const size_t b, const size_t e) { bcast_sum_range_int4x2(dx_ptr, d_ptr, plan, b, e); }, numel, numel * sizeof(int4x2_t), delta, delta, dx);
                 break;
             }
             default: {
@@ -371,7 +420,7 @@ namespace BeanTensor::Tensors::detail {
                      * @param b First operand element index of the range (inclusive).
                      * @param e One past the last operand element index of the range.
                      */
-                    launch_elementwise([dx_ptr, d_ptr, plan](const size_t b, const size_t e) { bcast_sum_range_int<T>(dx_ptr, d_ptr, plan, b, e); }, numel, delta, delta, dx);
+                    launch_elementwise_ccd([dx_ptr, d_ptr, plan](const size_t b, const size_t e) { bcast_sum_range_int<T>(dx_ptr, d_ptr, plan, b, e); }, numel, numel * sizeof(T), delta, delta, dx);
                 };
                 switch (delta.dtype) {
                     case DType::Int8: run_int(static_cast<const int8_t*>(delta.data) + delta.offset); break;

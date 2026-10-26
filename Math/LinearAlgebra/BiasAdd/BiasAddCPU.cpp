@@ -4,8 +4,8 @@
  * @brief CPU backend for bias_add.
  * Hosts the Tensor::bias_add method definition (mirrors how Tensor::matmul
  * lives in MatmulCPU.cpp).
- * @version 0.1
- * @date 2026-10-20
+ * @version 0.2
+ * @date 2026-10-25
  */
 #include <future>
 #include <type_traits>
@@ -155,7 +155,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param e One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([=](const size_t b, const size_t e) { kernel(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, t, bias, out);
+                launch_elementwise([=](const size_t b, const size_t e) { kernel(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, numel * sizeof(float32_t), t, bias, out);
                 break;
             }
             case DType::Float64: {
@@ -172,7 +172,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param e One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([=](const size_t b, const size_t e) { kernel(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, t, bias, out);
+                launch_elementwise([=](const size_t b, const size_t e) { kernel(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, numel * sizeof(float64_t), t, bias, out);
                 break;
             }
             case DType::Float16: {
@@ -183,7 +183,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param e One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([out_ptr = static_cast<float16_t*>(out.data) + out.offset, in_ptr = static_cast<const float16_t*>(t.data) + t.offset, b_ptr = static_cast<const float16_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_half<float16_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, t, bias, out);
+                launch_elementwise([out_ptr = static_cast<float16_t*>(out.data) + out.offset, in_ptr = static_cast<const float16_t*>(t.data) + t.offset, b_ptr = static_cast<const float16_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_half<float16_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, numel * sizeof(float16_t), t, bias, out);
                 break;
             }
             case DType::BFloat16: {
@@ -194,7 +194,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param e One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([out_ptr = static_cast<bfloat16_t*>(out.data) + out.offset, in_ptr = static_cast<const bfloat16_t*>(t.data) + t.offset, b_ptr = static_cast<const bfloat16_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_half<bfloat16_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, t, bias, out);
+                launch_elementwise([out_ptr = static_cast<bfloat16_t*>(out.data) + out.offset, in_ptr = static_cast<const bfloat16_t*>(t.data) + t.offset, b_ptr = static_cast<const bfloat16_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_half<bfloat16_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, numel * sizeof(bfloat16_t), t, bias, out);
                 break;
             }
             case DType::Float16x2: {
@@ -205,7 +205,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param e One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([out_ptr = static_cast<float16x2_t*>(out.data) + out.offset, in_ptr = static_cast<const float16x2_t*>(t.data) + t.offset, b_ptr = static_cast<const float16x2_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_packed<float16x2_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, t, bias, out);
+                launch_elementwise([out_ptr = static_cast<float16x2_t*>(out.data) + out.offset, in_ptr = static_cast<const float16x2_t*>(t.data) + t.offset, b_ptr = static_cast<const float16x2_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_packed<float16x2_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, numel * sizeof(float16x2_t), t, bias, out);
                 break;
             }
             case DType::BFloat16x2: {
@@ -216,7 +216,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param e One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([out_ptr = static_cast<bfloat16x2_t*>(out.data) + out.offset, in_ptr = static_cast<const bfloat16x2_t*>(t.data) + t.offset, b_ptr = static_cast<const bfloat16x2_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_packed<bfloat16x2_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, t, bias, out);
+                launch_elementwise([out_ptr = static_cast<bfloat16x2_t*>(out.data) + out.offset, in_ptr = static_cast<const bfloat16x2_t*>(t.data) + t.offset, b_ptr = static_cast<const bfloat16x2_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_packed<bfloat16x2_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, numel * sizeof(bfloat16x2_t), t, bias, out);
                 break;
             }
             case DType::Int8: {
@@ -227,7 +227,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param e One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([out_ptr = static_cast<int8_t*>(out.data) + out.offset, in_ptr = static_cast<const int8_t*>(t.data) + t.offset, b_ptr = static_cast<const int8_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int<int8_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, t, bias, out);
+                launch_elementwise([out_ptr = static_cast<int8_t*>(out.data) + out.offset, in_ptr = static_cast<const int8_t*>(t.data) + t.offset, b_ptr = static_cast<const int8_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int<int8_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, numel * sizeof(int8_t), t, bias, out);
                 break;
             }
             case DType::UInt8: {
@@ -238,7 +238,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param e One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([out_ptr = static_cast<uint8_t*>(out.data) + out.offset, in_ptr = static_cast<const uint8_t*>(t.data) + t.offset, b_ptr = static_cast<const uint8_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int<uint8_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, t, bias, out);
+                launch_elementwise([out_ptr = static_cast<uint8_t*>(out.data) + out.offset, in_ptr = static_cast<const uint8_t*>(t.data) + t.offset, b_ptr = static_cast<const uint8_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int<uint8_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, numel * sizeof(uint8_t), t, bias, out);
                 break;
             }
             case DType::Int16: {
@@ -249,7 +249,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param e One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([out_ptr = static_cast<int16_t*>(out.data) + out.offset, in_ptr = static_cast<const int16_t*>(t.data) + t.offset, b_ptr = static_cast<const int16_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int<int16_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, t, bias, out);
+                launch_elementwise([out_ptr = static_cast<int16_t*>(out.data) + out.offset, in_ptr = static_cast<const int16_t*>(t.data) + t.offset, b_ptr = static_cast<const int16_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int<int16_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, numel * sizeof(int16_t), t, bias, out);
                 break;
             }
             case DType::UInt16: {
@@ -260,7 +260,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param e One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([out_ptr = static_cast<uint16_t*>(out.data) + out.offset, in_ptr = static_cast<const uint16_t*>(t.data) + t.offset, b_ptr = static_cast<const uint16_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int<uint16_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, t, bias, out);
+                launch_elementwise([out_ptr = static_cast<uint16_t*>(out.data) + out.offset, in_ptr = static_cast<const uint16_t*>(t.data) + t.offset, b_ptr = static_cast<const uint16_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int<uint16_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, numel * sizeof(uint16_t), t, bias, out);
                 break;
             }
             case DType::Int32: {
@@ -271,7 +271,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param e One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([out_ptr = static_cast<int32_t*>(out.data) + out.offset, in_ptr = static_cast<const int32_t*>(t.data) + t.offset, b_ptr = static_cast<const int32_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int<int32_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, t, bias, out);
+                launch_elementwise([out_ptr = static_cast<int32_t*>(out.data) + out.offset, in_ptr = static_cast<const int32_t*>(t.data) + t.offset, b_ptr = static_cast<const int32_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int<int32_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, numel * sizeof(int32_t), t, bias, out);
                 break;
             }
             case DType::UInt32: {
@@ -282,7 +282,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param e One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([out_ptr = static_cast<uint32_t*>(out.data) + out.offset, in_ptr = static_cast<const uint32_t*>(t.data) + t.offset, b_ptr = static_cast<const uint32_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int<uint32_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, t, bias, out);
+                launch_elementwise([out_ptr = static_cast<uint32_t*>(out.data) + out.offset, in_ptr = static_cast<const uint32_t*>(t.data) + t.offset, b_ptr = static_cast<const uint32_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int<uint32_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, numel * sizeof(uint32_t), t, bias, out);
                 break;
             }
             case DType::Int64: {
@@ -293,7 +293,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param e One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([out_ptr = static_cast<int64_t*>(out.data) + out.offset, in_ptr = static_cast<const int64_t*>(t.data) + t.offset, b_ptr = static_cast<const int64_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int<int64_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, t, bias, out);
+                launch_elementwise([out_ptr = static_cast<int64_t*>(out.data) + out.offset, in_ptr = static_cast<const int64_t*>(t.data) + t.offset, b_ptr = static_cast<const int64_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int<int64_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, numel * sizeof(int64_t), t, bias, out);
                 break;
             }
             case DType::UInt64: {
@@ -304,7 +304,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param e One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([out_ptr = static_cast<uint64_t*>(out.data) + out.offset, in_ptr = static_cast<const uint64_t*>(t.data) + t.offset, b_ptr = static_cast<const uint64_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int<uint64_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, t, bias, out);
+                launch_elementwise([out_ptr = static_cast<uint64_t*>(out.data) + out.offset, in_ptr = static_cast<const uint64_t*>(t.data) + t.offset, b_ptr = static_cast<const uint64_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int<uint64_t>(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, numel * sizeof(uint64_t), t, bias, out);
                 break;
             }
             case DType::Int4x2: {
@@ -315,7 +315,7 @@ namespace BeanTensor::Tensors::detail {
                  * @param e One past the last element computed.
                  * @note Lambda subcall. Self-execution prohibited.
                  */
-                launch_elementwise([out_ptr = static_cast<int4x2_t*>(out.data) + out.offset, in_ptr = static_cast<const int4x2_t*>(t.data) + t.offset, b_ptr = static_cast<const int4x2_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int4x2(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, t, bias, out);
+                launch_elementwise([out_ptr = static_cast<int4x2_t*>(out.data) + out.offset, in_ptr = static_cast<const int4x2_t*>(t.data) + t.offset, b_ptr = static_cast<const int4x2_t*>(bias.data) + bias.offset, cols](const size_t b, const size_t e) { bias_add_range_int4x2(out_ptr, in_ptr, b_ptr, cols, b, e); }, numel, numel * sizeof(int4x2_t), t, bias, out);
                 break;
             }
             [[unlikely]] default: {

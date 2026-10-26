@@ -3,8 +3,8 @@
  * @author GreenBean
  * @brief CPU backend for argmax. Hosts the Tensor::argmax method definition
  * (mirrors how Tensor::matmul lives in MatmulCPU.cpp).
- * @version 0.3.1
- * @date 2026-10-22
+ * @version 0.6
+ * @date 2026-10-26
  */
 #include <algorithm>
 #include <cmath>
@@ -216,7 +216,7 @@ namespace BeanTensor::Tensors::detail {
             std::vector<uint8_t> has(threads, 0);
             drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) {
                 has[slot] = argmax_range_int<T>(data, b, e, partials[slot].first, partials[slot].second) ? 1 : 0;
-            }, t));
+            }, t, numel * sizeof(T)));
             auto best = std::pair<T, uint64_t>{T{0}, 0};
             auto any = false;
             for (auto s = size_t{0}; s < partials.size(); ++s) {
@@ -234,14 +234,23 @@ namespace BeanTensor::Tensors::detail {
          * Chunks an output-position range worker across the CPU thread pool. Futures land on the
          * input and output tensors so teardown drains them (workers hold raw buffer pointers).
          * Small outputs run inline. Mirrors linearalgebra_shared::launch_elementwise.
-         * @brief Threaded axis-argmax launcher.
+         * CCD-aware: axis argmax is a reduction — the output indices are tiny but every
+         * worker reads the whole input span (each output position scans axis_len elements),
+         * and cross-CCD reads are the cheap direction (~15-20% vs ~8x for writes), so the
+         * gate is the INPUT span, not the output. Chunks are restricted to the submitting
+         * thread's CCD group only when the input fits one CCD's LLC (that CCD typically
+         * produced or last warmed the input); larger inputs stay on the whole pool for
+         * bandwidth. The chunk count still assumes all t_count threads — group workers
+         * simply claim multiple chunks from the queue.
+         * @brief Threaded axis-argmax launcher with CCD-local routing by input span.
          * @param worker Callable taking (begin, end) over output positions; copied into each task.
          * @param out_numel Output element count to cover.
+         * @param input_bytes Size in bytes of the input span the workers read.
          * @param t Input tensor the workers read.
          * @param out Output tensor the workers write.
          */
         template<typename Worker>
-        void launch_axis(Worker&& worker, const size_t out_numel, const Tensor& t, const Tensor& out) {
+        void launch_axis(Worker&& worker, const size_t out_numel, const size_t input_bytes, const Tensor& t, const Tensor& out) {
             const auto t_count = static_cast<size_t>(IncludedCPUFeatures().threads);
             if (t_count <= 1 || out_numel <= t_count * 1024) {
                 worker(0, out_numel);
@@ -250,6 +259,8 @@ namespace BeanTensor::Tensors::detail {
             auto& threadMgr = Threading::GetCPUThreadPool();
             std::vector<std::shared_future<void>> futures;
             const auto chunk = (out_numel + t_count - 1) / t_count;
+            const bool keep_local = KeepWorkLocal(input_bytes);
+            const auto group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
             for (auto i = size_t{0}; i < t_count; ++i) {
                 const auto begin = i * chunk;
                 if (begin >= out_numel) {
@@ -257,7 +268,11 @@ namespace BeanTensor::Tensors::detail {
                 }
                 // worker is captured BY VALUE: these futures outlive this call
                 // (they land on the tensors), so a reference would dangle.
-                futures.push_back(threadMgr.submit([worker, begin, end = std::min(begin + chunk, out_numel)] { worker(begin, end); }, Threading::TaskPriority::Normal).share());
+                if (keep_local) {
+                    futures.push_back(threadMgr.submit_to_group([worker, begin, end = std::min(begin + chunk, out_numel)] { worker(begin, end); }, group, Threading::TaskPriority::Normal).share());
+                } else {
+                    futures.push_back(threadMgr.submit([worker, begin, end = std::min(begin + chunk, out_numel)] { worker(begin, end); }, Threading::TaskPriority::Normal).share());
+                }
             }
             t.give_futures(futures);
             out.give_futures(futures);
@@ -418,7 +433,7 @@ namespace BeanTensor::Tensors::detail {
                         } else {
                             partials[slot].has = argmax_range_half<T>(data, b, e, partials[slot].key, partials[slot].idx);
                         }
-                    }, t));
+                    }, t, numel * sizeof(T)));
                 };
                 switch (t.dtype) {
                     case DType::Float32: launch_f(static_cast<const float32_t*>(t.data) + t.offset); break;
@@ -447,7 +462,7 @@ namespace BeanTensor::Tensors::detail {
                 auto launch_p = [&]<typename P>(const P* data) {
                     drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) {
                         partials[slot].has = argmax_range_packed<P>(data, b, e, partials[slot].lo, partials[slot].hi, partials[slot].idx);
-                    }, t));
+                    }, t, numel * sizeof(P)));
                 };
                 if (t.dtype == DType::Float16x2) {
                     launch_p(static_cast<const float16x2_t*>(t.data) + t.offset);
@@ -457,7 +472,7 @@ namespace BeanTensor::Tensors::detail {
                     const auto* data = static_cast<const int4x2_t*>(t.data) + t.offset;
                     drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) {
                         partials[slot].has = argmax_range_i4x2(data, b, e, partials[slot].lo, partials[slot].hi, partials[slot].idx);
-                    }, t));
+                    }, t, numel * sizeof(int4x2_t)));
                 }
                 auto best = PackedPart{.lo = 0.0f, .hi = 0.0f, .idx = 0, .has = false};
                 for (const auto& p : partials) {
@@ -515,7 +530,7 @@ namespace BeanTensor::Tensors::detail {
                  * @note Lambda subcall. Self-execution prohibited.
                  */
                 auto launch_f = [&]<typename T>(const T* data) {
-                    launch_axis([&](const size_t b, const size_t e) { argmax_axis_range_float<T>(data, out_data, axis_len, inner, b, e); }, out_numel, t, out);
+                    launch_axis([data, out_data, axis_len, inner](const size_t b, const size_t e) { argmax_axis_range_float<T>(data, out_data, axis_len, inner, b, e); }, out_numel, t.numel * sizeof(T), t, out);
                 };
                 switch (t.dtype) {
                     case DType::Float32: launch_f(static_cast<const float32_t*>(t.data) + t.offset); break;
@@ -534,7 +549,7 @@ namespace BeanTensor::Tensors::detail {
                  * @note Lambda subcall. Self-execution prohibited.
                  */
                 auto launch_p = [&]<typename P>(const P* data) {
-                    launch_axis([&](const size_t b, const size_t e) { argmax_axis_range_packed<P>(data, out_data, axis_len, inner, b, e); }, out_numel, t, out);
+                    launch_axis([data, out_data, axis_len, inner](const size_t b, const size_t e) { argmax_axis_range_packed<P>(data, out_data, axis_len, inner, b, e); }, out_numel, t.numel * sizeof(P), t, out);
                 };
                 if (t.dtype == DType::Float16x2) {
                     launch_p(static_cast<const float16x2_t*>(t.data) + t.offset);
@@ -542,7 +557,7 @@ namespace BeanTensor::Tensors::detail {
                     launch_p(static_cast<const bfloat16x2_t*>(t.data) + t.offset);
                 } else {
                     const auto* data = static_cast<const int4x2_t*>(t.data) + t.offset;
-                    launch_axis([&](const size_t b, const size_t e) { argmax_axis_range_i4x2(data, out_data, axis_len, inner, b, e); }, out_numel, t, out);
+                    launch_axis([data, out_data, axis_len, inner](const size_t b, const size_t e) { argmax_axis_range_i4x2(data, out_data, axis_len, inner, b, e); }, out_numel, t.numel * sizeof(int4x2_t), t, out);
                 }
                 break;
             }
@@ -555,7 +570,7 @@ namespace BeanTensor::Tensors::detail {
                  * @note Lambda subcall. Self-execution prohibited.
                  */
                 auto launch_i = [&]<typename T>(const T* data) {
-                    launch_axis([&](const size_t b, const size_t e) { argmax_axis_range_int<T>(data, out_data, axis_len, inner, b, e); }, out_numel, t, out);
+                    launch_axis([data, out_data, axis_len, inner](const size_t b, const size_t e) { argmax_axis_range_int<T>(data, out_data, axis_len, inner, b, e); }, out_numel, t.numel * sizeof(T), t, out);
                 };
                 switch (t.dtype) {
                     case DType::Int8: launch_i(static_cast<const int8_t*>(t.data) + t.offset); break;

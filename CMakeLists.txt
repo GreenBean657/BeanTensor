@@ -45,7 +45,7 @@ if (USE_CUDA)
     # glibc >= 2.41 declares C23 math functions (cospi/sinpi/rsqrt + f variants)
     # with noexcept, colliding with CUDA 12.9's crt/math_functions.h. The fix is
     # a one-line-per-function patch adding noexcept(true) to those 6 declarations
-    # in the toolkit header (documented in AGENTS.md); -U_GNU_SOURCE is NOT a
+    # in the toolkit header (documented in the project build notes); -U_GNU_SOURCE is NOT a
     # viable workaround — it breaks libstdc++'s own headers.
     project(BeanTensorV5 LANGUAGES CXX CUDA)
     set(CMAKE_CUDA_STANDARD 20)
@@ -203,6 +203,12 @@ set(CORE_SOURCES
         Math/Reductions/Mean/Mean.h
         Math/Reductions/Mean/Mean.hpp
         Math/Reductions/Mean/MeanCPU.cpp
+        Math/Reductions/Min/Min.h
+        Math/Reductions/Min/Min.hpp
+        Math/Reductions/Min/MinCPU.cpp
+        Math/Reductions/Max/Max.h
+        Math/Reductions/Max/Max.hpp
+        Math/Reductions/Max/MaxCPU.cpp
         Math/Compare/Compare.h
         Math/Compare/Equal/Equal.h
         Math/Compare/Equal/Equal.hpp
@@ -269,6 +275,10 @@ set(CORE_SOURCES
         Math/Autograd/TransposeLast2/TransposeLast2CPU.cpp
         Math/Autograd/GemmG/GemmG.h
         Math/Autograd/GemmG/GemmGCPU.cpp
+        Math/Autograd/SumG/SumG.h
+        Math/Autograd/SumG/SumGCPU.cpp
+        Math/Autograd/MeanG/MeanG.h
+        Math/Autograd/MeanG/MeanGCPU.cpp
         Math/Autograd/Backward.cpp
         Math/Autograd/GradDType.h
         Math/Autograd/AutogradShared.h
@@ -289,6 +299,8 @@ set(CORE_SOURCES
         Module/Sequential.h
         Module/Sequential.cpp
         Helpers/Bits.h
+        Helpers/KernelTune.h
+        Helpers/KernelTune.cpp
 )
 
 # AVX512/AVX2 conversion kernels are always compiled with AVX512/AVX2 codegen
@@ -306,7 +318,10 @@ if (USE_CUDA)
             Math/Loss/Mse/MseCUDA.cu
             Math/Loss/MseG/MseGCUDA.cu
             Math/Reductions/Sum/SumCUDA.cu
+            Math/Reductions/Mean/MeanCUDA.cu
             Math/Reductions/Argmax/ArgmaxCUDA.cu
+            Math/Reductions/Min/MinCUDA.cu
+            Math/Reductions/Max/MaxCUDA.cu
             Math/Compare/Equal/EqualCUDA.cu
             Math/LinearAlgebra/BiasAdd/BiasAddCUDA.cu
             Math/Activations/Relu/ReluCUDA.cu
@@ -331,6 +346,8 @@ elseif (USE_HIP)
             Math/Reductions/Sum/SumHIP.cpp
             Math/Reductions/Argmax/ArgmaxHIP.cpp
             Math/Reductions/Mean/MeanHIP.cpp
+            Math/Reductions/Min/MinHIP.cpp
+            Math/Reductions/Max/MaxHIP.cpp
             Math/Compare/Equal/EqualHIP.cpp
             Math/LinearAlgebra/BiasAdd/BiasAddHIP.cpp
             Math/Activations/Relu/ReluHIP.cpp
@@ -389,6 +406,10 @@ if(USE_HIP)
             Math/Reductions/Argmax/ArgmaxHIP.cpp
             Math/Reductions/Mean/MeanCPU.cpp
             Math/Reductions/Mean/MeanHIP.cpp
+            Math/Reductions/Min/MinCPU.cpp
+            Math/Reductions/Min/MinHIP.cpp
+            Math/Reductions/Max/MaxCPU.cpp
+            Math/Reductions/Max/MaxHIP.cpp
             Math/Compare/Equal/EqualCPU.cpp
             Math/Compare/Equal/EqualHIP.cpp
             Math/Shape/Reshape.cpp
@@ -417,6 +438,8 @@ if(USE_HIP)
             Math/Autograd/TransposeLast2/TransposeLast2CPU.cpp
             Math/Autograd/TransposeLast2/TransposeLast2HIP.cpp
             Math/Autograd/GemmG/GemmGCPU.cpp
+            Math/Autograd/SumG/SumGCPU.cpp
+            Math/Autograd/MeanG/MeanGCPU.cpp
             Math/Autograd/Backward.cpp
             Math/Autograd/GradAcc/GradAccAVX2.cpp
             Math/Autograd/GradAcc/GradAccAVX512.cpp
@@ -429,6 +452,7 @@ if(USE_HIP)
             Intrinsics/AVX2/DTypeConversions.cpp
             Intrinsics/AVX512/DTypeConversions.cpp
             Intrinsics/Dispatcher.cpp
+            Intrinsics/DispatchFeatures.cpp
             Math/Shape/Indexing/IndexingHIP.cpp
             Math/Shape/Indexing/IndexingCPU.cpp
             Math/Shape/Slice.cpp
@@ -439,6 +463,7 @@ if(USE_HIP)
             Module/Linear.cpp
             Module/Relu.cpp
             Module/Sequential.cpp
+            Helpers/KernelTune.cpp
             PROPERTIES LANGUAGE HIP
     )
     set_source_files_properties(
@@ -459,6 +484,10 @@ if(USE_HIP)
             Math/Reductions/Argmax/ArgmaxHIP.cpp
             Math/Reductions/Mean/MeanCPU.cpp
             Math/Reductions/Mean/MeanHIP.cpp
+            Math/Reductions/Min/MinCPU.cpp
+            Math/Reductions/Min/MinHIP.cpp
+            Math/Reductions/Max/MaxCPU.cpp
+            Math/Reductions/Max/MaxHIP.cpp
             Math/Compare/Equal/EqualCPU.cpp
             Math/Compare/Equal/EqualHIP.cpp
             Math/Shape/Reshape.cpp
@@ -479,6 +508,8 @@ if(USE_HIP)
             Math/Autograd/TransposeLast2/TransposeLast2CPU.cpp
             Math/Autograd/TransposeLast2/TransposeLast2HIP.cpp
             Math/Autograd/GemmG/GemmGCPU.cpp
+            Math/Autograd/SumG/SumGCPU.cpp
+            Math/Autograd/MeanG/MeanGCPU.cpp
             Math/Autograd/Backward.cpp
             Math/Shape/Indexing/IndexingCPU.cpp
             Math/Shape/Slice.cpp
@@ -491,6 +522,7 @@ if(USE_HIP)
             Module/Linear.cpp
             Module/Relu.cpp
             Module/Sequential.cpp
+            Helpers/KernelTune.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native"
     )
     # Only the feature gate carries the ISA union: IncludedCPUFeatures()'s #if
@@ -644,7 +676,10 @@ if (USE_CUDA)
             Math/Loss/Mse/MseCUDA.cu
             Math/Loss/MseG/MseGCUDA.cu
             Math/Reductions/Sum/SumCUDA.cu
+            Math/Reductions/Mean/MeanCUDA.cu
             Math/Reductions/Argmax/ArgmaxCUDA.cu
+            Math/Reductions/Min/MinCUDA.cu
+            Math/Reductions/Max/MaxCUDA.cu
             Math/Compare/Equal/EqualCUDA.cu
             Math/LinearAlgebra/BiasAdd/BiasAddCUDA.cu
             Math/Activations/Relu/ReluCUDA.cu
@@ -655,6 +690,7 @@ if (USE_CUDA)
             Math/Autograd/SoftmaxCEG/SoftmaxCEGCUDA.cu
             Math/Autograd/TransposeLast2/TransposeLast2CUDA.cu
             Math/Shape/Indexing/IndexingCUDA.cu
+            Helpers/KernelTune.cpp
         PROPERTIES LANGUAGE CUDA
     )
 endif()
@@ -798,6 +834,42 @@ if(BUILD_TESTING)
     )
     add_test(NAME BeanTensorV5MetricsTests COMMAND BeanTensorV5MetricsTests)
 
+    add_executable(BeanTensorV5KernelTuneTests tests/kernel_tune_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5KernelTuneTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5KernelTuneTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5KernelTuneTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5KernelTuneTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5KernelTuneTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5KernelTuneTests COMMAND BeanTensorV5KernelTuneTests)
+
+    add_executable(BeanTensorV5GPUErrorTests tests/gpu_error_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5GPUErrorTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5GPUErrorTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5GPUErrorTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5GPUErrorTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5GPUErrorTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5GPUErrorTests COMMAND BeanTensorV5GPUErrorTests)
+
     add_executable(BeanTensorV5ElementwiseTests tests/elementwise_tests.cpp)
     if(USE_HIP)
         target_compile_definitions(BeanTensorV5ElementwiseTests PRIVATE USE_HIP)
@@ -851,6 +923,24 @@ if(BUILD_TESTING)
             -mf16c
     )
     add_test(NAME BeanTensorV5ModuleTests COMMAND BeanTensorV5ModuleTests)
+
+    add_executable(BeanTensorV5PlatformTests tests/platform_topology_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5PlatformTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5PlatformTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5PlatformTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5PlatformTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5PlatformTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5PlatformTests COMMAND BeanTensorV5PlatformTests)
 
     add_executable(BeanTensorV5DTypeGuardTests tests/tensor_dtype_guard_tests.cpp)
     if(USE_HIP)

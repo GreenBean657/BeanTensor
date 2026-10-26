@@ -1,9 +1,10 @@
 /**
  * @file DTypeConversions.h
  * @author GreenBean
- * @brief AVX512 dtype conversion kernel declarations.
- * @version 0.1
- * @date 2026-10-14
+ * @brief AVX512 dtype conversion kernel declarations. Implementations gate NT stores on
+ * pointer alignment + NtStoreMinBytes() and submit chunks CCD-locally when KeepWorkLocal() holds.
+ * @version 0.2
+ * @date 2026-10-24
  */
 #pragma once
 

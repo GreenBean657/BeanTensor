@@ -2,9 +2,10 @@
  * @file SumCPU.cpp
  * @author GreenBean
  * @brief CPU backend for sum. Hosts the Tensor::sum method definition
- * (mirrors how Tensor::matmul lives in MatmulCPU.cpp).
- * @version 0.2
- * @date 2026-10-20
+ * (mirrors how Tensor::matmul lives in MatmulCPU.cpp), wiring the SumG
+ * backward node onto the output.
+ * @version 0.5
+ * @date 2026-10-26
  */
 #include <cstdint>
 #include <future>
@@ -12,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "Math/Autograd/SumG/SumG.h"
 #include "Math/Reductions/Sum/Sum.h"
 #include "Math/Reductions/ReductionsShared.h"
 #include "Math/Reductions/Sum/SumKernels.h"
@@ -50,7 +52,7 @@ namespace BeanTensor::Tensors::detail {
          */
         template<typename H>
         [[nodiscard]] float32_t sum_range_half(const H* data, const size_t begin, const size_t end) {
-            auto total = 0.0f;
+            float32_t total = 0.0f;
             for (auto i = begin; i < end; ++i) {
                 total += widen_lane(data[i]);
             }
@@ -68,8 +70,8 @@ namespace BeanTensor::Tensors::detail {
         template<typename P>
         [[nodiscard]] std::pair<float32_t, float32_t> sum_range_packed(const P* data, const size_t begin, const size_t end) {
             using H = packed_lane_t<P>;
-            auto total_lo = 0.0f;
-            auto total_hi = 0.0f;
+            float32_t total_lo = 0.0f;
+            float32_t total_hi = 0.0f;
             for (auto i = begin; i < end; ++i) {
                 const auto bits = Intrinsics::detail::bit_cast_memcpy<uint32_t>(data[i]);
                 total_lo += widen_lane(lane_lo<H>(bits));
@@ -136,9 +138,9 @@ namespace BeanTensor::Tensors::detail {
                 const SumFn kernel = Math::Reductions::sum_avx512_available()
                     ? Math::Reductions::sum_f32_range_avx512
                     : Math::Reductions::sum_avx2_available() ? Math::Reductions::sum_f32_range_avx2 : sum_range_scalar<float32_t>;
-                std::vector partials(IncludedCPUFeatures().threads, 0.0f);
-                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = kernel(data, b, e); }, t));
-                auto total = 0.0f;
+                std::vector<float32_t> partials(IncludedCPUFeatures().threads, 0.0f);
+                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = kernel(data, b, e); }, t, numel * sizeof(float32_t)));
+                float32_t total = 0.0f;
                 for (const auto p : partials) {
                     total += p;
                 }
@@ -151,9 +153,9 @@ namespace BeanTensor::Tensors::detail {
                 const SumFn kernel = Math::Reductions::sum_avx512_available()
                     ? Math::Reductions::sum_f64_range_avx512
                     : Math::Reductions::sum_avx2_available() ? Math::Reductions::sum_f64_range_avx2 : sum_range_scalar<float64_t>;
-                std::vector partials(IncludedCPUFeatures().threads, 0.0);
-                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = kernel(data, b, e); }, t));
-                auto total = 0.0;
+                std::vector<float64_t> partials(IncludedCPUFeatures().threads, 0.0);
+                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = kernel(data, b, e); }, t, numel * sizeof(float64_t)));
+                float64_t total = 0.0;
                 for (const auto p : partials) {
                     total += p;
                 }
@@ -162,9 +164,9 @@ namespace BeanTensor::Tensors::detail {
             }
             case DType::Float16: {
                 const auto* data = static_cast<const float16_t*>(t.data) + t.offset;
-                std::vector partials(IncludedCPUFeatures().threads, 0.0f);
-                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_half<float16_t>(data, b, e); }, t));
-                auto total = 0.0f;
+                std::vector<float32_t> partials(IncludedCPUFeatures().threads, 0.0f);
+                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_half<float16_t>(data, b, e); }, t, numel * sizeof(float16_t)));
+                float32_t total = 0.0f;
                 for (const auto p : partials) {
                     total += p;
                 }
@@ -173,9 +175,9 @@ namespace BeanTensor::Tensors::detail {
             }
             case DType::BFloat16: {
                 const auto* data = static_cast<const bfloat16_t*>(t.data) + t.offset;
-                std::vector partials(IncludedCPUFeatures().threads, 0.0f);
-                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_half<bfloat16_t>(data, b, e); }, t));
-                auto total = 0.0f;
+                std::vector<float32_t> partials(IncludedCPUFeatures().threads, 0.0f);
+                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_half<bfloat16_t>(data, b, e); }, t, numel * sizeof(bfloat16_t)));
+                float32_t total = 0.0f;
                 for (const auto p : partials) {
                     total += p;
                 }
@@ -185,9 +187,9 @@ namespace BeanTensor::Tensors::detail {
             case DType::Float16x2: {
                 const auto* data = static_cast<const float16x2_t*>(t.data) + t.offset;
                 std::vector<std::pair<float32_t, float32_t>> partials(IncludedCPUFeatures().threads, {0.0f, 0.0f});
-                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_packed<float16x2_t>(data, b, e); }, t));
-                auto total_lo = 0.0f;
-                auto total_hi = 0.0f;
+                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_packed<float16x2_t>(data, b, e); }, t, numel * sizeof(float16x2_t)));
+                float32_t total_lo = 0.0f;
+                float32_t total_hi = 0.0f;
                 for (const auto& [p_lo, p_hi] : partials) {
                     total_lo += p_lo;
                     total_hi += p_hi;
@@ -200,9 +202,9 @@ namespace BeanTensor::Tensors::detail {
             case DType::BFloat16x2: {
                 const auto* data = static_cast<const bfloat16x2_t*>(t.data) + t.offset;
                 std::vector<std::pair<float32_t, float32_t>> partials(IncludedCPUFeatures().threads, {0.0f, 0.0f});
-                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_packed<bfloat16x2_t>(data, b, e); }, t));
-                auto total_lo = 0.0f;
-                auto total_hi = 0.0f;
+                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_packed<bfloat16x2_t>(data, b, e); }, t, numel * sizeof(bfloat16x2_t)));
+                float32_t total_lo = 0.0f;
+                float32_t total_hi = 0.0f;
                 for (const auto& [p_lo, p_hi] : partials) {
                     total_lo += p_lo;
                     total_hi += p_hi;
@@ -222,7 +224,7 @@ namespace BeanTensor::Tensors::detail {
                  * @note Lambda subcall. Self-execution prohibited.
                  */
                 auto launch_int = [&]<typename T>(const T* data) {
-                    drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_int<T>(data, b, e); }, t));
+                    drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_int<T>(data, b, e); }, t, numel * sizeof(T)));
                 };
                 switch (t.dtype) {
                     case DType::Int8: launch_int(static_cast<const int8_t*>(t.data) + t.offset); break;
@@ -255,7 +257,7 @@ namespace BeanTensor::Tensors::detail {
             case DType::Int4x2: {
                 const auto* data = static_cast<const int4x2_t*>(t.data) + t.offset;
                 std::vector<std::pair<uint64_t, uint64_t>> partials(IncludedCPUFeatures().threads, {uint64_t{0}, uint64_t{0}});
-                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_i4x2(data, b, e); }, t));
+                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = sum_range_i4x2(data, b, e); }, t, numel * sizeof(int4x2_t)));
                 auto total_lo = uint64_t{0};
                 auto total_hi = uint64_t{0};
                 for (const auto& [p_lo, p_hi] : partials) {
@@ -275,6 +277,9 @@ namespace BeanTensor::Tensors::detail {
 namespace BeanTensor::Tensors {
 
     /**
+     * Validates rank/dtype/device implicitly via the backends, syncs, then routes
+     * to the CPU or GPU backend and wires the autograd node (SumG backward:
+     * dx = the scalar seed broadcast to this tensor's shape).
      * @brief Sum of every element.
      * @return Single element tensor of the same dtype and device.
      */
@@ -288,6 +293,7 @@ namespace BeanTensor::Tensors {
         } else [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
+        out.wire_node(detail::sum_g_node, *this);
         return out;
     }
 }

@@ -8,8 +8,8 @@
  * here: LossShared re-exports the canonical copies from
  * Math/Optimization/OptimizationShared.h, so a loss narrowing can never drift
  * from the project's single conversion pathway. Header-only.
- * @version 0.1.1
- * @date 2026-10-23
+ * @version 0.1.3
+ * @date 2026-10-26
  */
 #pragma once
 
@@ -72,7 +72,7 @@ namespace BeanTensor::Tensors::detail::loss_shared {
             case DType::Int4x2: {
                 auto v = mean;
                 if (__builtin_isnan(v)) {
-                    v = 0.0;
+                    v = float64_t{0.0};
                 }
                 if (v <= -8.0) {
                     v = -8.0;
@@ -93,16 +93,19 @@ namespace BeanTensor::Tensors::detail::loss_shared {
                 auto store_int = [&]<typename I>(I* p) {
                     auto v = mean;
                     if (__builtin_isnan(v)) {
-                        v = 0.0;
+                        v = float64_t{0.0};
                     }
                     const auto lo = static_cast<float64_t>(std::numeric_limits<I>::lowest());
                     const auto hi = static_cast<float64_t>(std::numeric_limits<I>::max());
+                    // Write the limits directly on clamp: for 64-bit dtypes hi rounds
+                    // UP to 2^63 / 2^64 in fp64, so casting hi back would be UB.
                     if (v <= lo) {
-                        v = lo;
+                        *p = std::numeric_limits<I>::lowest();
                     } else if (v >= hi) {
-                        v = hi;
+                        *p = std::numeric_limits<I>::max();
+                    } else {
+                        *p = static_cast<I>(v);
                     }
-                    *p = static_cast<I>(v);
                 };
                 switch (out_dtype) {
                     case DType::Int8: store_int(static_cast<int8_t*>(out_data)); break;

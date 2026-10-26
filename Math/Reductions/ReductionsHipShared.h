@@ -7,8 +7,8 @@
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same fp32/fp64 compute widths, same RNE narrowing,
  * same NaN-wins argmax rule, same uint64 wrap integer sums.
- * @version 0.1
- * @date 2026-10-22
+ * @version 0.2
+ * @date 2026-10-25
  */
 #pragma once
 
@@ -30,6 +30,10 @@ namespace BeanTensor::Tensors::detail::reductions_gpu {
      * @brief Upper bound on the grid size; grid-stride loops cover the remainder.
      */
     constexpr size_t BT_GPU_MAX_BLOCKS = 1024;
+    /**
+     * @brief Maximum threads per block for dynamic shared-memory reduction trees.
+     */
+    constexpr size_t BT_GPU_MAX_BLOCK_SIZE = 1024;
 
     /**
      * Clamped to [1, BT_GPU_MAX_BLOCKS].
@@ -40,6 +44,33 @@ namespace BeanTensor::Tensors::detail::reductions_gpu {
     [[nodiscard]] inline __host__ size_t grid_for(const size_t numel) {
         const auto blocks = (numel + BT_GPU_THREADS - 1) / BT_GPU_THREADS;
         return blocks < 1 ? 1 : blocks > BT_GPU_MAX_BLOCKS ? BT_GPU_MAX_BLOCKS : blocks;
+    }
+
+    /**
+     * Runtime block-size overload used by the tuned reduction launchers. The caller must
+     * supply a power-of-two block size in [1, BT_GPU_MAX_BLOCK_SIZE].
+     * @brief Block count for a grid-stride kernel with a runtime block size.
+     * @param numel Element count to cover.
+     * @param block_size Threads per block.
+     * @return Number of blocks to launch, clamped to [1, BT_GPU_MAX_BLOCKS].
+     */
+    [[nodiscard]] inline __host__ size_t grid_for(const size_t numel, const size_t block_size) {
+        const auto blocks = (numel + block_size - 1) / block_size;
+        return blocks < 1 ? 1 : blocks > BT_GPU_MAX_BLOCKS ? BT_GPU_MAX_BLOCKS : blocks;
+    }
+
+    /**
+     * Returns a correctly typed pointer into the kernel's dynamic shared-memory block.
+     * The underlying byte array is declared once per type name, so kernels with different
+     * accumulator types can coexist in the same translation unit.
+     * @brief Typed alias for the dynamic shared-memory array.
+     * @tparam T Accumulator type to view the shared memory as.
+     * @return Pointer to the start of the dynamic shared memory.
+     */
+    template<typename T>
+    __device__ __forceinline__ T* reduction_shared() {
+        extern __shared__ uint8_t reduction_shared_bytes[];
+        return reinterpret_cast<T*>(reduction_shared_bytes);
     }
 
     /**

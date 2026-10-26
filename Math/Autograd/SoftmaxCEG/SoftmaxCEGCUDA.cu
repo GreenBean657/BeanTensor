@@ -6,8 +6,8 @@
  * backends are written separately per project rule (no HIP-only unification),
  * but must stay behaviorally identical: same fp32/fp64 compute widths, same
  * RNE narrowing, same NaN handling.
- * @version 0.1
- * @date 2026-10-20
+ * @version 0.3
+ * @date 2026-10-26
  */
 #if defined(USE_CUDA)
 #include <cstdint>
@@ -143,6 +143,10 @@ namespace BeanTensor::Tensors::detail {
         /**
          * Narrow one class gradient into a non-packed logits element: floats
          * RNE (bf16 with the CPU-matching flush), integers clamp/truncate.
+         * The uint64/int64 maxima round UP to 2^64/2^63 in fp64, so the >=
+         * guard returns the true integer max before the static_cast (UB at
+         * exactly 2^64/2^63). The bounds are passed as T so the guard can
+         * return the exact limit value.
          * @brief Store one softmax_ce_g gradient element.
          * @param v Gradient value in the accumulator width.
          * @param lo Lowest integer value of T (ignored for float T).
@@ -150,7 +154,7 @@ namespace BeanTensor::Tensors::detail {
          * @return v converted to T.
          */
         template<typename T, typename Acc>
-        __device__ __forceinline__ T sce_narrow(const Acc v, const float64_t lo, const float64_t hi) {
+        __device__ __forceinline__ T sce_narrow(const Acc v, const T lo, const T hi) {
             if constexpr (std::is_same_v<T, float32_t> || std::is_same_v<T, float64_t>) {
                 return v;
             } else if constexpr (std::is_same_v<T, float16_t>) {
@@ -158,7 +162,16 @@ namespace BeanTensor::Tensors::detail {
             } else if constexpr (std::is_same_v<T, bfloat16_t>) {
                 return dev_narrow_bf16(v);
             } else {
-                return static_cast<T>(sce_clamp(static_cast<float64_t>(v), lo, hi));
+                const auto lo_f = static_cast<float64_t>(lo);
+                const auto hi_f = static_cast<float64_t>(hi);
+                const auto cv = sce_clamp(static_cast<float64_t>(v), lo_f, hi_f);
+                if (cv <= lo_f) {
+                    return lo;
+                }
+                if (cv >= hi_f) {
+                    return hi;
+                }
+                return static_cast<T>(cv);
             }
         }
 
@@ -180,15 +193,15 @@ namespace BeanTensor::Tensors::detail {
          * @param rows Row (batch) count.
          * @param cols_store Storage columns per row (packed elements count as one).
          * @param cols_eff Class count per row (2 * cols_store for packed dtypes).
-         * @param lo Lowest integer value of T (unused for float T).
-         * @param hi Highest integer value of T (unused for float T).
+         * @param lo Lowest integer value of T (value of type T; unused for float T).
+         * @param hi Highest integer value of T (value of type T; unused for float T).
          */
         template<typename T, typename I, typename Acc>
         __global__ void softmax_ce_g_rows_kernel(const T* __restrict__ logits, const I* __restrict__ targets,
                                                  const T* __restrict__ dloss, T* __restrict__ dlogits,
                                                  uint32_t* __restrict__ err, const size_t rows,
                                                  const size_t cols_store, const size_t cols_eff,
-                                                 const float64_t lo, const float64_t hi) {
+                                                 const T lo, const T hi) {
             const auto r = blockIdx.x;
             if (r >= rows) {
                 return;
@@ -268,6 +281,21 @@ namespace BeanTensor::Tensors::detail {
         }
 
         /**
+         * Worker-local cudaMalloc buffer that frees on scope exit even when an
+         * exception is in flight. The explicit cudaFree below still checks for
+         * errors on the success path.
+         * @brief RAII guard for the softmax_ce_g error flag scratch buffer.
+         */
+        struct SoftmaxCEGErrGuard {
+            uint32_t* ptr = nullptr;
+            ~SoftmaxCEGErrGuard() {
+                if (ptr != nullptr) {
+                    static_cast<void>(cudaFree(ptr));
+                }
+            }
+        };
+
+        /**
          * The error flag is worker-local cudaMalloc/cudaFree; the D2H flag copy syncs the
          * default stream, so dlogits is complete before the worker returns. Integer
          * bounds are computed on the host (nvcc rejects numeric_limits in device code).
@@ -285,20 +313,22 @@ namespace BeanTensor::Tensors::detail {
         __host__ void run_softmax_ce_g(const T* logits, const I* targets, const T* dloss, T* dlogits,
                               const size_t rows, const size_t cols_store, const size_t cols_eff) {
             // Integer bounds are computed on the host (nvcc rejects
-            // numeric_limits in device code).
-            auto lo = 0.0;
-            auto hi = 0.0;
+            // numeric_limits in device code); T{} for non-integer T, unused.
+            auto lo = T{};
+            auto hi = T{};
             if constexpr (std::is_integral_v<T>) {
-                lo = static_cast<float64_t>(std::numeric_limits<T>::lowest());
-                hi = static_cast<float64_t>(std::numeric_limits<T>::max());
+                lo = std::numeric_limits<T>::lowest();
+                hi = std::numeric_limits<T>::max();
             }
             uint32_t* err = nullptr;
             CUDA_CHECK_ERROR(cudaMalloc(&err, sizeof(uint32_t)));
+            SoftmaxCEGErrGuard guard{err};
             CUDA_CHECK_ERROR(cudaMemset(err, 0, sizeof(uint32_t)));
             softmax_ce_g_rows_kernel<T, I, Acc><<<rows, BT_GPU_THREADS>>>(logits, targets, dloss, dlogits, err, rows, cols_store, cols_eff, lo, hi);
             CUDA_CHECK_ERROR(cudaGetLastError());
             auto err_host = uint32_t{0};
             CUDA_CHECK_ERROR(cudaMemcpy(&err_host, err, sizeof(uint32_t), cudaMemcpyDeviceToHost));
+            guard.ptr = nullptr;
             CUDA_CHECK_ERROR(cudaFree(err));
             if (err_host != 0u) {
                 throw ErrorHandling::IndexOutOfRange();
@@ -353,8 +383,17 @@ namespace BeanTensor::Tensors::detail {
      * @throws ErrorHandling::IndexOutOfRange (from the worker, at sync) when a target is outside [0, cols_eff).
      */
     __host__ void softmax_ce_g_gpu(const Tensor& dloss_grad, const Tensor& logits, const Tensor& targets, const Tensor& dlogits) {
-        if (dloss_grad.device != Device::GPU || logits.device != Device::GPU || targets.device != Device::GPU || dlogits.device != Device::GPU) {
+        if (dloss_grad.device != Device::GPU) {
+            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(dloss_grad.device));
+        }
+        if (logits.device != Device::GPU) {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(logits.device));
+        }
+        if (targets.device != Device::GPU) {
+            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(targets.device));
+        }
+        if (dlogits.device != Device::GPU) {
+            throw ErrorHandling::DirectFunctionCallOnWrongDataSource("GPU", stringify_device_source(dlogits.device));
         }
         const auto* const g_data = dloss_grad.data;
         const auto* const l_data = logits.data;

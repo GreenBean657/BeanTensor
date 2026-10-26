@@ -2,13 +2,13 @@
  * @file ElementwiseHIP.cpp
  * @author GreenBean
  * @brief HIP backend for elementwise arithmetic ops with broadcasting.
- * The kernels and device helpers mirror the CPU backend bit-exactly (AGENTS.md
- * parity invariant): same fp32/fp64 compute widths, same CPU-unaccel RNE
+ * The kernels and device helpers mirror the CPU backend bit-exactly (the
+ * project's parity invariant): same fp32/fp64 compute widths, same CPU-unaccel RNE
  * narrowing twins, same wrap integer ops, same div-by-zero/min rules.
  * Divergent twin of Math/Elementwise/ElementwiseCUDA.cu — the two backends are
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical.
- * @version 0.1
+ * @version 0.2
  * @date 2026-10-22
  */
 #if defined(USE_HIP)
