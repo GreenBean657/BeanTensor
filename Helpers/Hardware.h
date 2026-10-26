@@ -284,8 +284,9 @@ struct CpuCcdGroups {
 
 /**
  * Detect CCD groups from sysfs (/sys/devices/system/cpu/cpuN/cache/indexM/). Each
- * distinct shared_cpu_list among level-3 Unified indices is one CCD group. When
- * sysfs is unavailable or unparseable, degrades to a single group containing all
+ * distinct shared_cpu_list among level-3 Unified indices is one CCD group. CPUs
+ * that no level-3 list covers are grouped together, so the union always spans every logical CPU. When sysfs
+ * is unavailable or unparseable, degrades to a single group containing all
  * logical CPUs. Memoized; this is a static value and will not change during runtime.
  * @brief Get the CCD topology of this CPU.
  * @return The CCD groups and the CPU -> group reverse index.
@@ -425,6 +426,30 @@ struct CpuCcdGroups {
                     }
                     result.groups.push_back(std::move(cpus));
                     group_idx++;
+                }
+                // CPUs no level-3 list covers (e.g. Meteor Lake's LP-E cores
+                // expose no L3 index) would belong to no group. Group them
+                // together so the union spans every logical CPU.
+                auto in_group = std::vector<bool>(num_cpus, false);
+                for (const auto& group : result.groups) {
+                    for (const uint32_t cpu : group) {
+                        if (cpu < num_cpus) {
+                            in_group[cpu] = true;
+                        }
+                    }
+                }
+                auto uncovered = std::vector<uint32_t>{};
+                for (uint32_t cpu = 0; cpu < num_cpus; cpu++) {
+                    if (!in_group[cpu]) {
+                        uncovered.push_back(cpu);
+                    }
+                }
+                if (!uncovered.empty()) {
+                    const auto extra_idx = static_cast<uint32_t>(result.groups.size());
+                    for (const uint32_t cpu : uncovered) {
+                        result.cpu_to_group[cpu] = extra_idx;
+                    }
+                    result.groups.push_back(std::move(uncovered));
                 }
                 return result;
             }

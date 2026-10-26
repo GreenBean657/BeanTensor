@@ -333,8 +333,7 @@ namespace {
             else {
                 continue;
             }
-            size_t val = 0;
-            if (
+            if (size_t val = 0;
                 parse_size_t(val_str, val) &&
                 val >= 1 && val <= kMaxBlockSize &&
                 (val & (val - 1)) == 0
@@ -358,8 +357,10 @@ namespace {
 
     size_t block_size_for(const GpuFamily, const size_t numel) noexcept {
         const auto idx = size_class_index(numel);
-        const auto& over = overrides();
-        if (over.active[idx].load(std::memory_order_acquire)) {
+        if (
+            const auto& over = overrides();
+            over.active[idx].load(std::memory_order_acquire)
+            ) {
             return over.values[idx].load(std::memory_order_relaxed);
         }
 
@@ -574,9 +575,10 @@ namespace {
         std::array<size_t, 4> autotune_representatives(const size_t free_bytes) {
             constexpr size_t kElementSize = sizeof(float32_t);
             constexpr std::array<size_t, 4> kFull = {32768, 1048576, 8388608, 67108864};
-            constexpr size_t kSmallRepBytes = kFull[1] * kElementSize + kSlackBytes;
 
-            if (free_bytes < kSmallRepBytes) {
+            if (
+                constexpr size_t kSmallRepBytes = kFull[1] * kElementSize + kSlackBytes;
+                free_bytes < kSmallRepBytes) {
                 throw ErrorHandling::NotImplemented();
             }
 

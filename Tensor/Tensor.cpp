@@ -523,6 +523,41 @@ namespace BeanTensor::Tensors {
     }
 
     /**
+     * Teardown path for the destructor and the noexcept move assignment: same
+     * frees as kill_gpu_data plus the convert buffer (mirroring kill_buffer),
+     * but the GPU frees are unchecked. At static teardown the driver may
+     * already be unloading (cudaErrorCudartUnloading, "driver shutting down")
+     * and no GPU call can succeed; those allocations are reclaimed with the
+     * process, so the failure is unactionable and must not escape these
+     * noexcept callers. Operational callers keep the checked variants.
+     */
+    void Tensor::kill_gpu_teardown_noexcept() noexcept {
+        if (
+            this->device == Device::GPU && this->owns_data && this->data != nullptr
+        ) {
+#if defined(USE_HIP)
+            (void)hipFree(this->data);
+#elif defined(USE_CUDA)
+            (void)cudaFree(this->data);
+#endif
+            this->data = nullptr;
+        }
+        if (this->convert_buffer != nullptr && this->convert_buffer_size != 0) {
+            if (this->device == Device::CPU) {
+                std::free(this->convert_buffer);
+            } else if (this->device == Device::GPU) {
+#if defined(USE_HIP)
+                (void)hipFree(this->convert_buffer);
+#elif defined(USE_CUDA)
+                (void)cudaFree(this->convert_buffer);
+#endif
+            }
+            this->convert_buffer = nullptr;
+            this->convert_buffer_size = 0;
+        }
+    }
+
+    /**
      * TODO - Write documentation.
      * @param parent
      */

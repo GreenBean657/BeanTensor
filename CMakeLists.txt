@@ -716,16 +716,14 @@ target_compile_options(BeanTensorV5 PRIVATE -O2)
 
 add_executable(BeanTensorV5Accelerated main.cpp)
 target_link_libraries(BeanTensorV5Accelerated PRIVATE BeanTensorV5Core)
-target_compile_options(BeanTensorV5Accelerated PRIVATE
-        -O3
-        -mavx512f
-        -mavx512bf16
-        -mavx512dq
-        -mf16c
-)
+target_compile_options(BeanTensorV5Accelerated PRIVATE -O3)
 
 if(BUILD_TESTING)
     enable_testing()
+    set_source_files_properties(
+            tests/tensor_tests.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx2;-mf16c"
+    )
     add_executable(BeanTensorV5Tests tests/tensor_tests.cpp)
     if(USE_HIP)
         target_compile_definitions(BeanTensorV5Tests PRIVATE USE_HIP)
@@ -924,6 +922,13 @@ if(BUILD_TESTING)
     )
     add_test(NAME BeanTensorV5ModuleTests COMMAND BeanTensorV5ModuleTests)
 
+    # Dispatch-gate invariant (Verifications/illegal_dispatch_gates.sh): this TU
+    # calls IncludedCPUFeatures().has_feature(), so it must carry per-file flags
+    # covering the features it gates on (AVX2/F16C) - its gate copy is blind otherwise.
+    set_source_files_properties(
+            tests/platform_topology_tests.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx2;-mf16c"
+    )
     add_executable(BeanTensorV5PlatformTests tests/platform_topology_tests.cpp)
     if(USE_HIP)
         target_compile_definitions(BeanTensorV5PlatformTests PRIVATE USE_HIP)

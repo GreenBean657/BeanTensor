@@ -6,8 +6,8 @@
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same NaN-propagating combine (canonical quiet NaN),
  * same -0.0 tie canonicalization, same per-lane rules for the packed dtypes.
- * @version 0.2
- * @date 2026-10-25
+ * @version 0.3
+ * @date 2026-10-26
  */
 #if defined(USE_CUDA)
 #include <algorithm>
@@ -43,6 +43,16 @@ namespace BeanTensor::Tensors::detail {
          */
         __device__ __forceinline__ float64_t dev_canon_nan(const float64_t) {
             return __builtin_bit_cast(float64_t, UINT64_C(0x7FF8000000000000));
+        }
+        /**
+         * Canonical fp16 quiet NaN is 0x7E00; __float2half_rn cannot be trusted to
+         * produce it on every stack (some narrow NaN to 0x7FFF), so stores
+         * canonicalize NaN lanes explicitly, mirroring the CPU/HIP backends.
+         * @brief Canonical quiet NaN of an fp16 lane.
+         * @return The canonical half NaN (0x7E00).
+         */
+        __device__ __forceinline__ float16_t dev_canon_nan(const float16_t) {
+            return __builtin_bit_cast(float16_t, uint16_t{0x7E00});
         }
 
         /**
@@ -296,11 +306,13 @@ namespace BeanTensor::Tensors::detail {
             if constexpr (std::is_same_v<T, float32_t> || std::is_same_v<T, float64_t>) {
                 out[0] = total;
             } else if constexpr (std::is_same_v<T, float16_t>) {
-                out[0] = __float2half_rn(total);
+                out[0] = isnan(total) ? dev_canon_nan(float16_t{}) : __float2half_rn(total);
             } else if constexpr (std::is_same_v<T, bfloat16_t>) {
                 out[0] = dev_narrow_bf16(total);
             } else if constexpr (std::is_same_v<T, float16x2_t>) {
-                out[0] = __halves2half2(__float2half_rn(total.x), __float2half_rn(total.y));
+                out[0] = __halves2half2(
+                    isnan(total.x) ? dev_canon_nan(float16_t{}) : __float2half_rn(total.x),
+                    isnan(total.y) ? dev_canon_nan(float16_t{}) : __float2half_rn(total.y));
             } else if constexpr (std::is_same_v<T, bfloat16x2_t>) {
                 out[0] = __halves2bfloat162(dev_narrow_bf16(total.x), dev_narrow_bf16(total.y));
             } else if constexpr (std::is_same_v<T, int4x2_t>) {

@@ -814,6 +814,26 @@ static void test_gpu() {
         CHECK(lane_hi_bits(gpu_min.at<float16x2_t>({0})) == h_bits(narrow_lane<float16_t>(1.0f)));
     }
     {
+        // Packed per-lane max on device: NaN wins per lane, bit-identical to the CPU twin.
+        auto gpu = Tensor({3}, DType::Float16x2, Device::GPU);
+        auto cpu = Tensor({3}, DType::Float16x2, Device::CPU);
+        const uint32_t bits[3] = {
+            idet::bit_cast_memcpy<uint32_t>(pack2_bits<float16x2_t>(uint16_t{0x7E00}, h_bits(narrow_lane<float16_t>(4.0f)))),
+            idet::bit_cast_memcpy<uint32_t>(pack2<float16x2_t, float16_t>(2.0f, 9.0f)),
+            idet::bit_cast_memcpy<uint32_t>(pack2<float16x2_t, float16_t>(-3.0f, 1.0f)),
+        };
+        for (size_t i = 0; i < 3; ++i) {
+            gpu.set<float16x2_t>({i}, idet::bit_cast_memcpy<float16x2_t>(bits[i]));
+            cpu.set<float16x2_t>({i}, idet::bit_cast_memcpy<float16x2_t>(bits[i]));
+        }
+        auto gpu_max = gpu.max();
+        gpu_max.sync();
+        auto cpu_max = cpu.max();
+        CHECK(idet::bit_cast_memcpy<uint32_t>(gpu_max.at<float16x2_t>({0})) == idet::bit_cast_memcpy<uint32_t>(cpu_max.at<float16x2_t>({0})));
+        CHECK(lane_lo_bits(gpu_max.at<float16x2_t>({0})) == uint16_t{0x7E00});
+        CHECK(lane_hi_bits(gpu_max.at<float16x2_t>({0})) == h_bits(narrow_lane<float16_t>(9.0f)));
+    }
+    {
         // Int4x2 per-lane signed min on device, bit-identical to the CPU twin.
         auto gpu = Tensor({3}, DType::Int4x2, Device::GPU);
         auto cpu = Tensor({3}, DType::Int4x2, Device::CPU);

@@ -92,8 +92,7 @@ namespace BeanTensor::Tensors {
             hand_off_children();
             detach_from_parents();
             kill_cpu_data();
-            kill_gpu_data();
-            kill_buffer();
+            kill_gpu_teardown_noexcept();
             // Autograd state is owned: grad is a heap tensor, node a heap Node.
             delete this->node;
             delete this->grad;
@@ -141,8 +140,7 @@ namespace BeanTensor::Tensors {
             hand_off_children();
             detach_from_parents();
             kill_cpu_data();
-            kill_gpu_data();
-            kill_buffer();
+            kill_gpu_teardown_noexcept();
             delete this->node;
             delete this->grad;
             this->node = nullptr;
@@ -1190,6 +1188,17 @@ namespace BeanTensor::Tensors {
          * @note DOES NOT DECONSTRUCT BUFFER.
          */
         void kill_gpu_data();
+
+        /**
+         * Teardown variant of kill_gpu_data/kill_buffer for the destructor and
+         * the noexcept move assignment: frees GPU data and the convert buffer
+         * without throwing. At static teardown the CUDA/HIP driver may already
+         * be unloading (cudaErrorCudartUnloading, "driver shutting down"); the
+         * allocation is reclaimed with the process, so a free error there is
+         * unactionable — and these callers cannot throw anyway.
+         * @note Swallows GPU free errors; operational callers must use the checked variants.
+         */
+        void kill_gpu_teardown_noexcept() noexcept;
 
         /**
          * Notify a child tensor it needs to clone the data to stay alive.

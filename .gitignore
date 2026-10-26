@@ -1,7 +1,9 @@
 build/
 build-verify/
 cmake-build-debug/
+cmake-build-release/
 scratch/
+__pycache__/
 safe-delete.sh
 /benchmark/
 .idea/

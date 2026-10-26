@@ -1639,6 +1639,41 @@ static void test_indexing_gpu() {
 #endif
 }
 
+// GPU random() stages a host fill inside a pool worker. Above threads*1024
+// elements that fill is chunked across the pool; the worker must help-wait on
+// the chunks, or it parks on one stuck in its own deque and the pool spins
+// forever (hung on Linear construction in main.cpp). The staged values must
+// also match a CPU fill with the same seed bit for bit.
+static void test_random_gpu_chunked() {
+#if defined(USE_HIP) || defined(USE_CUDA)
+    if (!gpu_available()) {
+        std::cout << "GPU chunked random test skipped (no device)\n";
+        return;
+    }
+    constexpr size_t kNumel = size_t{1} << 20;
+    constexpr int64_t kSeed = 1234;
+    auto host = Tensor({kNumel}, DType::Float32);
+    host.random(-1.0, 1.0, kSeed);
+    host.sync();
+    auto device = Tensor({kNumel}, DType::Float32, Device::GPU);
+    device.random(-1.0, 1.0, kSeed);
+    device.to(Device::CPU);
+    device.sync();
+    auto mismatches = size_t{0};
+    for (auto i = size_t{0}; i < kNumel; ++i) {
+        if (
+            const auto same = std::bit_cast<uint32_t>(host.at<float32_t>({i})) == std::bit_cast<uint32_t>(device.at<float32_t>({i}));
+            !same
+        ) {
+            ++mismatches;
+        }
+    }
+    CHECK(mismatches == 0);
+#else
+    std::cout << "GPU chunked random test skipped (CPU-only build)\n";
+#endif
+}
+
 int32_t main() {
     std::cout << "TensorTests" << std::endl;
     test_fills_cpu();
@@ -1660,6 +1695,7 @@ int32_t main() {
     test_indexing_cpu();
     test_indexing_gpu();
     test_gpu();
+    test_random_gpu_chunked();
     if (failures == 0) {
         std::cout << "ALL TESTS PASSED" << std::endl;
         return 0;

@@ -4,8 +4,8 @@
  * @brief CUDA GPU kernels + host wrappers for basic tensor operations.
  * Mirror pair of Tensor/Ops/TensorOps.cpp (HIP); both backends must stay behaviorally identical (same rounding via
  * explicit _rn intrinsics, same fail_check semantics, same async handoff to Threading::GetCPUThreadPool()).
- * @version 0.1.1
- * @date 2026-10-18
+ * @version 0.1.2
+ * @date 2026-10-26
  */
 #if defined(USE_CUDA)
 #include <cstdint>
@@ -860,11 +860,26 @@ namespace BeanTensor::Tensors::detail {
         }
         t.sync();
         const auto worker = [&t, min, max, seed] {
+            // This body runs on a pool worker, so temp's queued work (the
+            // chunked host fill, then the upload) must be awaited with a
+            // helping wait. A blocking temp.sync() here parks the worker while
+            // a fill chunk sits in its own deque; steal() never takes a lone
+            // task, so the pool spins forever and the GPU never sees work.
+            auto& pool = Threading::GetCPUThreadPool();
+            const auto help_sync = [&pool](const Tensor& pending) {
+                const auto tasks = std::move(pending.pending_tasks);
+                pending.pending_tasks.clear();
+                pool.HelpWait(tasks);
+                // Every future is ready now: get() only rethrows task errors.
+                for (const auto& f : tasks) {
+                    f.get();
+                }
+            };
             auto temp = Tensor({t.numel}, t.dtype, Device::CPU, false);
             temp.random(min, max, seed);
-            temp.sync();
+            help_sync(temp);
             move_to_gpu(temp);
-            temp.sync();
+            help_sync(temp);
             // NEVER EXECUTE .SYNC WITHIN A TENSORS OWN WORKER
             t.kill_gpu_data(); // free the previous allocation
             t.data = temp.data;
