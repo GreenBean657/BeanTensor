@@ -102,4 +102,22 @@ regardless of how many threads run. Explicit-seed calls are reproducible.
 so their exact bits may differ between CPU scalar, SIMD, and GPU paths. Min,
 max, and argmax are bit-identical across backends.
 
+## Scope
 
+Decisions binding the MVP, recorded 2026-10-27:
+
+- Python bindings are out of scope for the MVP. The library ships as C++;
+  bindings are a later phase. The public API is already shaped for them —
+  value-in/value-out signatures, no non-const reference or mutable pointer
+  parameters — enforced on every build by the bind-clean verification.
+- ReLU is the only activation. The demo model uses nothing else, and each
+  additional activation costs CPU + AVX2/AVX-512 + HIP + CUDA parity plus
+  autograd.
+- Weight initialization is He (Kaiming) uniform, fan-in — bound
+  sqrt(6 / in_features), bias zero — replacing the old ad-hoc range. Lands
+  with workload Task 4 in `Module/Linear`.
+- The accuracy pass bar is the PyTorch comparison harness
+  (`comparison/mnist_pytorch.py`) on the same architecture, minus one
+  percentage point. That is the Task 6 acceptance criterion.
+- The model is a single MLP — 784 → hidden → 10 for MNIST. No convolutions:
+  no conv kernels, no conv autograd, no conv topology in the acceptance run.
