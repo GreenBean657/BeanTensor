@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# pre-push gate for BeanTensor. Runs scripts/pre-push-check.sh on every push;
+# the push is refused if any phase fails. Bypass (emergencies only, loud):
+#   BEANTENSOR_SKIP_PREPUSH=1 git push ...
+# One-time setup (repo-local, survives clones only after re-running):
+#   git config core.hooksPath hooks
+set -u
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+if [[ "${BEANTENSOR_SKIP_PREPUSH:-}" == "1" ]]; then
+    echo "pre-push: BEANTENSOR_SKIP_PREPUSH=1 — gate bypassed, pushing unchecked." >&2
+    exit 0
+fi
+exec bash "$ROOT/scripts/pre-push-check.sh"

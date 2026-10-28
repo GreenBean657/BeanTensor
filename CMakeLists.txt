@@ -61,6 +61,18 @@ elseif (USE_HIP)
 else()
     project(BeanTensorV5 LANGUAGES CXX)
 endif()
+
+# Route Git to the repo-managed hooks directory so the pre-push gate is active
+# in every configured clone.
+find_package(Git QUIET)
+if(Git_FOUND)
+    execute_process(
+            COMMAND "${GIT_EXECUTABLE}" config core.hooksPath hooks
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            OUTPUT_QUIET ERROR_QUIET
+    )
+endif()
+
 include(CTest)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

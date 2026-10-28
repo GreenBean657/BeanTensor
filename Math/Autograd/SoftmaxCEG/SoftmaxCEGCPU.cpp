@@ -4,8 +4,8 @@
  * @brief CPU backend for softmax cross-entropy backward, plus the softmax_ce
  * backward trampoline (softmax_ce_g_node). Scalar exp()/log() dominate, so
  * there are no SIMD kernels (same reason as forward softmax_ce).
- * @version 0.1.3
- * @date 2026-10-25
+ * @version 0.1.4
+ * @date 2026-10-27
  */
 #include <algorithm>
 #include <cmath>
@@ -125,7 +125,12 @@ namespace BeanTensor::Tensors::detail {
         /**
          * Row softmax gradient: dx_j = (exp(x_j - m) / s - (j == target)) *
          * dloss_scaled, with m/s recomputed exactly like the forward pass (max
-         * ignores NaN; a NaN logit poisons s and thus the whole row).
+         * ignores NaN; a NaN logit poisons s and thus the whole row). The
+         * target gradient is the negative sum of the non-target gradients in
+         * the same accumulator, so the row keeps its zero-sum property when
+         * the target probability rounds to exactly 1.
+         * @note Target gradient is the negative sum of the non-target gradients,
+         *       restoring the zero-sum property (softmax collapse, arXiv:2610.31642).
          * @brief Scalar row softmax_ce backward (non-packed dtypes).
          * @param row Logits row.
          * @param out_row Output gradient row (written).
@@ -162,17 +167,25 @@ namespace BeanTensor::Tensors::detail {
             for (auto j = size_t{0}; j < cols; ++j) {
                 s += std::exp(widen(j) - m);
             }
+            auto sum_non_target = Acc{0};
             for (auto j = size_t{0}; j < cols; ++j) {
-                const auto p = std::exp(widen(j) - m) / s;
-                const auto g = (p - (j == target ? Acc{1} : Acc{0})) * dloss_scaled;
-                out_row[j] = narrow_grad<T, Acc>(g);
+                if (j != target) {
+                    const auto g = (std::exp(widen(j) - m) / s) * dloss_scaled;
+                    sum_non_target += g;
+                    out_row[j] = narrow_grad<T, Acc>(g);
+                }
             }
+            out_row[target] = narrow_grad<T, Acc>(-sum_non_target);
         }
 
         /**
          * Packed/int4x2 row softmax gradient: same math, but each output
-         * element packs two consecutive class gradients. int4x2 results are
-         * narrowed through int8 (NaN -> 0, clamp, truncate) then clamped to [-8, 7].
+         * element packs two consecutive class gradients; the target lane or
+         * nibble is the negative accumulated sum of the non-target gradients.
+         * int4x2 results are narrowed through int8 (NaN -> 0, clamp, truncate)
+         * then clamped to [-8, 7].
+         * @note Target gradient is the negative sum of the non-target gradients,
+         *       restoring the zero-sum property (softmax collapse, arXiv:2610.31642).
          * @brief Scalar row softmax_ce backward (packed x2 / int4x2 dtypes).
          * @param out_row Output gradient row (written), cols_eff / 2 packed elements.
          * @param probs Precomputed softmax probabilities, cols_eff entries.
@@ -182,10 +195,20 @@ namespace BeanTensor::Tensors::detail {
          */
         template<typename T, typename Acc>
         void softmax_ce_g_row_packed(T* out_row, const Acc* probs, const size_t cols_eff, const size_t target, const Acc dloss_scaled) {
+            auto sum_non_target = Acc{0};
             for (auto e = size_t{0}; e < cols_eff / 2; ++e) {
                 const auto j = 2 * e;
-                const auto glo = (probs[j] - (j == target ? Acc{1} : Acc{0})) * dloss_scaled;
-                const auto ghi = (probs[j + 1] - (j + 1 == target ? Acc{1} : Acc{0})) * dloss_scaled;
+                if (j != target) {
+                    sum_non_target += probs[j] * dloss_scaled;
+                }
+                if (j + 1 != target) {
+                    sum_non_target += probs[j + 1] * dloss_scaled;
+                }
+            }
+            for (auto e = size_t{0}; e < cols_eff / 2; ++e) {
+                const auto j = 2 * e;
+                const auto glo = j == target ? -sum_non_target : probs[j] * dloss_scaled;
+                const auto ghi = (j + 1) == target ? -sum_non_target : probs[j + 1] * dloss_scaled;
                 if constexpr (std::is_same_v<T, int4x2_t>) {
                     // Clamp to the signed nibble range [-8, 7] (store_mean's
                     // int4x2 contract), after the int8 NaN->0 / truncate.

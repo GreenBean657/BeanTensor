@@ -6,8 +6,8 @@
  * backends are written separately per project rule (no HIP-only unification),
  * but must stay behaviorally identical: same fp32/fp64 compute widths, same
  * RNE narrowing, same NaN handling.
- * @version 0.3
- * @date 2026-10-26
+ * @version 0.4
+ * @date 2026-10-27
  */
 #if defined(USE_HIP)
 #include <cstdint>
@@ -176,13 +176,17 @@ namespace BeanTensor::Tensors::detail {
 
         /**
          * Row softmax_ce backward, one block per row: block-reduce the widened
-         * max and sum(exp(x - m)) exactly like the forward kernel, then every
-         * thread writes dx_j = (exp(x_j - m) / s - 1{j == target}) * dloss / rows
-         * for its classes. Packed dtypes write both lanes of an element per
-         * thread; int4x2 clamps each nibble to [-8, 7]. A NaN logit poisons s
-         * and thus the whole row. An out-of-range target sets *err (the host
-         * throws IndexOutOfRange after sync - device code cannot throw).
+         * max and sum(exp(x - m)) exactly like the forward kernel; each thread
+         * then accumulates its scaled non-target partial gradients and a third
+         * block reduction sums them, so the target column stores the negative
+         * of that sum (the target gradient) and the row keeps its zero-sum
+         * property. Packed dtypes write both lanes of an element per thread;
+         * int4x2 clamps each nibble to [-8, 7]. A NaN logit poisons s and thus
+         * the whole row. An out-of-range target sets *err (the host throws
+         * IndexOutOfRange after sync - device code cannot throw).
          * Launched as one block of BT_GPU_THREADS threads per row (grid = rows).
+         * @note Target gradient is the negative sum of the non-target gradients,
+         *       restoring the zero-sum property (softmax collapse, arXiv:2610.31642).
          * @brief softmax_ce backward per-row kernel (all dtypes).
          * @param logits Forward logits, rows x cols_store storage elements.
          * @param targets Target class index per row, rows elements.
@@ -245,6 +249,7 @@ namespace BeanTensor::Tensors::detail {
                 __syncthreads();
             }
             const auto total = shared[0];
+            __syncthreads(); // all threads have read total; shared is reused for the non-target partials below
             auto target = sce_target(targets, r);
             if (target < 0 || static_cast<uint64_t>(target) >= cols_eff) {
                 if (tid == 0) {
@@ -254,27 +259,51 @@ namespace BeanTensor::Tensors::detail {
             }
             const auto scaled = sce_dloss<T, Acc>(dloss) / static_cast<Acc>(rows);
             /**
-             * Captures the enclosing kernel state (row, m, total, target, scaled) by reference and is called per element by each thread.
-             * Computes the softmax probability exp(logit - m) / total, subtracts 1 at the target column, and scales by dloss / rows.
-             * A target of -1 (invalid, flagged for the host) yields no one-hot subtraction.
+             * Captures the enclosing kernel state (row, m, total, scaled) by reference and is called per element by each thread.
+             * Computes the scaled non-target gradient exp(logit - m) / total * (dloss / rows).
              * @brief Device-side gradient of the softmax cross-entropy loss for one logical class column.
              * @param j Logical (unpacked) class column index within the row.
              * @return Gradient value in the accumulator type Acc.
              */
             auto grad_at = [&](const size_t j) -> Acc {
-                const auto p = acc_exp(sce_widen<T, Acc>(row, j) - m) / total;
-                return (p - (static_cast<int64_t>(j) == target ? Acc{1} : Acc{0})) * scaled;
+                return (acc_exp(sce_widen<T, Acc>(row, j) - m) / total) * scaled;
+            };
+            auto partial = Acc{0};
+            for (auto j = tid; j < cols_eff; j += BT_GPU_THREADS) {
+                if (static_cast<int64_t>(j) != target) {
+                    partial += grad_at(j);
+                }
+            }
+            shared[tid] = partial;
+            __syncthreads();
+            for (auto s = BT_GPU_THREADS / 2; s > 0; s >>= 1) {
+                if (tid < s) {
+                    shared[tid] = shared[tid] + shared[tid + s];
+                }
+                __syncthreads();
+            }
+            const auto non_target_sum = shared[0];
+            /**
+             * Captures non_target_sum, target and grad_at by reference and is called per element by each thread.
+             * Substitutes the block-reduced negative non-target sum at the target column (the target gradient, restoring the row's zero-sum property).
+             * A target of -1 (invalid, flagged for the host) never matches a column, so every column stores grad_at - no one-hot subtraction.
+             * @brief Device-side gradient store value for one logical class column.
+             * @param j Logical (unpacked) class column index within the row.
+             * @return Gradient value in the accumulator type Acc.
+             */
+            auto store_at = [&](const size_t j) -> Acc {
+                return static_cast<int64_t>(j) == target ? -non_target_sum : grad_at(j);
             };
             for (auto e = tid; e < cols_store; e += BT_GPU_THREADS) {
                 if constexpr (std::is_same_v<T, float16x2_t>) {
-                    out_row[e] = __halves2half2(__float2half_rn(grad_at(2 * e)), __float2half_rn(grad_at(2 * e + 1)));
+                    out_row[e] = __halves2half2(__float2half_rn(store_at(2 * e)), __float2half_rn(store_at(2 * e + 1)));
                 } else if constexpr (std::is_same_v<T, bfloat16x2_t>) {
-                    out_row[e] = __halves2bfloat162(dev_narrow_bf16(grad_at(2 * e)), dev_narrow_bf16(grad_at(2 * e + 1)));
+                    out_row[e] = __halves2bfloat162(dev_narrow_bf16(store_at(2 * e)), dev_narrow_bf16(store_at(2 * e + 1)));
                 } else if constexpr (std::is_same_v<T, int4x2_t>) {
-                    out_row[e] = dev_pack_int4(static_cast<int32_t>(sce_clamp(grad_at(2 * e), -8.0, 7.0)),
-                                               static_cast<int32_t>(sce_clamp(grad_at(2 * e + 1), -8.0, 7.0)));
+                    out_row[e] = dev_pack_int4(static_cast<int32_t>(sce_clamp(store_at(2 * e), -8.0, 7.0)),
+                                               static_cast<int32_t>(sce_clamp(store_at(2 * e + 1), -8.0, 7.0)));
                 } else {
-                    out_row[e] = sce_narrow<T, Acc>(grad_at(e), lo, hi);
+                    out_row[e] = sce_narrow<T, Acc>(store_at(e), lo, hi);
                 }
             }
         }

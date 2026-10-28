@@ -517,6 +517,84 @@ static void test_softmax_ce_g_threaded(const Device dev) {
     CHECK(bad == 0);
 }
 
+// Softmax-collapse regression (arXiv:2610.31642): with the target logit past
+// the accumulator cliff, the naive (p - 1) target gradient rounds to exactly 0
+// and the row gradient stops summing to zero; the dlogits row must still sum
+// to zero (target gradient = negative sum of the non-target gradients). The
+// pre-fix residue here is ~1.7e-17, the post-fix sum is exactly 0, so the
+// discriminating tolerance sits well below the residue.
+template<typename T>
+static void run_sce_g_zero_sum_case(const Device dev, const DType dt) {
+    constexpr size_t rows = 1;
+    constexpr size_t cols = 5;
+    Tensor logits({rows, cols}, dt, dev, true);
+    Tensor targets({rows}, DType::Int32, dev, false);
+    const auto put = [&](const size_t j, const float32_t v) {
+        if constexpr (std::is_same_v<T, float32_t> || std::is_same_v<T, float64_t>) {
+            logits.set<T>({0, j}, static_cast<T>(v));
+        } else {
+            logits.set<T>({0, j}, narrow_lane<T>(v));
+        }
+    };
+    for (auto j = size_t{0}; j < cols; ++j) {
+        put(j, j == 0 ? 40.0f : 0.0f);
+    }
+    targets.set<int32_t>({0}, 0);
+    auto loss = logits.softmax_ce(targets);
+    loss.backward(dt);
+    auto total = float64_t{0.0};
+    for (auto j = size_t{0}; j < cols; ++j) {
+        if constexpr (std::is_same_v<T, float32_t> || std::is_same_v<T, float64_t>) {
+            total += static_cast<float64_t>(logits.gradient().at<T>({0, j}));
+        } else {
+            total += static_cast<float64_t>(widen_lane(logits.gradient().at<T>({0, j})));
+        }
+    }
+    CHECK(std::fabs(total) <= 1e-20);
+}
+
+// Packed variant: 4 effective classes in 2 storage elements, target = the lo
+// lane of element 0, residue-class logit 20 (still past the fp32-accumulator
+// cliff: 3*exp(-20) << 2^-25, so s rounds to 1 and the old target gradient
+// collapses to 0 with a ~3*exp(-20) non-target residue). This is the only
+// zero-sum case that exercises the packed accumulation rewrite. The packed
+// bf16 lanes round independently (RNE), so the post-fix row sum is zero only
+// to the storage ulp (~3*exp(-20)*2^-8); the tolerance sits above that bound
+// and far below the pre-fix residue.
+template<typename P, typename H>
+static void run_sce_g_zero_sum_packed_case(const Device dev, const DType dt) {
+    constexpr size_t rows = 1;
+    constexpr size_t cols_store = 2;
+    Tensor logits({rows, cols_store}, dt, dev, true);
+    Tensor targets({rows}, DType::Int32, dev, false);
+    for (auto e = size_t{0}; e < cols_store; ++e) {
+        logits.set<P>({0, e}, pack_lanes<P, H>(e == 0 ? 40.0f : 20.0f, e == 0 ? 20.0f : 0.0f));
+    }
+    targets.set<int32_t>({0}, 0);
+    auto loss = logits.softmax_ce(targets);
+    loss.backward(dt);
+    auto total = float64_t{0.0};
+    for (auto e = size_t{0}; e < cols_store; ++e) {
+        const auto g = logits.gradient().at<P>({0, e});
+        total += static_cast<float64_t>(lane_lo_f32<H>(g));
+        total += static_cast<float64_t>(lane_hi_f32<H>(g));
+    }
+    CHECK(std::fabs(total) <= 1e-10);
+}
+
+// Every dtype in which the collapse is observable in the stored gradient:
+// fp32/bf16/bfloat16x2 on the fp32 accumulator (cliff ~16.6) and fp64 on the
+// fp64 accumulator (cliff ~36.7). fp16/float16x2 and the integer/int4x2
+// logits are storage-limited: at the collapse margins their storage flushes
+// the tiny non-target residue to zero anyway, so the stored row is all-zero
+// under both the old and the new code - a test there would be vacuous.
+static void test_softmax_ce_g_zero_sum(const Device dev) {
+    run_sce_g_zero_sum_case<float32_t>(dev, DType::Float32);
+    run_sce_g_zero_sum_case<bfloat16_t>(dev, DType::BFloat16);
+    run_sce_g_zero_sum_case<float64_t>(dev, DType::Float64);
+    run_sce_g_zero_sum_packed_case<bfloat16x2_t, bfloat16_t>(dev, DType::BFloat16x2);
+}
+
 // =====================================================================
 // Full chain: relu(x·W + b).softmax_ce(t)
 // =====================================================================
@@ -1130,6 +1208,7 @@ static void run_device_suite(const Device dev) {
     test_gemm_g_one_side(dev);
     test_softmax_ce_g(dev);
     test_softmax_ce_g_threaded(dev);
+    test_softmax_ce_g_zero_sum(dev);
     test_accumulation_and_zero_grad(dev);
     test_fan_out(dev);
     test_sum_g_basic(dev);
