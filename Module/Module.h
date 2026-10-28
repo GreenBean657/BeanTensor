@@ -6,13 +6,13 @@
  * parameter access with manual gradient access (each parameter is a plain
  * Tensors::Tensor whose accumulated gradient lives in Tensor::grad), layer
  * injection helpers for container subclasses, Adam/zero_grad training
- * conveniences over the whole tree, and a human-readable std::ostream tree
- * printer (terminal only — serialization to .bt files comes later). Also
+ * conveniences over the whole tree, and a human-readable string tree printer
+ * via print() (terminal only — serialization to .bt files comes later). Also
  * declares mse_loss, the module-facing entry point to the MSE loss
  * (Math/Loss/Loss.h), and softmax_cross_entropy, the module-facing entry
  * point to Tensor::softmax_ce, for forward/backward training loops.
- * @version 0.3.4
- * @date 2026-10-23
+ * @version 0.4
+ * @date 2026-10-28
  */
 #pragma once
 
@@ -21,7 +21,6 @@
 #include <deque>
 #include <memory>
 #include <optional>
-#include <ostream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -227,11 +226,11 @@ namespace BeanTensor::Modules {
          * Human-readable tree dump, one line per parameter/child, children
          * printed recursively under "[name] <Type> {" headers. Terminal
          * output only — no serialization contract.
-         * @brief Print the module tree (names, layer types, shapes).
-         * @param os Stream to write to.
+         * @brief Return the module tree as a string (names, layer types, shapes).
          * @param indent Nesting depth in steps of two spaces (0 at top level).
+         * @return The formatted module tree; totals are appended only at indent 0.
          */
-        virtual void print(std::ostream& os, size_t indent) const;
+        [[nodiscard]] virtual std::string print(size_t indent = 0) const;
 
     protected:
         /**
@@ -376,15 +375,6 @@ namespace BeanTensor::Modules {
          */
         void forget_optimizer_state() const;
     };
-
-    /**
-     * Stream the whole module tree via Module::print at indent 0.
-     * @brief Human-readable module tree to a stream.
-     * @param os Destination stream.
-     * @param module Module to print.
-     * @return The stream, for chaining.
-     */
-    std::ostream& operator<<(std::ostream& os, const Module& module);
 
     /**
      * Human-readable byte count: "512 B" below 1 KiB, otherwise one decimal in

@@ -2,8 +2,8 @@
  * @file Tensor.h
  * @author GreenBean
  * @brief Tensor class declaration: dtype, shape, device and buffer ownership.
- * @version 0.4.2
- * @date 2026-10-25
+ * @version 0.4.3
+ * @date 2026-10-28
  */
 #pragma once
 #define BT_TENSOR_MAX_DIMS 3
@@ -13,7 +13,6 @@
 #include <cstddef>
 #include <future>
 #include <optional>
-#include <random>
 #include <utility>
 #include <vector>
 
@@ -153,12 +152,14 @@ namespace BeanTensor::Tensors {
         }
 
         /**
-         *
+         * @brief Fill this tensor with uniformly distributed random values in [min, max].
          * @param min Lowest possible value for this tensor.
          * @param max Highest possible value for this tensor.
-         * @param seed Seed to use. Default is randomized.
+         * @param seed Explicit seed, or omitted/nullopt to draw one seed from the
+         * process-wide default generator (see Random/Generator.h). The draw happens
+         * on the calling thread before dispatch.
          */
-        void random(const float64_t& min = 0.0, const float64_t& max = 1.0, int64_t seed = std::random_device()());
+        void random(const float64_t& min = 0.0, const float64_t& max = 1.0, std::optional<int64_t> seed = std::nullopt);
         void set_one();
         void set_zero();
 

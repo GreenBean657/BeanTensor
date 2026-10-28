@@ -302,7 +302,9 @@ set(CORE_SOURCES
         Math/Autograd/ElementwiseG/ElementwiseGCPU.cpp
         Math/Autograd/ElementwiseG/ElementwiseGHIP.cpp
         Math/Autograd/ElementwiseG/ElementwiseGCUDA.cu
+        Random/Generator.h
         Module/Module.h
+        Module/ModuleStream.h
         Module/Module.cpp
         Module/Linear.h
         Module/Linear.cpp
@@ -933,6 +935,24 @@ if(BUILD_TESTING)
             -mf16c
     )
     add_test(NAME BeanTensorV5ModuleTests COMMAND BeanTensorV5ModuleTests)
+
+    add_executable(BeanTensorV5RandomTests tests/random_seed_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5RandomTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5RandomTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5RandomTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5RandomTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5RandomTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5RandomTests COMMAND BeanTensorV5RandomTests)
 
     # Dispatch-gate invariant (Verifications/illegal_dispatch_gates.sh): this TU
     # calls IncludedCPUFeatures().has_feature(), so it must carry per-file flags

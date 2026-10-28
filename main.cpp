@@ -40,6 +40,7 @@
 #include "Helpers/PoolMonitor.h"
 #include "Module/Linear.h"
 #include "Module/Module.h"
+#include "Module/ModuleStream.h"
 #include "Module/Relu.h"
 #include "Module/Sequential.h"
 #include "Tensor/Tensor.h"

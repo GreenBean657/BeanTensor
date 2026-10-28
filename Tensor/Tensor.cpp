@@ -8,6 +8,7 @@
 #include "Tensor.h"
 
 #include <cstring>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <unordered_map>
@@ -18,6 +19,7 @@
 #include "Helpers/Hardware.h"
 #include "Intrinsics/Dispatcher.h"
 #include "Intrinsics/Native/DTypeConversions.h"
+#include "Random/Generator.h"
 
 #define BT_RECURSIVE_MAX_DEPTH 128
 namespace BeanTensor::Tensors::detail {
@@ -163,7 +165,6 @@ namespace BeanTensor::Tensors::detail {
     template<typename T>
     static void fill_random_impl(void* data, const size_t numel, const size_t seed, const float64_t min, const float64_t max, const Tensor& exec) {
         auto& threadMgr = Threading::GetCPUThreadPool();
-        const size_t t_count = IncludedCPUFeatures().threads;
         auto* ptr = static_cast<T*>(data);
         const static std::string err = "Random number generation range is out of supported range";
         if constexpr (std::is_same_v<T, int4x2_t>) {
@@ -243,28 +244,31 @@ namespace BeanTensor::Tensors::detail {
             }
         };
 
-        if (numel <= t_count * 1024) {
+        constexpr auto kRandomChunkElems = size_t{1} << 20;
+        if (numel <= kRandomChunkElems) {
             worker(0, numel, seed, min, max);
             return;
         }
         std::vector<std::shared_future<void>> futures;
-        const size_t chunk_size = (numel + t_count - 1) / t_count;
+        const auto n_chunks = (numel + kRandomChunkElems - 1) / kRandomChunkElems;
         // The fill writes the whole destination buffer; when it fits one
         // CCD's LLC the chunks go to the calling thread's CCD group so the
         // cache-resident buffer is written locally (cross-CCD writes ~8x).
         const bool keep_local = KeepWorkLocal(numel * sizeof(T));
         const uint32_t group = keep_local ? CcdGroupOfCurrentCpu() : uint32_t{0};
-        for (size_t t = 0; t < t_count; ++t) {
-            const size_t t_start = t * chunk_size;
-            const size_t t_end = std::min(t_start + chunk_size, numel);
-            if (t_start >= numel) break;
+        for (size_t c = 0; c < n_chunks; ++c) {
+            const size_t t_start = c * kRandomChunkElems;
+            const size_t t_end = std::min(t_start + kRandomChunkElems, numel);
+            const size_t sub_seed = (t_start == 0)
+                ? seed
+                : (seed ^ static_cast<size_t>(Random::detail::mix64(t_start)));
             if (keep_local) {
                 futures.push_back(threadMgr.submit_to_group(
-                    [=] { worker(t_start, t_end, seed + t, min, max); }, group
+                    [=] { worker(t_start, t_end, sub_seed, min, max); }, group
                 ).share());
             } else {
                 futures.push_back(threadMgr.submit(
-                    [=] { worker(t_start, t_end, seed + t, min, max); }
+                    [=] { worker(t_start, t_end, sub_seed, min, max); }
                 ).share());
             }
         }
@@ -678,13 +682,16 @@ namespace BeanTensor::Tensors {
     }
 
     /**
-     * TODO - Write documentation.
-     * @param min
-     * @param max
-     * @param seed
+     * @brief Fill this tensor with uniformly distributed random values in [min, max].
+     * @param min Lowest possible value for this tensor.
+     * @param max Highest possible value for this tensor.
+     * @param seed Explicit seed, or omitted/nullopt to draw one seed from the
+     * process-wide default generator (see Random/Generator.h). The draw happens
+     * on the calling thread before dispatch.
      */
-    void Tensor::random(const float64_t &min, const float64_t &max, const int64_t seed) {
+    void Tensor::random(const float64_t &min, const float64_t &max, std::optional<int64_t> seed) {
         sync();
+        const auto s = seed.has_value() ? *seed : static_cast<int64_t>(Random::default_generator().draw_seed());
         if (this->device == Device::CPU) {
             using FillFn = void(*)(void*, size_t, size_t, float64_t, float64_t, const Tensor&);
             using DType = DataTypes::DType;
@@ -710,9 +717,9 @@ namespace BeanTensor::Tensors {
             if (it == fill_fns.end()) [[unlikely]] {
                 throw ErrorHandling::NotImplemented();
             }
-            it->second(this->data, this->numel, static_cast<size_t>(seed), min, max, *this);
+            it->second(this->data, this->numel, static_cast<size_t>(s), min, max, *this);
         } else if (this->device == Device::GPU) {
-            detail::set_random_gpu(*this, min, max, seed);
+            detail::set_random_gpu(*this, min, max, s);
         } else [[unlikely]] {
             throw ErrorHandling::NotImplemented();
         }

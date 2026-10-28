@@ -5,14 +5,14 @@
  * optional bias {out_features}, both registered as named parameters
  * ("weight", "bias") on the Module base, and forward = matmul + bias_add
  * following the project's x(m×k)·w(k×n) GEMM convention.
- * @version 0.1
- * @date 2026-10-23
+ * @version 0.2
+ * @date 2026-10-28
  */
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
-#include <random>
+#include <optional>
 #include <string>
 
 #include "Module/Module.h"
@@ -40,13 +40,16 @@ namespace BeanTensor::Modules {
          * @param dtype Parameter/input dtype (Float32 by default).
          * @param device Device to hold the parameters on (CPU by default).
          * @param bias Whether to register and add a bias parameter.
-         * @param seed Init seed for the uniform parameter fill (random by default).
+         * @param seed Init seed for the uniform parameter fill. When omitted,
+         *        weight is filled from the next draw of the process-wide
+         *        Generator and bias from the draw after that (weight first,
+         *        bias second); when explicit, the bias uses `seed ^ 1`.
          */
         Linear(size_t in_features, size_t out_features,
                DataTypes::DType dtype = DataTypes::DType::Float32,
                Tensors::Device device = Tensors::Device::CPU,
                bool bias = true,
-               int64_t seed = std::random_device()());
+               std::optional<int64_t> seed = std::nullopt);
 
         /**
          * x(m×in)·weight(in×out), then + bias(out) when the layer has one.

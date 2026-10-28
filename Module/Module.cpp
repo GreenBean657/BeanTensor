@@ -7,13 +7,12 @@
  * mse_loss forwarder to BeanTensor::Loss::mse, the softmax_cross_entropy
  * forwarder to Tensor::softmax_ce, and the subtree-wide gradient-dtype
  * setter (validate-all-then-apply) with its per-parameter getter.
- * @version 0.3.5
- * @date 2026-10-23
+ * @version 0.4
+ * @date 2026-10-28
  */
 #include "Module/Module.h"
 
 #include <iomanip>
-#include <ostream>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -138,7 +137,8 @@ namespace BeanTensor::Modules {
         }
     }
 
-    void Module::print(std::ostream& os, const size_t indent) const {
+    std::string Module::print(const size_t indent) const {
+        auto os = std::ostringstream();
         // Header at the CURRENT stream position (the caller wrote any line
         // indent / "[name] " prefix); only the body and closing brace indent.
         os << this->name() << " {\n";
@@ -153,19 +153,17 @@ namespace BeanTensor::Modules {
         for (const auto&[name, module] : this->modules) {
             write_indent(os, indent + 1);
             os << "[" << name << "] ";
-            module->print(os, indent + 1);
+            os << module->print(indent + 1);
         }
         write_indent(os, indent);
         os << "}\n";
-    }
-
-    std::ostream& operator<<(std::ostream& os, const Module& module) {
-        module.print(os, 0);
-        os << "total: " << format_count(module.parameter_count()) << " parameters\n"
-           << "  weights " << format_bytes(module.parameter_bytes())
-           << ", grads " << format_bytes(module.parameter_grad_bytes())
-           << ", Adam state " << format_bytes(module.optimizer_state_bytes()) << "\n";
-        return os;
+        if (indent == 0) {
+            os << "total: " << format_count(this->parameter_count()) << " parameters\n"
+               << "  weights " << format_bytes(this->parameter_bytes())
+               << ", grads " << format_bytes(this->parameter_grad_bytes())
+               << ", Adam state " << format_bytes(this->optimizer_state_bytes()) << "\n";
+        }
+        return os.str();
     }
 
     std::string format_count(const size_t count) {
