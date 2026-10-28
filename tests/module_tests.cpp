@@ -11,6 +11,7 @@
 // when a backend + device exist — forward/backward on the GPU with
 // CPU/GPU gradient parity.
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -23,6 +24,7 @@
 
 #include "Helpers/Errors.h"
 #include "Module/Linear.h"
+#include "Random/Generator.h"
 #include "Module/Module.h"
 #include "Module/ModuleStream.h"
 #include "Module/Relu.h"
@@ -185,10 +187,10 @@ static void test_linear_no_bias(const Device dev) {
     CHECK(threw);
 }
 
-// Init convention: values inside [-1/sqrt(in), 1/sqrt(in)], fp64 param likewise.
+// He uniform: values inside [-sqrt(6/in), sqrt(6/in)], fp64 param likewise.
 static void test_linear_init_bounds() {
     auto lin = Linear(16, 8, DType::Float32, Device::CPU, true, 123);
-    const auto bound = 1.0 / std::sqrt(16.0);
+    const auto bound = std::sqrt(6.0 / static_cast<float64_t>(16));
     auto& w = lin.parameter("weight");
     for (auto i = size_t{0}; i < 16; ++i) {
         for (auto j = size_t{0}; j < 8; ++j) {
@@ -197,7 +199,7 @@ static void test_linear_init_bounds() {
         }
     }
     auto lin64 = Linear(4, 4, DType::Float64, Device::CPU, true, 123);
-    const auto bound64 = 1.0 / std::sqrt(4.0);
+    const auto bound64 = std::sqrt(6.0 / static_cast<float64_t>(4));
     auto& w64 = lin64.parameter("weight");
     for (auto i = size_t{0}; i < 4; ++i) {
         for (auto j = size_t{0}; j < 4; ++j) {
@@ -811,6 +813,100 @@ static void test_argmax_lanes() {
     CHECK(threw);
 }
 
+// =====================================================================
+// He (Kaiming) uniform initialization
+// =====================================================================
+
+static void test_linear_he_same_seed() {
+    // Same explicit seed → two fresh Linears with identical weights.
+    auto a = Linear(64, 32, DType::Float32, Device::CPU, true, 987654321);
+    auto b = Linear(64, 32, DType::Float32, Device::CPU, true, 987654321);
+    CHECK(a.parameter("weight").contents_to_string() == b.parameter("weight").contents_to_string());
+}
+
+static void test_linear_he_variance_bounds() {
+    // Large layer: population variance should be close to the population variance
+    // of Uniform[-bound, bound], which is bound²/3 = 2/in_features.
+    const auto in_features = size_t{784};
+    const auto out_features = size_t{2048};
+    const auto bound = std::sqrt(6.0 / static_cast<float64_t>(in_features));
+    const auto want_variance = 2.0 / static_cast<float64_t>(in_features);
+    const auto tolerance = float64_t{1e-4};
+
+    auto lin = Linear(in_features, out_features, DType::Float32, Device::CPU, true, 555666777);
+    auto& w = lin.parameter("weight");
+    auto sum = float64_t{0.0};
+    auto sum_sq = float64_t{0.0};
+    const auto n = static_cast<float64_t>(in_features * out_features);
+    for (auto i = size_t{0}; i < in_features; ++i) {
+        for (auto j = size_t{0}; j < out_features; ++j) {
+            const auto v = static_cast<float64_t>(w.at<float32_t>({i, j}));
+            CHECK(v >= -bound && v <= bound);
+            sum += v;
+            sum_sq += v * v;
+        }
+    }
+    const auto mean = sum / n;
+    const auto variance = (sum_sq / n) - (mean * mean);
+    CHECK(std::fabs(variance - want_variance) <= tolerance);
+}
+
+static void test_linear_he_bias_zero() {
+    // Bias must be exactly zero on both explicit-seed and omitted-seed paths.
+    auto explicit_lin = Linear(32, 16, DType::Float32, Device::CPU, true, 111222333);
+    auto& explicit_bias = explicit_lin.parameter("bias");
+    for (auto j = size_t{0}; j < 16; ++j) {
+        CHECK(std::bit_cast<uint32_t>(explicit_bias.at<float32_t>({j})) == 0U);
+    }
+
+    BeanTensor::Random::set_seed(444555666);
+    auto omitted_lin = Linear(32, 16, DType::Float32, Device::CPU, true);
+    auto& omitted_bias = omitted_lin.parameter("bias");
+    for (auto j = size_t{0}; j < 16; ++j) {
+        CHECK(std::bit_cast<uint32_t>(omitted_bias.at<float32_t>({j})) == 0U);
+    }
+}
+
+#if defined(USE_HIP) || defined(USE_CUDA)
+static void test_linear_he_gpu_parity() {
+    if (!gpu_available()) {
+        std::cout << "GPU not available — skipping He GPU parity test\n";
+        return;
+    }
+    const auto in_features = size_t{784};
+    const auto out_features = size_t{2048};
+    const auto bound = std::sqrt(6.0 / static_cast<float64_t>(in_features));
+    const auto want_variance = 2.0 / static_cast<float64_t>(in_features);
+    const auto tolerance = float64_t{1e-4};
+
+    BeanTensor::Random::set_seed(123456789);
+    auto lin = Linear(in_features, out_features, DType::Float32, Device::GPU, true);
+    lin.parameter("weight").to(Device::CPU);
+    lin.parameter("bias").to(Device::CPU);
+
+    auto& w = lin.parameter("weight");
+    auto sum = float64_t{0.0};
+    auto sum_sq = float64_t{0.0};
+    const auto n = static_cast<float64_t>(in_features * out_features);
+    for (auto i = size_t{0}; i < in_features; ++i) {
+        for (auto j = size_t{0}; j < out_features; ++j) {
+            const auto v = static_cast<float64_t>(w.at<float32_t>({i, j}));
+            CHECK(v >= -bound && v <= bound);
+            sum += v;
+            sum_sq += v * v;
+        }
+    }
+    const auto mean = sum / n;
+    const auto variance = (sum_sq / n) - (mean * mean);
+    CHECK(std::fabs(variance - want_variance) <= tolerance);
+
+    auto& b = lin.parameter("bias");
+    for (auto j = size_t{0}; j < out_features; ++j) {
+        CHECK(std::bit_cast<uint32_t>(b.at<float32_t>({j})) == 0U);
+    }
+}
+#endif
+
 int main() {
     test_linear_forward(Device::CPU);
     test_linear_no_bias(Device::CPU);
@@ -828,8 +924,12 @@ int main() {
     test_byte_counts(Device::CPU);
     test_memory_accounting();
     test_argmax_lanes();
+    test_linear_he_same_seed();
+    test_linear_he_variance_bounds();
+    test_linear_he_bias_zero();
 #if defined(USE_HIP) || defined(USE_CUDA)
     if (gpu_available()) {
+        test_linear_he_gpu_parity();
         test_linear_forward(Device::GPU);
         test_linear_no_bias(Device::GPU);
         test_sequential_forward(Device::GPU);

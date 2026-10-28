@@ -2,7 +2,7 @@
  * @file Errors.h
  * @author GreenBean
  * @brief ErrorHandling exception types and GPU API error-check macros.
- * @version 0.7
+ * @version 0.8
  * @date 2026-10-26
  */
 #pragma once
@@ -217,6 +217,36 @@ namespace BeanTensor::ErrorHandling {
          * @brief Exception thrown when two tensors live on different devices where an operation requires equality.
          */
         MismatchedDevices() : std::invalid_argument("Mismatched tensor devices") { }
+    };
+
+    class EmptyDataset : public std::invalid_argument {
+    public:
+        EmptyDataset() = delete;
+        /**
+         * @brief Exception thrown when a dataset tensor pair contains zero rows.
+         * @param detail Which tensor (features, labels, or both) was empty.
+         */
+        explicit EmptyDataset(const std::string& detail) : std::invalid_argument("Empty dataset: " + detail) { }
+    };
+
+    class MismatchedRowCounts : public std::invalid_argument {
+    public:
+        MismatchedRowCounts() = delete;
+        /**
+         * @brief Exception thrown when feature and label tensors have different row counts.
+         * @param detail Which row counts mismatched.
+         */
+        explicit MismatchedRowCounts(const std::string& detail) : std::invalid_argument("Mismatched dataset row counts: " + detail) { }
+    };
+
+    class InvalidBatchSize : public std::invalid_argument {
+    public:
+        InvalidBatchSize() = delete;
+        /**
+         * @brief Exception thrown when a batch size is zero or otherwise invalid.
+         * @param detail What value or constraint was violated.
+         */
+        explicit InvalidBatchSize(const std::string& detail) : std::invalid_argument("Invalid batch size: " + detail) { }
     };
 
     class DimensionTooLarge : public std::out_of_range {

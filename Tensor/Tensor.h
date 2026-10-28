@@ -2,7 +2,7 @@
  * @file Tensor.h
  * @author GreenBean
  * @brief Tensor class declaration: dtype, shape, device and buffer ownership.
- * @version 0.4.3
+ * @version 0.4.4
  * @date 2026-10-28
  */
 #pragma once
@@ -556,6 +556,36 @@ namespace BeanTensor::Tensors {
          */
         [[nodiscard]] DataTypes::DType get_dtype() const {
             return this->dtype;
+        }
+
+        /**
+         * Extent of one axis of this tensor's shape.
+         * @brief Dimension extent at the requested axis.
+         * @param axis Axis index, must be < ndim.
+         * @return The size of the requested dimension.
+         * @throws ErrorHandling::IndexOutOfRange axis is out of bounds.
+         */
+        [[nodiscard]] size_t dim(size_t axis) const {
+            if (axis >= this->ndim) {
+                throw ErrorHandling::IndexOutOfRange();
+            }
+            return this->shape[axis];
+        }
+
+        /**
+         * @brief Number of dimensions of this tensor.
+         * @return The tensor's rank.
+         */
+        [[nodiscard]] size_t rank() const {
+            return this->ndim;
+        }
+
+        /**
+         * @brief Device this tensor lives on.
+         * @return The tensor's Device.
+         */
+        [[nodiscard]] Device get_device() const {
+            return this->device;
         }
 
         /**

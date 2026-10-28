@@ -312,6 +312,8 @@ set(CORE_SOURCES
         Module/Relu.cpp
         Module/Sequential.h
         Module/Sequential.cpp
+        Data/DataLoader.h
+        Data/DataLoader.cpp
         Helpers/Bits.h
         Helpers/KernelTune.h
         Helpers/KernelTune.cpp
@@ -477,6 +479,7 @@ if(USE_HIP)
             Module/Linear.cpp
             Module/Relu.cpp
             Module/Sequential.cpp
+            Data/DataLoader.cpp
             Helpers/KernelTune.cpp
             PROPERTIES LANGUAGE HIP
     )
@@ -536,6 +539,7 @@ if(USE_HIP)
             Module/Linear.cpp
             Module/Relu.cpp
             Module/Sequential.cpp
+            Data/DataLoader.cpp
             Helpers/KernelTune.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native"
     )
@@ -935,6 +939,24 @@ if(BUILD_TESTING)
             -mf16c
     )
     add_test(NAME BeanTensorV5ModuleTests COMMAND BeanTensorV5ModuleTests)
+
+    add_executable(BeanTensorV5DataLoaderTests tests/data_loader_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5DataLoaderTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5DataLoaderTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5DataLoaderTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5DataLoaderTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5DataLoaderTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5DataLoaderTests COMMAND BeanTensorV5DataLoaderTests)
 
     add_executable(BeanTensorV5RandomTests tests/random_seed_tests.cpp)
     if(USE_HIP)

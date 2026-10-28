@@ -5,7 +5,7 @@
  * optional bias {out_features}, both registered as named parameters
  * ("weight", "bias") on the Module base, and forward = matmul + bias_add
  * following the project's x(m×k)·w(k×n) GEMM convention.
- * @version 0.2
+ * @version 0.3
  * @date 2026-10-28
  */
 #pragma once
@@ -25,9 +25,12 @@ namespace BeanTensor::Modules {
      * out_features} so a rank-2 input {m, in_features} matmuls directly;
      * bias is added along the last dimension via Tensor::bias_add. Both
      * parameters are created requires_grad=true on the construction device,
-     * in the construction dtype, and initialized uniformly in
-     * [-1/sqrt(in_features), 1/sqrt(in_features)] — the project's Linear
-     * convention, built on Tensor::random.
+     * in the construction dtype. Weight is initialized He (Kaiming) uniform:
+     * each element drawn from U[-bound, bound] with bound = sqrt(6 /
+     * in_features), where the fan-in is in_features. Bias is initialized to
+     * exactly zero. When the seed is omitted, weight consumes one draw from
+     * the process-wide generator and bias is zeroed without consuming a draw.
+     * Built on Tensor::random so CPU and GPU produce the same values.
      * @brief Fully connected layer (matmul + bias_add).
      */
     class Linear final : public Module {
@@ -40,10 +43,11 @@ namespace BeanTensor::Modules {
          * @param dtype Parameter/input dtype (Float32 by default).
          * @param device Device to hold the parameters on (CPU by default).
          * @param bias Whether to register and add a bias parameter.
-         * @param seed Init seed for the uniform parameter fill. When omitted,
+         * @param seed Init seed for the uniform weight fill. When omitted,
          *        weight is filled from the next draw of the process-wide
-         *        Generator and bias from the draw after that (weight first,
-         *        bias second); when explicit, the bias uses `seed ^ 1`.
+         *        Generator (one draw total); the bias is set to zero and
+         *        consumes no draw. When explicit, the weight uses this seed
+         *        and the bias is zero.
          */
         Linear(size_t in_features, size_t out_features,
                DataTypes::DType dtype = DataTypes::DType::Float32,
