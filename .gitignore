@@ -12,3 +12,4 @@ safe-delete.sh
 .clangd
 gpu-test.sh
 data/
+.superpowers
