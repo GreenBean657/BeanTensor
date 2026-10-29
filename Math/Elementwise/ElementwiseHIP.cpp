@@ -450,6 +450,28 @@ namespace BeanTensor::Tensors::detail {
                         [[unlikely]] default: throw ErrorHandling::NotImplemented();
                     }
                     break;
+                case ElementwiseUnaryOp::Sigmoid:
+                    switch (dtype) {
+                        case DType::Float32: run_ew_unary<float32_t, ElementwiseUnaryOp::Sigmoid>(static_cast<float32_t*>(out_data) + out_offset, static_cast<const float32_t*>(a_data) + a_offset, numel); break;
+                        case DType::Float64: run_ew_unary<float64_t, ElementwiseUnaryOp::Sigmoid>(static_cast<float64_t*>(out_data) + out_offset, static_cast<const float64_t*>(a_data) + a_offset, numel); break;
+                        case DType::Float16: run_ew_unary<float16_t, ElementwiseUnaryOp::Sigmoid>(static_cast<float16_t*>(out_data) + out_offset, static_cast<const float16_t*>(a_data) + a_offset, numel); break;
+                        case DType::BFloat16: run_ew_unary<bfloat16_t, ElementwiseUnaryOp::Sigmoid>(static_cast<bfloat16_t*>(out_data) + out_offset, static_cast<const bfloat16_t*>(a_data) + a_offset, numel); break;
+                        case DType::Float16x2: run_ew_unary<float16x2_t, ElementwiseUnaryOp::Sigmoid>(static_cast<float16x2_t*>(out_data) + out_offset, static_cast<const float16x2_t*>(a_data) + a_offset, numel); break;
+                        case DType::BFloat16x2: run_ew_unary<bfloat16x2_t, ElementwiseUnaryOp::Sigmoid>(static_cast<bfloat16x2_t*>(out_data) + out_offset, static_cast<const bfloat16x2_t*>(a_data) + a_offset, numel); break;
+                        [[unlikely]] default: throw ErrorHandling::NotImplemented();
+                    }
+                    break;
+                case ElementwiseUnaryOp::Tanh:
+                    switch (dtype) {
+                        case DType::Float32: run_ew_unary<float32_t, ElementwiseUnaryOp::Tanh>(static_cast<float32_t*>(out_data) + out_offset, static_cast<const float32_t*>(a_data) + a_offset, numel); break;
+                        case DType::Float64: run_ew_unary<float64_t, ElementwiseUnaryOp::Tanh>(static_cast<float64_t*>(out_data) + out_offset, static_cast<const float64_t*>(a_data) + a_offset, numel); break;
+                        case DType::Float16: run_ew_unary<float16_t, ElementwiseUnaryOp::Tanh>(static_cast<float16_t*>(out_data) + out_offset, static_cast<const float16_t*>(a_data) + a_offset, numel); break;
+                        case DType::BFloat16: run_ew_unary<bfloat16_t, ElementwiseUnaryOp::Tanh>(static_cast<bfloat16_t*>(out_data) + out_offset, static_cast<const bfloat16_t*>(a_data) + a_offset, numel); break;
+                        case DType::Float16x2: run_ew_unary<float16x2_t, ElementwiseUnaryOp::Tanh>(static_cast<float16x2_t*>(out_data) + out_offset, static_cast<const float16x2_t*>(a_data) + a_offset, numel); break;
+                        case DType::BFloat16x2: run_ew_unary<bfloat16x2_t, ElementwiseUnaryOp::Tanh>(static_cast<bfloat16x2_t*>(out_data) + out_offset, static_cast<const bfloat16x2_t*>(a_data) + a_offset, numel); break;
+                        [[unlikely]] default: throw ErrorHandling::NotImplemented();
+                    }
+                    break;
                 [[unlikely]] default: throw ErrorHandling::UnReachableCode();
             }
             // The kernel is in-flight when the launch returns; sync so the

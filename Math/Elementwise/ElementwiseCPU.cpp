@@ -34,6 +34,8 @@
 #include <vector>
 
 #include "Math/Autograd/ElementwiseG/ElementwiseG.h"
+#include "Math/Autograd/SigmoidG/SigmoidG.h"
+#include "Math/Autograd/TanhG/TanhG.h"
 #include "Math/Elementwise/Elementwise.h"
 #include "Math/Elementwise/ElementwiseKernels.h"
 #include "Math/Elementwise/ElementwiseShared.h"
@@ -229,8 +231,13 @@ namespace BeanTensor::Tensors::detail {
         [[nodiscard]] T apply_unary_native(const T v) {
             if constexpr (Op == ElementwiseUnaryOp::Exp) {
                 return std::exp(v);
-            } else {
+            } else if constexpr (Op == ElementwiseUnaryOp::Log) {
                 return std::log(v);
+            } else if constexpr (Op == ElementwiseUnaryOp::Sigmoid) {
+                return T{1.0} / (T{1.0} + std::exp(-v));
+            } else {
+                // Stable tanh: 1 - 2/(exp(2x)+1) avoids overflow at |x| ~= 100.
+                return T{1.0} - T{2.0} / (std::exp(T{2.0} * v) + T{1.0});
             }
         }
 
@@ -243,8 +250,12 @@ namespace BeanTensor::Tensors::detail {
             const auto wide = widen_lane(v);
             if constexpr (Op == ElementwiseUnaryOp::Exp) {
                 return narrow_lane<H>(std::exp(wide));
-            } else {
+            } else if constexpr (Op == ElementwiseUnaryOp::Log) {
                 return narrow_lane<H>(std::log(wide));
+            } else if constexpr (Op == ElementwiseUnaryOp::Sigmoid) {
+                return narrow_lane<H>(float32_t{1.0f} / (float32_t{1.0f} + std::exp(-wide)));
+            } else {
+                return narrow_lane<H>(float32_t{1.0f} - float32_t{2.0f} / (std::exp(float32_t{2.0f} * wide) + float32_t{1.0f}));
             }
         }
 
@@ -1389,6 +1400,8 @@ namespace BeanTensor::Tensors::detail {
         switch (op) {
             case ElementwiseUnaryOp::Exp: dispatch_unary<ElementwiseUnaryOp::Exp>(a.dtype, raw, a, out); break;
             case ElementwiseUnaryOp::Log: dispatch_unary<ElementwiseUnaryOp::Log>(a.dtype, raw, a, out); break;
+            case ElementwiseUnaryOp::Sigmoid: dispatch_unary<ElementwiseUnaryOp::Sigmoid>(a.dtype, raw, a, out); break;
+            case ElementwiseUnaryOp::Tanh: dispatch_unary<ElementwiseUnaryOp::Tanh>(a.dtype, raw, a, out); break;
             [[unlikely]] default: throw ErrorHandling::UnReachableCode();
         }
     }
@@ -1503,10 +1516,12 @@ namespace BeanTensor::Tensors {
         } else [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
-        if (op == ElementwiseUnaryOp::Exp) {
-            out.wire_node(detail::exp_g_node, *this);
-        } else {
-            out.wire_node(detail::log_g_node, *this);
+        switch (op) {
+            case ElementwiseUnaryOp::Exp: out.wire_node(detail::exp_g_node, *this); break;
+            case ElementwiseUnaryOp::Log: out.wire_node(detail::log_g_node, *this); break;
+            case ElementwiseUnaryOp::Sigmoid: out.wire_node(detail::sigmoid_g_node, *this); break;
+            case ElementwiseUnaryOp::Tanh: out.wire_node(detail::tanh_g_node, *this); break;
+            [[unlikely]] default: throw ErrorHandling::UnReachableCode();
         }
         return out;
     }
@@ -1523,4 +1538,6 @@ namespace BeanTensor::Tensors {
     Tensor Tensor::pow(const float64_t& scalar) const { return elementwise_scalar(scalar, ElementwiseOp::Pow); }
     Tensor Tensor::exp() const { return elementwise_unary(ElementwiseUnaryOp::Exp); }
     Tensor Tensor::log() const { return elementwise_unary(ElementwiseUnaryOp::Log); }
+    Tensor Tensor::sigmoid() const { return elementwise_unary(ElementwiseUnaryOp::Sigmoid); }
+    Tensor Tensor::tanh() const { return elementwise_unary(ElementwiseUnaryOp::Tanh); }
 }

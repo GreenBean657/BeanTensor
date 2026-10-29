@@ -101,6 +101,26 @@ namespace BeanTensor::Tensors {
         this->node = new_node;
     }
 
+    void Tensor::wire_node(void (*backward_fn)(Node*, Tensor*, Tensor**, size_t, DataTypes::DType), const Tensor& a, const Tensor& b, const Tensor& c) {
+        if (!a.requires_grad && !b.requires_grad && !c.requires_grad) {
+            return;
+        }
+        this->requires_grad = true;
+        this->is_leaf = false;
+        auto* new_node = new Node{};
+        new_node->_backward_fn = backward_fn;
+        new_node->_inputs[0] = const_cast<Tensor*>(&a);
+        new_node->_inputs[1] = const_cast<Tensor*>(&b);
+        new_node->_inputs[2] = const_cast<Tensor*>(&c);
+        new_node->_n_inputs = 3;
+        this->parents[0] = new_node->_inputs[0];
+        this->parents[1] = new_node->_inputs[1];
+        this->parents[2] = new_node->_inputs[2];
+        this->n_parents = 3;
+        delete this->node; // re-wiring replaces any stale node
+        this->node = new_node;
+    }
+
     /**
      * Deletes grad (its destructor drains pending workers) and resets it to nullptr;
      * the next accumulation reallocates it.

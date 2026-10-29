@@ -162,7 +162,7 @@ static void test_reshape_cpu() {
     // Rank beyond BT_TENSOR_MAX_DIMS is rejected.
     threw = false;
     try {
-        auto bad = t.reshape({1, 2, 3, 1});
+        auto bad = t.reshape({1, 1, 2, 3, 1});
         static_cast<void>(bad);
     } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) {
         threw = true;

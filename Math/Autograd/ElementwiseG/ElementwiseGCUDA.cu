@@ -10,8 +10,8 @@
  * written separately per project rule (no HIP-only unification), but must
  * stay behaviorally identical: same fp32/fp64 compute widths, same CPU-unaccel
  * RNE narrowing twins, same wrap integer adds, same fixed reduction order.
- * @version 0.1
- * @date 2026-10-23
+ * @version 0.2
+ * @date 2026-10-28
  */
 #if defined(USE_CUDA)
 #include <cstdint>
@@ -43,18 +43,18 @@ namespace BeanTensor::Tensors::detail {
          */
         template<typename F>
         __device__ __forceinline__ void dev_for_each_preimage(const BcastReducePlan& p, const size_t j, F f) {
-            size_t op_strides_c[3] = {1, 1, 1};
+            size_t op_strides_c[4] = {1, 1, 1, 1};
             for (size_t od = p.op_ndim - 1; od-- > 0;) {
                 op_strides_c[od] = op_strides_c[od + 1] * p.op_shape[od + 1];
             }
-            size_t coord[3] = {0, 0, 0};
+            size_t coord[4] = {0, 0, 0, 0};
             auto rem = j;
             for (auto od = p.op_ndim; od-- > 0;) {
                 coord[od] = rem / op_strides_c[od];
                 rem -= coord[od] * op_strides_c[od];
             }
-            size_t free_dim[3] = {0, 0, 0};
-            size_t free_ext[3] = {1, 1, 1};
+            size_t free_dim[4] = {0, 0, 0, 0};
+            size_t free_ext[4] = {1, 1, 1, 1};
             auto k = size_t{0};
             auto base = size_t{0};
             const auto lead = p.out_ndim - p.op_ndim;
@@ -74,7 +74,7 @@ namespace BeanTensor::Tensors::detail {
                     }
                 }
             }
-            size_t div[3] = {1, 1, 1};
+            size_t div[4] = {1, 1, 1, 1};
             for (auto m = k; m-- > 0;) {
                 if (m + 1 < k) {
                     div[m] = div[m + 1] * free_ext[m + 1];

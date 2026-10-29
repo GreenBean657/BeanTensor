@@ -11,5 +11,5 @@ safe-delete.sh
 *.ddi
 .clangd
 gpu-test.sh
-data/
+datasets/
 .superpowers

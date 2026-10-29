@@ -11,7 +11,7 @@
  * declares mse_loss, the module-facing entry point to the MSE loss
  * (Math/Loss/Loss.h), and softmax_cross_entropy, the module-facing entry
  * point to Tensor::softmax_ce, for forward/backward training loops.
- * @version 0.4
+ * @version 0.5
  * @date 2026-10-28
  */
 #pragma once
@@ -232,6 +232,27 @@ namespace BeanTensor::Modules {
          */
         [[nodiscard]] virtual std::string print(size_t indent = 0) const;
 
+        /**
+         * @brief Query whether this module is in training mode.
+         * @return `true` when the module (and its subtree) is set to train.
+         */
+        [[nodiscard]] bool is_training() const;
+
+        /**
+         * Set the training mode of this module and every child module in the
+         * subtree. Dropout and BatchNorm read this flag to choose between
+         * stochastic/training behavior and deterministic/evaluation behavior.
+         * @brief Put the module (and its children) in train or eval mode.
+         * @param mode `true` for training mode, `false` for evaluation mode.
+         */
+        void train(bool mode = true);
+
+        /**
+         * Convenience alias for `train(false)`. Recurses over child modules.
+         * @brief Put the module (and its children) in evaluation mode.
+         */
+        void eval();
+
     protected:
         /**
          * Register one own parameter. The tensor is heap-allocated in a
@@ -340,6 +361,12 @@ namespace BeanTensor::Modules {
          * therefore held tensor addresses — are stable).
          */
         std::deque<std::unique_ptr<Tensors::Tensor>> forward_cache;
+        /**
+         * Training/evaluation mode flag. Starts in training mode; eval() and
+         * train(bool) mutate it and recurse into every registered child module
+         * so the whole subtree shares one mode.
+         */
+        bool training{true};
 
         /**
          * Recursive worker behind named_parameters(): appends this module's

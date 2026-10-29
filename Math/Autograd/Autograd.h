@@ -8,15 +8,19 @@
  * transpose for GEMM backward, broadcast gradient reduction for elementwise
  * backward). The *_g_node functions match Node::_backward_fn's signature and
  * are what the forward ops store when they wire the computation graph.
- * @version 0.3
- * @date 2026-10-25
+ * @version 0.6
+ * @date 2026-10-28
  */
 #pragma once
 
 #include "Math/Autograd/GradAcc/GradAcc.h"
 #include "Math/Autograd/ReluG/ReluG.h"
+#include "Math/Autograd/SigmoidG/SigmoidG.h"
+#include "Math/Autograd/TanhG/TanhG.h"
+#include "Math/Autograd/FlattenG/FlattenG.h"
 #include "Math/Autograd/BiasAddG/BiasAddG.h"
 #include "Math/Autograd/SoftmaxCEG/SoftmaxCEG.h"
+#include "Math/Autograd/SoftmaxG/SoftmaxG.h"
 #include "Math/Autograd/TransposeLast2/TransposeLast2.h"
 #include "Math/Autograd/GemmG/GemmG.h"
 #include "Math/Autograd/SumG/SumG.h"

@@ -1242,8 +1242,8 @@ static void test_move_defers_pending_error() {
 
 static_assert(alignof(BeanTensor::Tensors::Node) == 8, "Node must stay 8-aligned, or be reviewed.");
 static_assert(alignof(Tensor) == 8, "Tensor must stay 8-aligned, or be reviewed.");
-// BT_TENSOR_MAX_DIMS 3: 216 + std::vector view_parents (24 bytes). Re-verify with offsetof on change.
-static_assert(sizeof(Tensor) == 240, "Tensor size changed; re-verify layout and update the project docs.");
+// BT_TENSOR_MAX_DIMS=4: shape[4]+strides[4] adds 16 bytes; derived via scratch/sizeof_probe on 2026-10-28.
+static_assert(sizeof(Tensor) == 256, "Tensor size changed; re-verify layout and update the project docs.");
 static_assert(std::is_nothrow_move_constructible_v<Tensor>, "Tensor move ctor must stay noexcept, or be reviewed.");
 static_assert(std::is_nothrow_move_assignable_v<Tensor>, "Tensor move assignment must stay noexcept, or be reviewed.");
 

@@ -43,7 +43,7 @@ BETA1 = 0.9
 BETA2 = 0.999
 EPSILON = 1e-8
 SHUFFLE_SEED = 1234
-MNIST_DIR = "data/mnist"
+MNIST_DIR = "datasets/mnist"
 
 
 def count_parameters(model: nn.Module) -> int:

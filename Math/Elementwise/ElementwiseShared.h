@@ -5,8 +5,8 @@
  * scalar narrowing into a tensor dtype (the PERMISSIVE convert contract), and
  * broadcast offset decomposition. Reuses the half/packed/int4 lane helpers and
  * the threaded launcher from LinearAlgebraShared.h.
- * @version 0.1
- * @date 2026-10-22
+ * @version 0.2
+ * @date 2026-10-28
  */
 #pragma once
 
@@ -21,7 +21,7 @@
 
 namespace BeanTensor::Tensors::detail::elementwise_shared {
     // ElementwiseBcast's fixed array extents must match the tensor rank cap.
-    static_assert(BT_TENSOR_MAX_DIMS == 3, "ElementwiseBcast is sized for BT_TENSOR_MAX_DIMS == 3");
+    static_assert(BT_TENSOR_MAX_DIMS == 4, "ElementwiseBcast is sized for BT_TENSOR_MAX_DIMS == 4");
 
     /**
      * @brief Is this dtype any float kind (native, half, or packed-half)?

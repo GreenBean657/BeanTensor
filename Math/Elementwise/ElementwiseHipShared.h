@@ -10,7 +10,7 @@
  * written separately per project rule (no HIP-only unification), but must stay
  * behaviorally identical: same fp32/fp64 compute widths, same RNE narrowing
  * (CPU unaccel pathway), same wrap integer ops, same div-by-zero/min-rules.
- * @version 0.1.2
+ * @version 0.1.3
  * @date 2026-10-22
  */
 #pragma once
@@ -453,8 +453,12 @@ namespace BeanTensor::Tensors::detail::elementwise_kernels {
     __device__ __forceinline__ float32_t dev_apply_unary_native(const float32_t v) {
         if constexpr (Op == ElementwiseUnaryOp::Exp) {
             return expf(v);
-        } else {
+        } else if constexpr (Op == ElementwiseUnaryOp::Log) {
             return logf(v);
+        } else if constexpr (Op == ElementwiseUnaryOp::Sigmoid) {
+            return float32_t{1.0f} / (float32_t{1.0f} + expf(-v));
+        } else {
+            return float32_t{1.0f} - float32_t{2.0f} / (expf(float32_t{2.0f} * v) + float32_t{1.0f});
         }
     }
 
@@ -466,8 +470,12 @@ namespace BeanTensor::Tensors::detail::elementwise_kernels {
     __device__ __forceinline__ float64_t dev_apply_unary_native(const float64_t v) {
         if constexpr (Op == ElementwiseUnaryOp::Exp) {
             return exp(v);
-        } else {
+        } else if constexpr (Op == ElementwiseUnaryOp::Log) {
             return log(v);
+        } else if constexpr (Op == ElementwiseUnaryOp::Sigmoid) {
+            return float64_t{1.0} / (float64_t{1.0} + exp(-v));
+        } else {
+            return float64_t{1.0} - float64_t{2.0} / (exp(float64_t{2.0} * v) + float64_t{1.0});
         }
     }
 
@@ -478,17 +486,31 @@ namespace BeanTensor::Tensors::detail::elementwise_kernels {
     template<typename H, ElementwiseUnaryOp Op>
     __device__ __forceinline__ H dev_apply_unary_half(const H v) {
         const auto wide = dev_widen(v);
-        if constexpr (std::is_same_v<H, float16_t>) {
-            if constexpr (Op == ElementwiseUnaryOp::Exp) {
+        if constexpr (Op == ElementwiseUnaryOp::Exp) {
+            if constexpr (std::is_same_v<H, float16_t>) {
                 return dev_narrow_fp16(expf(wide));
             } else {
-                return dev_narrow_fp16(logf(wide));
-            }
-        } else {
-            if constexpr (Op == ElementwiseUnaryOp::Exp) {
                 return dev_narrow_bf16(expf(wide));
+            }
+        } else if constexpr (Op == ElementwiseUnaryOp::Log) {
+            if constexpr (std::is_same_v<H, float16_t>) {
+                return dev_narrow_fp16(logf(wide));
             } else {
                 return dev_narrow_bf16(logf(wide));
+            }
+        } else if constexpr (Op == ElementwiseUnaryOp::Sigmoid) {
+            const auto r = float32_t{1.0f} / (float32_t{1.0f} + expf(-wide));
+            if constexpr (std::is_same_v<H, float16_t>) {
+                return dev_narrow_fp16(r);
+            } else {
+                return dev_narrow_bf16(r);
+            }
+        } else {
+            const auto r = float32_t{1.0f} - float32_t{2.0f} / (expf(float32_t{2.0f} * wide) + float32_t{1.0f});
+            if constexpr (std::is_same_v<H, float16_t>) {
+                return dev_narrow_fp16(r);
+            } else {
+                return dev_narrow_bf16(r);
             }
         }
     }

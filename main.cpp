@@ -58,7 +58,7 @@ using DType = BeanTensor::DataTypes::DType;
 
 namespace {
 
-    constexpr auto kMnistDir = "data/mnist";
+    constexpr auto kMnistDir = "datasets/mnist";
     constexpr auto kTrainImages = "train-images-idx3-ubyte";
     constexpr auto kTrainLabels = "train-labels-idx1-ubyte";
     constexpr auto kTestImages = "t10k-images-idx3-ubyte";

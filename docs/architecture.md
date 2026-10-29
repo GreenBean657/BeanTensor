@@ -104,20 +104,25 @@ max, and argmax are bit-identical across backends.
 
 ## Scope
 
-Decisions binding the MVP, recorded 2026-10-27:
+Decisions binding the MVP, recorded 2026-10-27, updated 2026-10-28 for the
+landed layer set:
 
 - Python bindings are out of scope for the MVP. The library ships as C++;
   bindings are a later phase. The public API is already shaped for them —
   value-in/value-out signatures, no non-const reference or mutable pointer
   parameters — enforced on every build by the bind-clean verification.
-- ReLU is the only activation. The demo model uses nothing else, and each
-  additional activation costs CPU + AVX2/AVX-512 + HIP + CUDA parity plus
-  autograd.
 - Weight initialization is He (Kaiming) uniform, fan-in — bound
   sqrt(6 / in_features), bias zero — replacing the old ad-hoc range, in
-  `Module/Linear`.
+  `Module/Linear` and `Module/Conv2d`.
 - The accuracy pass bar is the PyTorch comparison harness
   (`comparison/mnist_pytorch.py`) on the same architecture, minus one
   percentage point. That is the Task 6 acceptance criterion.
-- The model is a single MLP — 784 → hidden → 10 for MNIST. No convolutions:
-  no conv kernels, no conv autograd, no conv topology in the acceptance run.
+- The Task 6 acceptance model is a single MLP — 784 → hidden → 10 for MNIST.
+  Convolutions are available for non-MLP models but are not part of that
+  acceptance run.
+- The layer set shipped for the MVP now includes `Linear`, `ReLU`, `Sigmoid`,
+  `Tanh`, `Softmax`, `Flatten`, `Dropout`, `Conv2d`, and `MaxPool2d`, each with
+  CPU (scalar + AVX2 + AVX-512), CUDA, and HIP paths where applicable, plus
+  matching autograd nodes. `Conv2d` is implemented as im2col + GEMM with a
+  scatter epilogue writing NCHW directly, an owner-pinned `Conv2dG` backward,
+  He fan-in initialization, and CPU/CUDA/HIP backends.

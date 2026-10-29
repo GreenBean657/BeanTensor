@@ -2,7 +2,7 @@
  * @file Errors.h
  * @author GreenBean
  * @brief ErrorHandling exception types and GPU API error-check macros.
- * @version 0.8
+ * @version 0.9
  * @date 2026-10-26
  */
 #pragma once
@@ -247,6 +247,16 @@ namespace BeanTensor::ErrorHandling {
          * @param detail What value or constraint was violated.
          */
         explicit InvalidBatchSize(const std::string& detail) : std::invalid_argument("Invalid batch size: " + detail) { }
+    };
+
+    class InvalidProbability : public std::invalid_argument {
+    public:
+        InvalidProbability() = delete;
+        /**
+         * @brief Exception thrown when a dropout (or similar) probability is outside [0, 1).
+         * @param detail What value or constraint was violated.
+         */
+        explicit InvalidProbability(const std::string& detail) : std::invalid_argument("Invalid probability: " + detail) { }
     };
 
     class DimensionTooLarge : public std::out_of_range {

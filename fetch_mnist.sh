@@ -6,7 +6,7 @@
 #   Exit non-zero on a missing tool or a failed download.
 
 set -euo pipefail
-DEST="${1:-data/mnist}"
+DEST="${1:-datasets/mnist}"
 BASE_URL="https://storage.googleapis.com/cvdf-datasets/mnist"
 FILES=(
     train-images-idx3-ubyte

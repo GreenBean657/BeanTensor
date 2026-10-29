@@ -4,8 +4,8 @@
  * @brief Entry point for elementwise arithmetic ops with broadcasting (cpu vs gpu):
  * add, sub, mul, div, pow (tensor-tensor and tensor-scalar), exp, log (unary).
  * Equality/comparison lives in Math/Compare (owned by the metrics mission).
- * @version 0.1
- * @date 2026-10-22
+ * @version 0.3
+ * @date 2026-10-28
  */
 #pragma once
 
@@ -34,12 +34,14 @@ namespace BeanTensor::Tensors {
      */
     enum class ElementwiseUnaryOp : uint8_t {
         Exp,
-        Log
+        Log,
+        Sigmoid,
+        Tanh
     };
 
     namespace detail {
         /**
-         * Fixed 3 entries == BT_TENSOR_MAX_DIMS (the macro lives in Tensor.h, which
+         * Fixed 4 entries == BT_TENSOR_MAX_DIMS (the macro lives in Tensor.h, which
          * includes this header, so it cannot be referenced here; a static_assert in
          * ElementwiseShared.h pins the match). a_strides/b_strides are ELEMENT
          * strides of each operand re-expressed in output coordinates: 0 on
@@ -49,10 +51,10 @@ namespace BeanTensor::Tensors {
          * @brief Broadcast execution plan shared by the CPU and GPU backends.
          */
         struct ElementwiseBcast {
-            size_t out_shape[3];
-            size_t out_strides[3];
-            size_t a_strides[3];
-            size_t b_strides[3];
+            size_t out_shape[4];
+            size_t out_strides[4];
+            size_t a_strides[4];
+            size_t b_strides[4];
             size_t out_numel;
             size_t out_ndim;
             bool exact;

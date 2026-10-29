@@ -8,8 +8,8 @@
  * backends carry a device-side twin of the enumerator (device code cannot
  * call this host inline); the two must stay behaviorally identical.
  * Header-only: everything here is inline.
- * @version 0.1
- * @date 2026-10-23
+ * @version 0.2
+ * @date 2026-10-28
  */
 #pragma once
 
@@ -21,7 +21,7 @@
 namespace BeanTensor::Tensors::detail {
 
     /**
-     * Fixed 3 entries == BT_TENSOR_MAX_DIMS. `this` of
+     * Fixed 4 entries == BT_TENSOR_MAX_DIMS. `this` of
      * Tensor::build_bcast_reduce_plan is the out-shaped delta; `op` is the
      * broadcast operand being reduced into. An operand dim of size 1 (or a
      * dim missing entirely, when the operand ranks below the output) is
@@ -31,9 +31,9 @@ namespace BeanTensor::Tensors::detail {
      * @brief Broadcast-reduction execution plan for one operand.
      */
     struct BcastReducePlan {
-        size_t out_shape[3];
-        size_t out_strides[3];
-        size_t op_shape[3];
+        size_t out_shape[4];
+        size_t out_strides[4];
+        size_t op_shape[4];
         size_t out_ndim;
         size_t op_ndim;
     };
@@ -55,11 +55,11 @@ namespace BeanTensor::Tensors::detail {
     template<typename F>
     inline void for_each_preimage(const BcastReducePlan& p, const size_t j, F&& f) {
         // Contiguous strides of the operand, from its shape.
-        auto op_strides_c = std::array<size_t, 3>{size_t{1}, size_t{1}, size_t{1}};
+        auto op_strides_c = std::array<size_t, 4>{size_t{1}, size_t{1}, size_t{1}, size_t{1}};
         for (auto od = p.op_ndim - 1; od-- > 0;) {
             op_strides_c[od] = op_strides_c[od + 1] * p.op_shape[od + 1];
         }
-        auto coord = std::array<size_t, 3>{size_t{0}, size_t{0}, size_t{0}};
+        auto coord = std::array<size_t, 4>{size_t{0}, size_t{0}, size_t{0}, size_t{0}};
         auto rem = j;
         for (auto od = p.op_ndim; od-- > 0;) {
             coord[od] = rem / op_strides_c[od];
@@ -67,8 +67,8 @@ namespace BeanTensor::Tensors::detail {
         }
         // Free dims (left-padded missing dims + size-1 dims) and the fixed
         // output-offset contribution of j's coordinates.
-        auto free_dim = std::array<size_t, 3>{size_t{0}, size_t{0}, size_t{0}};
-        auto free_ext = std::array<size_t, 3>{size_t{1}, size_t{1}, size_t{1}};
+        auto free_dim = std::array<size_t, 4>{size_t{0}, size_t{0}, size_t{0}, size_t{0}};
+        auto free_ext = std::array<size_t, 4>{size_t{1}, size_t{1}, size_t{1}, size_t{1}};
         auto k = size_t{0};
         auto base = size_t{0};
         const auto lead = p.out_ndim - p.op_ndim;
@@ -84,7 +84,7 @@ namespace BeanTensor::Tensors::detail {
             }
         }
         // Mixed-radix divisors: div[m] = product of free_ext[n] for n > m.
-        auto div = std::array<size_t, 3>{size_t{1}, size_t{1}, size_t{1}};
+        auto div = std::array<size_t, 4>{size_t{1}, size_t{1}, size_t{1}, size_t{1}};
         for (auto m = k; m-- > 0;) {
             if (m + 1 < k) {
                 div[m] = div[m + 1] * free_ext[m + 1];

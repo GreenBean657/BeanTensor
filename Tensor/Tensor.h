@@ -2,11 +2,11 @@
  * @file Tensor.h
  * @author GreenBean
  * @brief Tensor class declaration: dtype, shape, device and buffer ownership.
- * @version 0.4.4
- * @date 2026-10-28
+ * @version 0.4.10
+ * @date 2026-10-29
  */
 #pragma once
-#define BT_TENSOR_MAX_DIMS 3
+#define BT_TENSOR_MAX_DIMS 4
 #define BT_TENSOR_MAX_PARENTS 3
 
 #include <algorithm>
@@ -36,14 +36,23 @@
 #include "Math/Loss/Loss.h" // IWYU pragma: keep
 #include "Math/Autograd/Autograd.h" // IWYU pragma: keep
 #include "Math/Shape/Shape.h" // IWYU pragma: keep
+#include "Math/Convolution/Convolution.h" // IWYU pragma: keep
+#include "Math/Spatial/Spatial.h" // IWYU pragma: keep
 namespace BeanTensor::Tensors {
     class Tensor;
+    struct Node;
 }
 namespace BeanTensor::Intrinsics::detail {
     void launch_conv_cpu(Tensors::Tensor& t, const DataTypes::DType& new_dtype, ConversionClampMethod method);
 }
+namespace BeanTensor::Math::Dropout {
+    Tensors::Tensor train_mask(const Tensors::Tensor& x, float64_t p, int64_t seed);
+    Tensors::Tensor train_mask_cpu(const Tensors::Tensor& x, float64_t p, int64_t seed);
+    Tensors::Tensor train_mask_gpu(const Tensors::Tensor& x, float64_t p, int64_t seed);
+}
 namespace BeanTensor::Tensors::detail {
     struct BcastReducePlan;
+    void conv2d_g_node_gpu(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
 }
 namespace BeanTensor::Tensors {
 
@@ -270,6 +279,45 @@ namespace BeanTensor::Tensors {
         [[nodiscard]] Tensor matmul(const Tensor& other) const;
 
         /**
+         * 2-D convolution over NCHW input using im2col + the existing GEMM
+         * helpers. Input must be rank-4 {N,C,H,W}; weight must be rank-4
+         * {C,R,S,K} (input channels, kernel height, kernel width, output
+         * channels). Output shape is {N,K,Hout,Wout} with Hout/Wout floored.
+         * Both operands must share dtype and device and be contiguous. The
+         * output joins the computation graph when any input requires grad
+         * (Conv2dG backward: recomputes im2col(x), transposes dy into {M,K}
+         * scratch, then dW = colᵀ·dyT, db = rowsum(dyT), dx = col2im(dyT·Wᵀ)).
+         * The compute is queued asynchronously; failures materialize at sync().
+         * @brief 2-D convolution (NCHW) computed as im2col + GEMM.
+         * @param weight Convolution kernel {C,R,S,K}.
+         * @param bias Per-output-channel bias {K}.
+         * @param stride Stride along H and W.
+         * @param padding Zero-padding on all sides.
+         * @return Convolved output {N,K,Hout,Wout}.
+         * @throws ErrorHandling::MismatchedShapes rank mismatch, channel mismatch,
+         *         kernel larger than padded input, or stride == 0.
+         * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
+         * @throws ErrorHandling::MismatchedDevices Operand devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous input.
+         */
+        [[nodiscard]] Tensor conv2d(const Tensor& weight, const Tensor& bias, uint32_t stride, uint32_t padding) const;
+        /**
+         * Bias-less overload of conv2d. Same contract as the three-argument
+         * form, but wires a 2-parent graph node (no bias gradient).
+         * @brief 2-D convolution without bias.
+         * @param weight Convolution kernel {C,R,S,K}.
+         * @param stride Stride along H and W.
+         * @param padding Zero-padding on all sides.
+         * @return Convolved output {N,K,Hout,Wout}.
+         * @throws ErrorHandling::MismatchedShapes rank mismatch, channel mismatch,
+         *         kernel larger than padded input, or stride == 0.
+         * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
+         * @throws ErrorHandling::MismatchedDevices Operand devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous input.
+         */
+        [[nodiscard]] Tensor conv2d(const Tensor& weight, uint32_t stride, uint32_t padding) const;
+
+        /**
          * Reshape this tensor into a zero-copy view with a new shape. The view
          * shares this tensor's buffer (view semantics: writes through either are
          * visible in both; if this tensor dies first, the view takes its own
@@ -283,6 +331,17 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
          */
         [[nodiscard]] Tensor reshape(const std::vector<size_t>& new_shape);
+
+        /**
+         * Flatten a contiguous tensor to rank 2: out shape is
+         * {shape[0], numel / shape[0]}. This is a metadata-only view over the
+         * same buffer; the output joins the computation graph when the input
+         * requires grad (FlattenG backward: dx = reshape(dy, x.shape())).
+         * @brief Flatten to a rank-2 view.
+         * @return Rank-2 tensor viewing this tensor's data as {d0, numel/d0}.
+         * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
+         */
+        [[nodiscard]] Tensor flatten() const;
 
         /**
          * View into a per-dimension [start, end) box of this tensor. The
@@ -845,6 +904,40 @@ namespace BeanTensor::Tensors {
         [[nodiscard]] Tensor relu() const;
 
         /**
+         * 2D max pooling over the spatial dimensions of a rank-4 NCHW tensor.
+         * Output shape is {N, C, Hout, Wout} with Hout = floor((H - kernel) / stride) + 1
+         * and Wout = floor((W - kernel) / stride) + 1; no padding. The first
+         * occurrence of a repeated window maximum wins in both forward and backward.
+         * @brief 2D max pooling (square kernel, no padding).
+         * @param kernel Window height and width.
+         * @param stride Step between adjacent windows.
+         * @return New rank-4 tensor of the same dtype/device as this.
+         * @throws ErrorHandling::MismatchedShapes Input is not rank-4, kernel > H/W,
+         *         kernel == 0, or stride == 0.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand.
+         */
+        [[nodiscard]] Tensor max_pool2d(uint32_t kernel, uint32_t stride) const;
+
+        /**
+         * Numerically-stable last-axis softmax over the class dimension: this
+         * must be rank-2 (rows x classes). Returns a tensor of the same
+         * shape/dtype/device where each row sums to 1. Computed as
+         * exp(x - row_max) / sum(exp(x - row_max)); a NaN logit poisons its
+         * whole row. Packed logits dtypes unpack each element's two lanes as
+         * consecutive classes. Accumulation: fp32 for fp32/fp16/bf16/packed
+         * logits, fp64 for fp64 and integer logits. Integer outputs
+         * clamp/truncate and map NaN to 0. Blocks before returning.
+         * When this tensor has requires_grad=true the output joins the
+         * computation graph (softmax_G backward: dx = y * (dy - rowsum(dy*y)),
+         * with y recomputed from the saved input).
+         * @brief Standalone rank-2 softmax.
+         * @return New tensor (rows x classes) holding softmax probabilities.
+         * @throws ErrorHandling::MismatchedShapes Input is not rank-2 or is empty.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand.
+         */
+        [[nodiscard]] Tensor softmax() const;
+
+        /**
          * Numerically-stable softmax cross-entropy over the class dimension:
          * this must be rank-2 (rows x classes) logits; targets must be rank-1
          * with one integer class index per row (any integer dtype; int4x2 uses
@@ -1081,6 +1174,26 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::NotImplemented Non-contiguous tensor, or integer dtype.
          */
         [[nodiscard]] Tensor log() const;
+        /**
+         * Float kinds only — integer sigmoid throws ErrorHandling::NotImplemented.
+         * fp16/bf16 (and packed lanes) widen to fp32, 1/(1+exp(-x)), narrow RNE;
+         * fp32/fp64 sigmoid in their storage width. Large positive/negative inputs
+         * saturate to 1/0 without overflow.
+         * @brief Elementwise sigmoid.
+         * @return New tensor, same shape/dtype/device as this.
+         * @throws ErrorHandling::NotImplemented Non-contiguous tensor, or integer dtype.
+         */
+        [[nodiscard]] Tensor sigmoid() const;
+        /**
+         * Float kinds only — integer tanh throws ErrorHandling::NotImplemented.
+         * fp16/bf16 (and packed lanes) widen to fp32, 1 - 2/(exp(2x)+1), narrow RNE;
+         * fp32/fp64 tanh in their storage width. Large positive/negative inputs
+         * saturate to +/-1 without overflow.
+         * @brief Elementwise hyperbolic tangent.
+         * @return New tensor, same shape/dtype/device as this.
+         * @throws ErrorHandling::NotImplemented Non-contiguous tensor, or integer dtype.
+         */
+        [[nodiscard]] Tensor tanh() const;
 
         /**
          * Bounds-checked strided element access. T must be a type with a
@@ -1451,6 +1564,18 @@ namespace BeanTensor::Tensors {
          * @param b Second op input, when the op is binary.
          */
         void wire_node(void (*backward_fn)(Node*, Tensor*, Tensor**, size_t, DataTypes::DType), const Tensor& a, const Tensor* b = nullptr);
+        /**
+         * Three-input variant of wire_node for ops like Conv2dG that need
+         * parents (x, weight, bias). Follows the same contract as the unary/
+         * binary overload: no-op when no input requires gradients, otherwise
+         * records all three borrowed parent pointers and sets _n_inputs = 3.
+         * @brief Attach a 3-input autograd node to this tensor.
+         * @param backward_fn Backward trampoline invoked as (owning node, output grad, inputs, input count, grad dtype).
+         * @param a First input tensor.
+         * @param b Second input tensor.
+         * @param c Third input tensor.
+         */
+        void wire_node(void (*backward_fn)(Node*, Tensor*, Tensor**, size_t, DataTypes::DType), const Tensor& a, const Tensor& b, const Tensor& c);
 
         friend void detail::set_amount_gpu(Tensor& t, int64_t amount);
         friend void detail::set_amount_gpu(Tensor& t, uint64_t amount);
@@ -1461,6 +1586,18 @@ namespace BeanTensor::Tensors {
         friend void detail::convert_gpu(Tensor& t, const DataTypes::DType& new_dtype, ConversionClampMethod method);
         friend void detail::matmul_cpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::matmul_gpu(const Tensor&, const Tensor&, const Tensor&);
+        friend void detail::im2col_cpu(const Tensor&, const Tensor&, uint32_t, uint32_t, size_t, size_t);
+        friend void detail::im2col_gpu(const Tensor&, const Tensor&, uint32_t, uint32_t, size_t, size_t);
+        friend void detail::col2im_cpu(const Tensor&, const Tensor&, uint32_t, uint32_t, size_t, size_t);
+        friend void detail::col2im_gpu(const Tensor&, const Tensor&, uint32_t, uint32_t, size_t, size_t);
+        friend void detail::conv2d_cpu(const Tensor&, const Tensor&, const Tensor*, const Tensor&, uint32_t, uint32_t);
+        friend void detail::conv2d_gpu(const Tensor&, const Tensor&, const Tensor*, const Tensor&, uint32_t, uint32_t);
+        friend void detail::conv2d_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::conv2d_g_node_gpu(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::conv_zero_tensor(const Tensor&);
+        friend void detail::col2im_dispatch(const Tensor&, const Tensor&, const detail::Conv2dShape&, uint32_t, uint32_t);
+        friend void detail::rowsum_mk_dispatch(const Tensor&, const Tensor&);
+        friend void detail::bias_add_nchw_dispatch(const Tensor&, const Tensor&);
         friend void detail::sgd_update_cpu(const Tensor&, const Tensor&, float64_t);
         friend void detail::sgd_update_gpu(const Tensor&, const Tensor&, float64_t);
         friend void detail::adam_update_cpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&, float64_t, float64_t, float64_t, float64_t, float64_t, float64_t);
@@ -1483,6 +1620,16 @@ namespace BeanTensor::Tensors {
         friend void detail::bias_add_gpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::relu_cpu(const Tensor&, const Tensor&);
         friend void detail::relu_gpu(const Tensor&, const Tensor&);
+        friend void detail::max_pool2d_cpu(const Tensor&, Tensor&, uint32_t, uint32_t);
+        friend void detail::max_pool2d_gpu(const Tensor&, Tensor&, uint32_t, uint32_t);
+        friend void detail::max_pool2d_g_cpu(const Tensor&, const Tensor&, Tensor&, uint32_t, uint32_t);
+        friend void detail::max_pool2d_g_gpu(const Tensor&, const Tensor&, Tensor&, uint32_t, uint32_t);
+        friend void detail::max_pool2d_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::max_pool2d_g_bridge(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::softmax_cpu(const Tensor&, Tensor&);
+        friend void detail::softmax_gpu(const Tensor&, const Tensor&);
+        friend void detail::softmax_g_cpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::softmax_g_gpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::softmax_ce_cpu(const Tensor&, const Tensor&, Tensor&);
         friend void detail::softmax_ce_gpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::mse_cpu(const Tensor&, const Tensor&, Tensor&);
@@ -1492,6 +1639,11 @@ namespace BeanTensor::Tensors {
         friend void detail::sum_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::mean_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::relu_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::sigmoid_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::tanh_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::softmax_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::softmax_g_bridge(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::flatten_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::softmax_ce_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::mse_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::ew_binary_g_node_impl(Node*, Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseOp);
@@ -1507,6 +1659,7 @@ namespace BeanTensor::Tensors {
         friend void detail::transpose_last2_gpu(const Tensor&, const Tensor&);
         friend void detail::relu_g_cpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::relu_g_gpu(const Tensor&, const Tensor&, const Tensor&);
+
         friend void detail::bias_add_g_cpu(const Tensor&, Tensor&);
         friend void detail::bias_add_g_gpu(const Tensor&, const Tensor&);
         friend void detail::softmax_ce_g_cpu(const Tensor&, const Tensor&, const Tensor&, Tensor&);
@@ -1526,6 +1679,9 @@ namespace BeanTensor::Tensors {
         friend void detail::elementwise_unary_cpu(const Tensor&, const Tensor&, ElementwiseUnaryOp);
         friend void detail::elementwise_unary_gpu(const Tensor&, const Tensor&, ElementwiseUnaryOp);
         friend void Intrinsics::detail::launch_conv_cpu(Tensor& t, const DataTypes::DType& new_dtype, ConversionClampMethod method);
+        friend Tensor BeanTensor::Math::Dropout::train_mask(const Tensor&, float64_t, int64_t);
+        friend Tensor BeanTensor::Math::Dropout::train_mask_cpu(const Tensor&, float64_t, int64_t);
+        friend Tensor BeanTensor::Math::Dropout::train_mask_gpu(const Tensor&, float64_t, int64_t);
 
     };
 }
