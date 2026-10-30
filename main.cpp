@@ -2,7 +2,7 @@
  * @file main.cpp
  * @author GreenBean
  * @brief MNIST demo over the Module layer stack: reads the uncompressed IDX
- * files from data/mnist/, prints live thread-pool telemetry (snapshot + format) on the first
+ * files from datasets/mnist/, prints live thread-pool telemetry (snapshot + format) on the first
  * batch of each epoch, trains a Sequential MLP (Linear -> Relu -> Linear)
  * with softmax_cross_entropy against class labels and Module::adam_step, and
  * reports test accuracy after every epoch. Every tensor access is gated on
@@ -10,15 +10,14 @@
  * Each split is staged once in Float32 on the host, converted to the model
  * dtype with Tensor::convert_dtype (so packed dtypes like Float16x2 never
  * need a host-side scalar type), and moved to the run's device before the
- * timer starts. Per step, batches are gathered on that device with
- * index_select through a shuffled index tensor uploaded once per epoch, so
+ * timer starts. Batches are produced by BeanTensor::Data::DataLoader, so
  * no per-batch host staging or host<->device transfer is timed.
  *
  * The demo runs the same model twice: once on the CPU, then once on the GPU
  * (when the build includes a GPU backend). Both passes use identical
  * hyperparameters and report the same metrics.
- * @version 0.5.0
- * @date 2026-10-26
+ * @version 0.6.0
+ * @date 2026-10-30
  */
 
 #include <algorithm>
@@ -30,26 +29,32 @@
 #include <iostream>
 #include <memory>
 #include <optional>
-#include <random>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "Data/DataLoader.h"
 #include "Helpers/CPUThreading.h"
 #include "Helpers/PoolMonitor.h"
+#include "Metrics/Metrics.h"
 #include "Module/Linear.h"
 #include "Module/Module.h"
 #include "Module/ModuleStream.h"
 #include "Module/Relu.h"
 #include "Module/Sequential.h"
+#include "Random/Generator.h"
 #include "Tensor/Tensor.h"
 
+using BeanTensor::Data::DataLoader;
+using BeanTensor::Metrics::EvalResult;
+using BeanTensor::Metrics::evaluate;
 using BeanTensor::Modules::Linear;
 using BeanTensor::Modules::Module;
 using BeanTensor::Modules::Relu;
 using BeanTensor::Modules::Sequential;
 using BeanTensor::Modules::softmax_cross_entropy;
+using BeanTensor::Random::set_seed;
 using BeanTensor::Tensors::Device;
 using BeanTensor::Tensors::Tensor;
 using BeanTensor::float32_t;
@@ -87,7 +92,6 @@ namespace {
     // The model (weights, inputs, loss) runs in kDType; gradients in gDType.
     constexpr auto kDType = DType::Float32;
     constexpr auto gDType = DType::Float32;
-    constexpr auto kPacked = kDType == DType::Float16x2 || kDType == DType::BFloat16x2;
 
     // Host side: every value the demo writes or reads is this scalar type.
     // Packed dtypes hold two values per element, so batches are staged here
@@ -104,13 +108,11 @@ namespace {
     };
 
     // One split decoded and resident on the run's device: images in kDType
-    // ({count, kInputs} before packing), labels as Int64 class indices, and
-    // identity row indices for the in-order evaluation gather.
+    // ({count, kInputs} before packing) and labels as Int64 class indices.
     struct DeviceSplit {
         size_t count = 0;
         Tensor images;
         Tensor labels;
-        Tensor identity;
     };
 
     struct FileCloser {
@@ -218,27 +220,6 @@ namespace {
         return staged;
     }
 
-    // Row indices as a rank-1 UInt64 tensor on device, the index operand
-    // index_select expects. Called once per epoch for the shuffled order.
-    [[nodiscard]] Tensor upload_order(const std::vector<size_t>& order, const Device device) {
-        auto indices = Tensor(std::vector<size_t>{order.size()}, DType::UInt64);
-        for (auto i = size_t{0}; i < order.size(); ++i) {
-            indices.set<uint64_t>({i}, static_cast<uint64_t>(order[i]));
-        }
-        if (device == Device::GPU) {
-            indices.to(Device::GPU);
-        }
-        return indices;
-    }
-
-    [[nodiscard]] std::vector<size_t> identity_order(const size_t count) {
-        auto order = std::vector<size_t>(count);
-        for (auto i = size_t{0}; i < count; ++i) {
-            order[i] = i;
-        }
-        return order;
-    }
-
     // Decode a whole split once, outside the timed region: pixels staged as
     // Host values scaled to [0, 1] and converted to kDType, labels as Int64,
     // everything moved to device. Returns nullopt if a dtype gate fails.
@@ -265,7 +246,7 @@ namespace {
             images.to(Device::GPU);
             labels.to(Device::GPU);
         }
-        return DeviceSplit{split.count, std::move(images), std::move(labels), upload_order(identity_order(split.count), device)};
+        return DeviceSplit{split.count, std::move(images), std::move(labels)};
     }
 
     // Read a one-element tensor as a float64 value. Works on a copy, converted
@@ -277,48 +258,10 @@ namespace {
         return static_cast<float64_t>(host.at<Host>({0}));
     }
 
-    // Fraction of samples whose argmax prediction matches the label. Forward
-    // only: no backward() follows, so nothing is trained on this pass. Hits
-    // are counted on the device and read back once.
-    // Returns nullopt if a tensor has the wrong dtype.
-    [[nodiscard]] std::optional<float64_t> evaluate(Sequential& net, DeviceSplit& split, const Device device) {
-        auto correct = Tensor(std::vector<size_t>{1}, DType::Int64, device);
-        correct.set_zero();
-        auto seen = size_t{0};
-        for (auto start = size_t{0}; start + kBatch <= split.count; start += kBatch) {
-            auto batch_indices = split.identity.slice({{start, start + kBatch}});
-            auto batch = split.images.index_select(0, batch_indices);
-            auto labels = split.labels.slice({{start, start + kBatch}});
-            auto logits = net.forward(batch);
-            logits.sync();
-            // Packed logits need the lane-aware argmax: each element is two classes.
-            auto predictions = kPacked ? logits.argmax_lanes(1) : logits.argmax(1);
-            predictions.sync();
-            if (
-                const auto predictions_ok = expect_dtype(predictions, DType::Int64, "evaluate: predictions");
-                !predictions_ok
-            ) {
-                return std::nullopt;
-            }
-            auto hits = predictions.equal(labels);
-            hits.convert_dtype(DType::Int64);
-            const auto batch_hits = hits.sum();
-            auto updated = correct.add(batch_hits);
-            updated.sync();
-            correct = std::move(updated);
-            seen += kBatch;
-        }
-        if (device == Device::GPU) {
-            correct.to(Device::CPU);
-        }
-        correct.sync();
-        return static_cast<float64_t>(correct.at<int64_t>({0})) / static_cast<float64_t>(seen);
-    }
-
     // Train and evaluate the same MLP on the requested device. Both splits are
-    // decoded and moved to the device before the timer starts; each step
-    // gathers its batch and labels on the device through the epoch's shuffled
-    // index tensor. The model and its optimizer state live on the device.
+    // decoded and moved to the device before the timer starts; batches are drawn
+    // from DataLoader on the device. The model and its optimizer state live on
+    // the device.
     [[nodiscard]] bool run_training(const MnistSplit& train, const MnistSplit& test, const Device device) {
         std::cout << "\n" << std::string(60, '=') << "\n";
         std::cout << "Device: " << BeanTensor::Tensors::stringify_device_source(device) << "\n";
@@ -339,32 +282,49 @@ namespace {
             return false;
         }
 
-        auto rng = std::mt19937{kShuffleSeed};
-        auto order = identity_order(train.count);
+        auto train_loader = DataLoader(
+            train_data->images,
+            train_data->labels,
+            kBatch,
+            true,
+            kShuffleSeed,
+            true
+        );
+        auto test_loader = DataLoader(
+            test_data->images,
+            test_data->labels,
+            kBatch,
+            false,
+            std::nullopt,
+            true
+        );
+
         const auto run_start = std::chrono::steady_clock::now();
         for (auto epoch = size_t{0}; epoch < kEpochs; ++epoch) {
             const auto epoch_start = std::chrono::steady_clock::now();
-            std::ranges::shuffle(order, rng);
-            auto indices = upload_order(order, device);
-            auto loss_sum = float64_t{0};
+            train_loader.reset();
+            auto loss_acc = Tensor(std::vector<size_t>{1}, kDType, device);
+            loss_acc.set_zero();
             auto steps = size_t{0};
-            for (auto start = size_t{0}; start + kBatch <= train.count; start += kBatch) {
-                auto batch_indices = indices.slice({{start, start + kBatch}});
-                auto batch = train_data->images.index_select(0, batch_indices);
+            while (true) {
+                auto batch_opt = train_loader.next_batch();
+                if (!batch_opt.has_value()) {
+                    break;
+                }
+                auto& [batch, labels] = batch_opt.value();
                 if (
                     const auto batch_ok = expect_dtype(batch, kDType, "train: input batch");
                     !batch_ok
                 ) {
                     return false;
                 }
-                auto labels = train_data->labels.index_select(0, batch_indices);
 
+                net.zero_grad();
                 auto out = net.forward(batch);
                 auto loss = softmax_cross_entropy(out, labels);
                 loss.backward(gDType);
                 constexpr auto epsilon = (kDType == DType::Float16 || kDType == DType::Float16x2) ? kEpsilonHalf : kEpsilon;
                 net.adam_step(kLearningRate, kBeta1, kBeta2, epsilon);
-                net.zero_grad();
 
                 if (
                     const auto loss_ok = expect_dtype(loss, kDType, "train loss");
@@ -372,26 +332,23 @@ namespace {
                 ) {
                     return false;
                 }
-                loss_sum += read_scalar(loss);
+                loss_acc = loss_acc.add(loss);
                 ++steps;
             }
             // Drain any pending optimizer/gradient work before running the
             // synchronous test-only forward pass.
             for (auto& [name, param] : net.named_parameters()) {
-                (void)name;
+                static_cast<void>(name);
                 param->sync();
             }
-            const auto accuracy = evaluate(net, *test_data, device);
-            if (
-                const auto evaluated = accuracy.has_value();
-                !evaluated
-            ) {
-                return false;
-            }
+            net.eval();
+            const auto result = evaluate(net, test_loader);
+            net.train();
             const auto epoch_seconds = std::chrono::duration<float64_t>(std::chrono::steady_clock::now() - epoch_start).count();
             std::cout << "epoch " << (epoch + 1) << "/" << kEpochs
-                      << "  mean loss " << (loss_sum / static_cast<float64_t>(steps))
-                      << "  test accuracy " << (*accuracy * float64_t{100}) << "%"
+                      << "  train mean loss " << (read_scalar(loss_acc) / static_cast<float64_t>(steps))
+                      << "  test accuracy " << (result.accuracy * float64_t{100}) << "%"
+                      << "  test mean loss " << result.mean_loss
                       << "  time " << epoch_seconds << " s\n";
         }
         const auto total_seconds = std::chrono::duration<float64_t>(std::chrono::steady_clock::now() - run_start).count();
@@ -402,6 +359,8 @@ namespace {
 }
 
 int main() {
+    set_seed(kShuffleSeed);
+
     const auto dir = std::filesystem::path(kMnistDir);
     auto train = MnistSplit{};
     auto test = MnistSplit{};

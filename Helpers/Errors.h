@@ -2,8 +2,8 @@
  * @file Errors.h
  * @author GreenBean
  * @brief ErrorHandling exception types and GPU API error-check macros.
- * @version 0.9
- * @date 2026-10-26
+ * @version 0.10
+ * @date 2026-10-30
  */
 #pragma once
 
@@ -257,6 +257,16 @@ namespace BeanTensor::ErrorHandling {
          * @param detail What value or constraint was violated.
          */
         explicit InvalidProbability(const std::string& detail) : std::invalid_argument("Invalid probability: " + detail) { }
+    };
+
+    class InvalidHyperparameter : public std::invalid_argument {
+    public:
+        InvalidHyperparameter() = delete;
+        /**
+         * @brief Exception thrown when a hyperparameter is outside its valid range.
+         * @param detail What value or constraint was violated.
+         */
+        explicit InvalidHyperparameter(const std::string& detail) : std::invalid_argument("Invalid hyperparameter: " + detail) { }
     };
 
     class DimensionTooLarge : public std::out_of_range {

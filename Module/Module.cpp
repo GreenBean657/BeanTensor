@@ -113,6 +113,7 @@ namespace BeanTensor::Modules {
             this->parameters = std::move(other.parameters);
             this->modules = std::move(other.modules);
             this->forward_cache = std::move(other.forward_cache);
+            this->training = other.training;
         }
         return *this;
     }

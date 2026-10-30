@@ -1,0 +1,48 @@
+# Docs — Doxygen API reference published to GitHub Pages.
+name: docs
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    name: build-api-docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout v4
+
+      - name: Install Doxygen
+        run: sudo apt-get update && sudo apt-get install -y doxygen
+
+      - name: Generate Doxygen documentation
+        run: doxygen Doxyfile
+
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # actions/configure-pages v5
+        with:
+          enablement: true
+
+      - name: Upload Pages artifact
+        # v5 pins its internal upload-artifact reference to a full SHA
+        # (v3 used a tag, which the repo's SHA-pinning ruleset rejects).
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # actions/upload-pages-artifact v5.0.0
+        with:
+          path: docs/doxygen/html
+
+  deploy:
+    name: deploy-to-pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # actions/deploy-pages v4

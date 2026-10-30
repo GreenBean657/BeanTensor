@@ -102,6 +102,25 @@ regardless of how many threads run. Explicit-seed calls are reproducible.
 so their exact bits may differ between CPU scalar, SIMD, and GPU paths. Min,
 max, and argmax are bit-identical across backends.
 
+## Training utilities
+
+`BeanTensor::Data::DataLoader` produces shuffled or sequential batches from a
+feature/label tensor pair on the device where the data already lives. It holds
+views into the supplied tensors, so the source tensors must outlive the loader.
+Call `reset()` at the start of each epoch and `next_batch()` until it returns
+`std::nullopt`; set `drop_last=true` to discard a ragged final chunk.
+
+`BeanTensor::Metrics::evaluate` runs a full evaluation epoch over a DataLoader.
+It saves `requires_grad` flags, disables gradient tracking for the forward pass,
+and restores the flags on exit (even when an exception propagates), returning
+`EvalResult` with top-1 accuracy and a row-weighted mean of
+`softmax_cross_entropy`. It does not change the module's train/eval mode, so
+stochastic layers such as Dropout stay stochastic unless the caller switches to
+`model.eval()` first. Input batches with `requires_grad=true` still wire graph
+nodes during the forward pass, though no `backward()` is called. The repository's
+`main.cpp` uses DataLoader for both training and test splits and calls
+`Metrics::evaluate` after each training epoch to report test accuracy and loss.
+
 ## Scope
 
 Decisions binding the MVP, recorded 2026-10-27, updated 2026-10-28 for the
@@ -109,8 +128,9 @@ landed layer set:
 
 - Python bindings are out of scope for the MVP. The library ships as C++;
   bindings are a later phase. The public API is already shaped for them —
-  value-in/value-out signatures, no non-const reference or mutable pointer
-  parameters — enforced on every build by the bind-clean verification.
+  value-in/value-out signatures, no non-const references to fundamental or
+  alias types and no mutable pointer parameters; class-type non-const references
+  are permitted — enforced on every build by the bind-clean verification.
 - Weight initialization is He (Kaiming) uniform, fan-in — bound
   sqrt(6 / in_features), bias zero — replacing the old ad-hoc range, in
   `Module/Linear` and `Module/Conv2d`.

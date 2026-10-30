@@ -2,79 +2,42 @@
 [![YES: AI](https://raw.githubusercontent.com/GreenBean657/pro-ai-badge/master/badge.png)](https://github.com/GreenBean657/pro-ai-badge)
 
 # BeanTensor
-BeanTensor is a C++ library built for HIP, CUDA, and CPU (AVX512 accelerated!) neural network inferencing.
-Other libraries have patches for support like this, but it's often buggy or falls apart in high dimensions.
-BeanTensor is built on the principle of GROUND UP support for all hardware - obscure still deserves support. 
 
+BeanTensor is a from-scratch C++23 tensor and machine-learning framework with CPU (scalar, AVX2, AVX-512), CUDA, and HIP/ROCm backends. It provides tensors, autograd, neural-network modules, and first-order optimizers built directly on the CUDA/ROCm runtimes and compiler intrinsics, with no external ML libraries.
 
-# Usage
-The library is under construction. At this current time, documentation is not constructed. 
-Usage is at your own risk, and the API is unlikely to function fully or at all.
+## Build
 
-# Building
-Backends: `-DUSE_HIP=ON` (default), `-DUSE_CUDA=ON`, or CPU-only (both off). Mutually exclusive.
+BeanTensor targets exactly one GPU backend, or none at all for a CPU-only build. The CMake defaults are `USE_CUDA=ON` and `USE_HIP=OFF`; always pass both flags explicitly so the default never silently chooses a backend for you:
 
-**CUDA backend requirement:** the build is pinned to CUDA 12.9 (the last toolkit with
-sm_70/Volta support), and on distros with glibc ≥ 2.41 (Ubuntu 25.10+, Fedora 42+, current
-Arch) you must apply a one-time 6-line patch to a CUDA toolkit header or nothing compiles.
-The build verifies this and prints the exact command if it's missing. Full explanation of
-what the patch does and why it's safe: [CUDA_GLIBC_PATCH.md](CUDA_GLIBC_PATCH.md).
+```bash
+cmake -B build -S . -DUSE_CUDA=ON -DUSE_HIP=OFF -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j 6
+```
 
-# Abilities
+Other valid configurations:
 
-**BeanTensor is intended for:**
-- NVIDIA GPUs of Volta Architecture (Compute SM_70) or newer.
-- AMD GPUs of RDNA2 or newer, supported by ROCM 10. CDNA is not supported.
-- 64-bit CPUs. AVX2, AVX512, AVX512BF, and other accelerating instructions are not required, but will be used when possible.
+```bash
+# HIP/ROCm
+cmake -B build -S . -DUSE_HIP=ON -DUSE_CUDA=OFF -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
 
-**BeanTensor is not intended for:**
-- Intel & AMD NPUs attached to x86 CPUs (though this is planned in the future!)
-- TPUs, including Google Coral.
-- 32-bit processors.
-- Legacy Nvidia & AMD cards, including Pascal & RDNA 1 + Vega. Support for Pascal and basic RDNA is planned, but not a current priority and that plan may change as AI evolves. 
+# CPU only
+cmake -B build -S . -DUSE_CUDA=OFF -DUSE_HIP=OFF -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+```
 
-**BeanTensor will target a few major floating point and integer precision's, including:**
-- FP64 (double)
-- FP32 (float)
-- FP16 (half) (supports packing as *float16_tx2*)
-- BF16 (bf16) (supports packing as *bfloat16_tx2*)
-- INT64 (long)
-- INT32 (int)
-- INT16 (short)
-- INT8 (byte)
-- INT4 (nibble) (REQUIRES packing as *int4_tx2*)
-- UINT64 (unsigned long)
-- UINT32 (unsigned int)
-- UINT16 (unsigned short)
-- UINT8 (unsigned byte)
+**CUDA backend toolchain:** the build is pinned to CUDA 12.9 (the last toolkit with sm_70/Volta support). On distros with glibc ≥ 2.41 (Ubuntu 25.10+, Fedora 42+, current Arch) you must apply a one-time 6-line patch to a CUDA toolkit header; the build verification fails and prints the exact command if it is missing. See [CUDA_GLIBC_PATCH.md](CUDA_GLIBC_PATCH.md) for what the patch does and why it is safe.
 
-Note: UINT4 will not be supported at this time. U's are primary for indexing, and the lack of acceleration for it (especially since it inherently lacks a dtype as is, and needs packing) overcomplicates things. 
+**HIP/ROCm backend toolchain:** requires ROCm with `hip` and `rocblas`.
 
-Planned, but not introduced in the MVP:
-- FP4
-- FP8
-- INT1
-- INT2 
+## Documentation
 
-When tensor core acceleration exists and the operation permits it, I intend for BeanTensor to use the accelerated tensor pathway.
-Additional precision to maximize Tensor implementations are planned in the future, but may not land within the capstone deadline. 
+- [`docs/architecture.md`](docs/architecture.md) — user-visible semantics: backends, tensors, autograd, modules, and training utilities.
+- [`docs/quickstart.md`](docs/quickstart.md) — copy-paste MNIST training example and CPU-only build command.
+- [`docs/mnist-results.md`](docs/mnist-results.md) — end-to-end MNIST acceptance results and repro commands.
+- API reference: `cmake --build build --target docs` (requires Doxygen).
+- GitHub Pages: enable Pages in the repo settings (`Settings → Pages → Source: GitHub Actions`) to publish the Doxygen site from the workflow in `.github/workflows/docs.yml`.
 
+## License
 
-# Contributing
-Pull Requests are welcome! 
-This is a capstone project for Neumont University. At the moment, pull requests will be considered, but possibly recoded. 
-
-I welcome suggestions, feature recommendations, and any other feedback - even if negative (though constructive is better!)
-
-
-# Contact
-You can contact me at my email: admin@beantensor.org
-
-Or on discord: @greenbeanofficial
-
-Website: https://beantensor.org
-
-# License
 MIT License
 
 Copyright (c) 2026 BeanTensor
@@ -96,4 +59,4 @@ MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
 CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
 TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

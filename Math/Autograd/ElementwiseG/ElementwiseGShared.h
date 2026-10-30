@@ -48,7 +48,7 @@ namespace BeanTensor::Tensors::detail {
      * against the GPU twin. Every output index is enumerated exactly once
      * across all j, so the reduction is a partition of the delta.
      * @brief Invoke f(i) for every output index i reducing into operand element j.
-     * @param plan Broadcast-reduction plan.
+     * @param p Broadcast-reduction plan.
      * @param j Operand flat index.
      * @param f Callable invoked with each output flat index.
      */

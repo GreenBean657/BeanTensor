@@ -11,7 +11,7 @@
  * declares mse_loss, the module-facing entry point to the MSE loss
  * (Math/Loss/Loss.h), and softmax_cross_entropy, the module-facing entry
  * point to Tensor::softmax_ce, for forward/backward training loops.
- * @version 0.5
+ * @version 0.6
  * @date 2026-10-28
  */
 #pragma once
@@ -72,7 +72,8 @@ namespace BeanTensor::Modules {
         /**
          * Forgets the optimizer state of this module's current parameters before
          * taking the other module's registry, so the replaced parameters do not
-         * leave stale state behind.
+         * leave stale state behind. The training flag moves with the registry,
+         * matching the defaulted move constructor.
          * @brief Move-assign the registry, dropping this module's old optimizer state.
          * @return This module.
          */

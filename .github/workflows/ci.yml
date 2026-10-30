@@ -34,5 +34,8 @@ jobs:
       - name: Build
         run: cmake --build build -j "$(nproc)"
 
+      - name: MNIST data (datasets/ is gitignored; the mnist_demo ctest reads it)
+        run: ./fetch_mnist.sh
+
       - name: Test
         run: ctest --test-dir build --output-on-failure

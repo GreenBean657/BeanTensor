@@ -22,9 +22,6 @@ namespace BeanTensor::Loss {
      * free form exists so higher layers (Modules) can call the loss without
      * editing Tensor.h.
      * @brief Mean squared error loss (free function form).
-     * @param pred Predictions; the only operand that can receive a gradient.
-     * @param target Targets; never receive a gradient.
-     * @return Shape-{1} tensor holding the mean loss, in pred's dtype/device.
      */
     [[nodiscard]] Tensors::Tensor mse(const Tensors::Tensor&, const Tensors::Tensor&);
 }

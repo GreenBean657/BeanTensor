@@ -95,9 +95,6 @@ namespace BeanTensor::Tensors {
          * GemmG precedent is clean because its transposes are fresh
          * requires_grad=false tensors and its output_grad is a grad tensor).
          * @brief Graph-clean operand copy in the compute dtype.
-         * @param op Forward operand.
-         * @param dst Compute dtype (the assigned grad dtype, or the fp32 fallback).
-         * @return A fresh non-grad tensor holding op's values in dst.
          */
         [[nodiscard]] Tensor ew_operand_copy(const Tensor&, const DataTypes::DType&);
 
@@ -112,10 +109,6 @@ namespace BeanTensor::Tensors {
          * intermediate-delta probe when the operand owns a node, and lands
          * in operand.accumulate_grad.
          * @brief Reduce (if broadcast), boundary-cast, probe and accumulate a full delta.
-         * @param full Output-shaped delta, consumed (moved from when shapes match).
-         * @param operand The forward operand the delta belongs to.
-         * @param work Compute dtype the delta was built in.
-         * @param grad_dtype The calling backward()'s assigned gradient dtype.
          * @throws ErrorHandling::UnReachableCode if the operand is on neither CPU nor GPU.
          */
         void ew_deliver_delta(Tensor&&, Tensor&, const DataTypes::DType&, const DataTypes::DType&);
@@ -132,9 +125,6 @@ namespace BeanTensor::Tensors {
          * unsigned twin; int4x2 wraps per nibble. Blocks until the workers
          * finish is NOT performed here: futures land on delta and dx.
          * @brief CPU broadcast gradient reduction.
-         * @param delta Out-shaped delta, CPU resident, contiguous.
-         * @param op The broadcast operand (provides the target shape/strides).
-         * @param dx Output gradient, op-shaped (written).
          * @throws ErrorHandling::DirectFunctionCallOnWrongDataSource if any tensor is not on the CPU.
          * @throws ErrorHandling::NotImplemented for an unsupported dtype.
          */
@@ -143,9 +133,6 @@ namespace BeanTensor::Tensors {
          * GPU twin of bcast_sum_to_cpu; behaviorally identical (same compute
          * widths, same RNE narrowing, same wrap integer adds).
          * @brief GPU broadcast gradient reduction.
-         * @param delta Out-shaped delta, GPU resident, contiguous.
-         * @param op The broadcast operand (provides the target shape/strides).
-         * @param dx Output gradient, op-shaped (written).
          * @throws ErrorHandling::DirectFunctionCallOnWrongDataSource if any tensor is not on the GPU.
          * @throws ErrorHandling::NotImplemented (from the worker, at sync) for an unsupported dtype.
          */

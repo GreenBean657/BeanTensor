@@ -2,8 +2,8 @@
  * @file Tensor.h
  * @author GreenBean
  * @brief Tensor class declaration: dtype, shape, device and buffer ownership.
- * @version 0.4.10
- * @date 2026-10-29
+ * @version 0.4.14
+ * @date 2026-10-30
  */
 #pragma once
 #define BT_TENSOR_MAX_DIMS 4
@@ -53,6 +53,8 @@ namespace BeanTensor::Math::Dropout {
 namespace BeanTensor::Tensors::detail {
     struct BcastReducePlan;
     void conv2d_g_node_gpu(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+    void batch_norm_cpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&, Tensor&, Tensor&, bool, float64_t, float64_t);
+    void batch_norm_gpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&, Tensor&, Tensor&, bool, float64_t, float64_t);
 }
 namespace BeanTensor::Tensors {
 
@@ -171,6 +173,28 @@ namespace BeanTensor::Tensors {
         void random(const float64_t& min = 0.0, const float64_t& max = 1.0, std::optional<int64_t> seed = std::nullopt);
         void set_one();
         void set_zero();
+
+        /**
+         * Set the requires_grad flag on this tensor. This is a flag-only
+         * mutation: it does not detach an existing graph node, so calling it on
+         * a non-leaf tensor leaves the prior graph in place. Use this to toggle
+         * gradient tracking for parameters during evaluation loops.
+         * @brief Set whether this tensor requires gradients.
+         * @param value New value of the requires_grad flag.
+         * @version 0.4.11
+         */
+        void set_requires_grad(bool value) {
+            this->requires_grad = value;
+        }
+
+        /**
+         * @brief Read the current requires_grad flag.
+         * @return True when this tensor tracks gradients.
+         * @version 0.4.11
+         */
+        [[nodiscard]] bool requires_gradient() const {
+            return this->requires_grad;
+        }
 
 
         /**
@@ -464,9 +488,6 @@ namespace BeanTensor::Tensors {
          * ones truncate down (asymmetric by up to 1), and a NaN update leaves
          * the integer element unchanged.
          * @brief In-place SGD: w -= lr * grad.
-         * @param grad Gradient tensor (same shape/device as this; any dtype —
-         * a mismatch converts a copy into this tensor's dtype).
-         * @param lr Learning rate.
          * @throws ErrorHandling::MismatchedShapes Shapes differ.
          * @throws ErrorHandling::MismatchedDevices Devices differ.
          * @throws ErrorHandling::NotImplemented Non-contiguous operand.
@@ -502,12 +523,6 @@ namespace BeanTensor::Tensors {
          * epsilon > 0 (documented contract). Async on both devices: the
          * update queues onto the thread pool and errors materialize at sync().
          * @brief In-place Adam moment step, w -= lr * m_hat / (sqrt(v_hat) + eps).
-         * @param grad Gradient tensor (same shape/device as this; any dtype —
-         * a mismatch converts a copy into this tensor's dtype).
-         * @param lr Learning rate.
-         * @param beta1 First-moment decay.
-         * @param beta2 Second-moment decay.
-         * @param epsilon Denominator epsilon.
          * @throws ErrorHandling::MismatchedShapes Shapes differ.
          * @throws ErrorHandling::MismatchedDevices Devices differ.
          * @throws ErrorHandling::NotImplemented Non-contiguous operand, or a non-float dtype.
@@ -517,10 +532,6 @@ namespace BeanTensor::Tensors {
         /**
          * Adam step using this tensor's accumulated gradient: adam_update(*grad, lr, beta1, beta2, epsilon).
          * @brief In-place Adam step from Tensor::grad.
-         * @param lr Learning rate.
-         * @param beta1 First-moment decay.
-         * @param beta2 Second-moment decay.
-         * @param epsilon Denominator epsilon.
          * @throws ErrorHandling::NoGradient requires_grad is false or grad is null.
          */
         void adam_step(float64_t, float64_t, float64_t, float64_t);
@@ -740,12 +751,67 @@ namespace BeanTensor::Tensors {
          * When requires_grad=true the output joins the computation graph
          * (MeanG backward: dx = the scalar seed divided by numel, broadcast
          * to this tensor's shape).
+         * @see BeanTensor::Metrics::accuracy
          * @brief Full-tensor mean reduction.
          * @return Shape-{1} tensor holding the mean.
          * @throws ErrorHandling::IndexOutOfRange Tensor is empty.
          * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
          */
         [[nodiscard]] Tensor mean() const;
+
+        /**
+         * Batch normalization over the channel dimension (dim 1) of a rank-2
+         * (N, C) or rank-4 (N, C, H, W) float tensor. Train mode normalizes
+         * with the per-channel BIASED batch statistics (divide by M = numel / C
+         * — the batch-of-one case is defined end-to-end: variance 0, invstd
+         * 1/sqrt(eps), running-var contribution exactly 0, never 0/0 NaN) and
+         * blends them into the running buffers; eval mode normalizes with the
+         * running statistics and leaves the buffers untouched. gamma, beta,
+         * running_mean and running_var are rank-1 with C channels and share
+         * this tensor's dtype; the operands must be distinct tensors — no
+         * operand may alias the input or another operand. Statistics
+         * accumulate in fp64 for fp64 input,
+         * fp32 otherwise (fp16/bf16 included — no fp64 kernel math for half
+         * inputs, output dtype preserved). The normalization arithmetic and
+         * the running-stat blend follow a pinned op order (see
+         * Math/Normalization/BatchNorm/BatchNormShared.h) that every backend
+         * reproduces bit-for-bit; float-reduction accumulation order is
+         * backend-defined, as for sum/mean. eps and momentum are float64_t at
+         * the API and narrowed once into the kernel working precision.
+         * Syncs this tensor at entry, then syncs gamma, beta and the running
+         * buffers after validation, before queueing work; train-mode buffer
+         * mutation chains onto the buffers' own task queues, so a following
+         * op that drains them at entry observes the update.
+         * Autograd: train mode wires a backward node whose graph parents are
+         * {x, gamma, beta} — its backward recomputes the channel statistics
+         * from x, so the running buffers are NOT graph inputs of the train
+         * node. Eval mode wires a backward node with the same three parents
+         * plus raw pointers to the two running buffers in the node's
+         * saved-tensor slots (Node::_saved): the running stats are graph
+         * constants of the eval backward, and those saved tensors are
+         * implicit lifetime parents of any backward through an eval-mode
+         * output — they must stay alive until backward() returns, exactly
+         * like the input parents. Direct callers passing local running
+         * buffers must keep those locals alive until backward().
+         * @brief Batch normalization forward.
+         * @param gamma Per-channel scale, rank-1 shape {C}, same dtype/device.
+         * @param beta Per-channel shift, rank-1 shape {C}, same dtype/device.
+         * @param running_mean Running mean buffer, rank-1 {C}; mutated in train mode.
+         * @param running_var Running variance buffer (BIASED estimator), rank-1 {C}; mutated in train mode.
+         * @param training Train mode uses batch statistics; eval mode uses the running statistics.
+         * @param momentum Running-stat blend factor: new = old * (1 - m) + batch * m; must satisfy 0 < m <= 1.
+         * @param eps Epsilon inside invstd = 1/sqrt(var + eps); must be > 0.
+         * @return Normalized tensor, same shape/dtype/device as this.
+         * @throws ErrorHandling::MismatchedShapes Rank is not 2 or 4, or a channel count disagrees.
+         * @throws ErrorHandling::MismatchedDevices An operand lives on a different device than the input.
+         * @throws ErrorHandling::MismatchedDTypes gamma/beta/running buffers dtype differs from the input.
+         * @throws ErrorHandling::IndexOutOfRange The input is empty.
+         * @throws ErrorHandling::NotImplemented Non-float dtype or non-contiguous input or operand.
+         * @throws ErrorHandling::InvalidHyperparameter eps <= 0 or momentum <= 0 or momentum > 1.
+         */
+        [[nodiscard]] Tensor batch_norm(const Tensor& gamma, const Tensor& beta,
+                                        Tensor& running_mean, Tensor& running_var,
+                                        bool training, float64_t momentum, float64_t eps) const;
 
         /**
          * Smallest of every element, reduced to a shape-{1} tensor of this
@@ -989,8 +1055,6 @@ namespace BeanTensor::Tensors {
          * identical contract, for callers that do not go through a Tensor
          * method (e.g. the Module layer).
          * @brief Mean squared error: mean of (this - target)^2 over all elements.
-         * @param target Targets, identical shape/dtype/device, contiguous.
-         * @return Shape-{1} tensor holding the mean loss.
          * @throws ErrorHandling::MismatchedShapes Shapes differ, or a tensor is empty.
          * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
          * @throws ErrorHandling::MismatchedDevices Operand devices differ.
@@ -1610,6 +1674,10 @@ namespace BeanTensor::Tensors {
         friend void detail::argmax_axis_gpu(const Tensor&, const Tensor&, size_t);
         friend void detail::mean_cpu(const Tensor&, const Tensor&);
         friend void detail::mean_gpu(const Tensor&, const Tensor&);
+        friend void detail::batch_norm_cpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&, Tensor&, Tensor&, bool, float64_t, float64_t);
+        friend void detail::batch_norm_gpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&, Tensor&, Tensor&, bool, float64_t, float64_t);
+        friend void detail::batch_norm_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::batch_norm_g_eval_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::min_cpu(const Tensor&, const Tensor&);
         friend void detail::min_gpu(const Tensor&, const Tensor&);
         friend void detail::max_cpu(const Tensor&, const Tensor&);

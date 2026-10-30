@@ -1,0 +1,75 @@
+# Doxyfile for BeanTensor public API reference
+# Generated for Doxygen 1.15.0
+
+PROJECT_NAME           = BeanTensor
+OUTPUT_DIRECTORY       = docs/doxygen
+INPUT                  = Tensor Math Module Data Metrics Random
+RECURSIVE              = YES
+EXTRACT_ALL            = NO
+WARN_IF_UNDOCUMENTED   = NO
+QUIET                  = NO
+
+# C++ dialect tuning for C++23
+FILE_PATTERNS          = *.h *.hpp
+EXTENSION_MAPPING      = cu=C++ hip=C++
+EXCLUDE_SYMBOLS        = *::detail::*
+CPP_CLI_SUPPORT        = NO
+
+# Warnings: keep the build warning-clean. Reported problems are real problems.
+WARNINGS               = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = NO
+WARN_IF_UNDOC_ENUM_VAL = NO
+WARN_AS_ERROR          = YES
+
+# Output format: HTML only, no LaTeX/XML/RTF/man.
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+GENERATE_XML           = NO
+GENERATE_DOCSET        = NO
+GENERATE_HTMLHELP      = NO
+GENERATE_QHP           = NO
+GENERATE_ECLIPSEHELP   = NO
+GENERATE_RTF           = NO
+GENERATE_MAN           = NO
+GENERATE_AUTOGEN_DEF   = NO
+GENERATE_PERLMOD       = NO
+
+# HTML output options
+HTML_OUTPUT            = html
+HTML_FILE_EXTENSION    = .html
+SEARCHENGINE           = YES
+
+# Source browsing
+SOURCE_BROWSER         = NO
+INLINE_SOURCES         = NO
+STRIP_CODE_COMMENTS    = YES
+
+# Preprocessing
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = NO
+EXPAND_ONLY_PREDEF     = NO
+SEARCH_INCLUDES        = YES
+
+# Dot / graphs
+HAVE_DOT               = NO
+
+# Miscellaneous
+BRIEF_MEMBER_DESC      = YES
+REPEAT_BRIEF           = YES
+ALWAYS_DETAILED_SEC    = NO
+JAVADOC_AUTOBRIEF      = NO
+QT_AUTOBRIEF           = NO
+MULTILINE_CPP_IS_BRIEF = NO
+INHERIT_DOCS           = YES
+SEPARATE_MEMBER_PAGES  = NO
+TAB_SIZE               = 4
+OPTIMIZE_OUTPUT_FOR_C  = NO
+OPTIMIZE_OUTPUT_JAVA   = NO
+OPTIMIZE_FOR_FORTRAN   = NO
+OPTIMIZE_OUTPUT_VHDL   = NO
+OPTIMIZE_OUTPUT_SLICE  = NO
+MARKDOWN_SUPPORT       = YES
+TOC_INCLUDE_HEADINGS   = 5
+AUTOLINK_SUPPORT       = YES
+BUILTIN_STL_SUPPORT    = YES

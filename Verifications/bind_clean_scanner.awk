@@ -3,15 +3,17 @@
 # The verify target glob only executes *.sh, so this .awk is data, not an entry point.
 #
 # Scans a single C++ header and reports public parameters that are not
-# pybind11-friendly: non-const lvalue references and mutable pointers.
+# pybind11-friendly: non-const lvalue references to fundamental / fixed-width
+# alias types, plus mutable pointers of any type. Non-const references to
+# class types are permitted.
 #
 # Public scope means namespace scope (free functions are public API) plus the
 # public sections of classes/structs. Protected/private sections, function
 # bodies, constructor initializer lists, and lambda bodies are ignored.
 #
-# Module/ModuleStream.h is intentionally not in the checked header list: streaming
-# operators take std::ostream& by design and are not intended to be exposed as
-# value-in/value-out Python bindings.
+# Module/ModuleStream.h is intentionally excluded: streaming operators take
+# std::ostream& by design and are not intended to be exposed as value-in/value-out
+# Python bindings.
 #
 # Residual simplifications:
 # - Nested local classes inside function or lambda bodies are skipped along with
@@ -83,14 +85,14 @@ function preprocess(line,    i, c, out) {
             }
             continue
         }
-        if (c == "/" && substr(line, i + 1, 1) == "//") {
+        if (c == "/" && substr(line, i + 1, 1) == "/") {
             while (i <= length(line)) {
                 out = out " "
                 i++
             }
             break
         }
-        if (c == "/" && substr(line, i + 1, 1) == "/*") {
+        if (c == "/" && substr(line, i + 1, 1) == "*") {
             in_ml_comment = 1
             out = out "  "
             i += 2
@@ -502,6 +504,12 @@ function is_type_like(tok) {
     return 0
 }
 
+function is_banned_fundamental(tok) {
+    # Closed list of C++ fundamentals and the project's fixed-width aliases,
+    # including packed dtypes (x2/packed forms). Must stay in sync with Tensor/DTypes.h.
+    return (tok ~ /^(bool|char|short|int|long|float|double|size_t|int8_t|int16_t|int32_t|int64_t|uint8_t|uint16_t|uint32_t|uint64_t|float16_t|float16x2_t|float32_t|float64_t|bfloat16_t|bfloat16x2_t|int4x2_t)$/)
+}
+
 function check_segment(seg, file, ln,    masked, type_tok, i, j, ch, pre, has_star, has_const, after_const) {
     seg = strip_default_arg(seg)
     gsub(/^[ \t]+|[ \t]+$/, "", seg)
@@ -515,7 +523,7 @@ function check_segment(seg, file, ln,    masked, type_tok, i, j, ch, pre, has_st
         return 0
     }
 
-    # Non-const lvalue reference: a lone & that does not refer to a const type.
+    # Non-const lvalue reference to a fundamental / fixed-width-alias type.
     for (i = 1; i <= length(masked); i++) {
         ch = substr(masked, i, 1)
         if (ch == "&") {
@@ -543,7 +551,10 @@ function check_segment(seg, file, ln,    masked, type_tok, i, j, ch, pre, has_st
                 }
             }
             if (has_star || !has_const) {
-                printf("%s:%d: non-const lvalue reference parameter: %s\n", file, ln, seg) > "/dev/stderr"
+                if (!is_banned_fundamental(type_tok)) {
+                    continue
+                }
+                printf("%s:%d: non-const lvalue reference to fundamental type: %s\n", file, ln, seg) > "/dev/stderr"
                 return 1
             }
         }

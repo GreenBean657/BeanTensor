@@ -221,6 +221,10 @@ set(CORE_SOURCES
         Math/Reductions/Mean/Mean.h
         Math/Reductions/Mean/Mean.hpp
         Math/Reductions/Mean/MeanCPU.cpp
+        Math/Normalization/BatchNorm/BatchNorm.h
+        Math/Normalization/BatchNorm/BatchNormShared.h
+        Math/Normalization/BatchNorm/BatchNorm.hpp
+        Math/Normalization/BatchNorm/BatchNormCPU.cpp
         Math/Reductions/Min/Min.h
         Math/Reductions/Min/Min.hpp
         Math/Reductions/Min/MinCPU.cpp
@@ -324,6 +328,9 @@ set(CORE_SOURCES
         Math/Autograd/SumG/SumGCPU.cpp
         Math/Autograd/MeanG/MeanG.h
         Math/Autograd/MeanG/MeanGCPU.cpp
+        Math/Autograd/BatchNormG/BatchNormG.h
+        Math/Autograd/BatchNormG/BatchNormGShared.h
+        Math/Autograd/BatchNormG/BatchNormGCPU.cpp
         Math/Autograd/Backward.cpp
         Math/Autograd/GradDType.h
         Math/Autograd/AutogradShared.h
@@ -356,6 +363,8 @@ set(CORE_SOURCES
         Module/Module.cpp
         Module/Linear.h
         Module/Linear.cpp
+        Module/BatchNorm.h
+        Module/BatchNorm.cpp
         Module/Relu.h
         Module/Relu.cpp
         Module/Dropout.h
@@ -377,12 +386,32 @@ set(CORE_SOURCES
         Helpers/Bits.h
         Helpers/KernelTune.h
         Helpers/KernelTune.cpp
+        Metrics/Metrics.h
+        Metrics/Metrics.cpp
 )
 
 # AVX512/AVX2 conversion kernels are always compiled with AVX512/AVX2 codegen
 # (per-file, so other TUs are unaffected); execution is gated at runtime via
 # IncludedCPUFeatures() so CPUs lacking AVX512BF16/AVX2 take the scalar fallback.
 # The HIP variant of these flags is applied in the USE_HIP block below.
+
+# Batch normalization pins its arithmetic order for cross-backend bit parity
+# (Math/Normalization/BatchNorm/BatchNormShared.h, and the backward formulas
+# in Math/Autograd/BatchNormG/BatchNormGShared.h): the pinned steps must never
+# be FMA-contracted. GCC defaults to -ffp-contract=fast at -O2 and nvcc defaults
+# to -fmad=true, so the pin is enforced per translation unit, not by convention —
+# the CPU forward AND backward TUs both carry -ffp-contract=off (the backward
+# instantiates dx_element/eval_dx_element from BatchNormGShared.h).
+# The HIP backend sources for batch normalization must carry -ffp-contract=off
+# inside the SAME COMPILE_OPTIONS entry as their --offload-arch=native property
+# (the clobber rule documented in the USE_HIP block), and the batch-norm CPU TUs
+# must never join the HIP-language list.
+set_source_files_properties(Math/Normalization/BatchNorm/BatchNormCPU.cpp
+        Math/Autograd/BatchNormG/BatchNormGCPU.cpp
+        PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+set_source_files_properties(Math/Normalization/BatchNorm/BatchNormCUDA.cu
+        Math/Autograd/BatchNormG/BatchNormGCUDA.cu
+        PROPERTIES COMPILE_OPTIONS "-fmad=false")
 
 if (USE_CUDA)
     list(APPEND CORE_SOURCES
@@ -396,6 +425,7 @@ if (USE_CUDA)
             Math/Dropout/DropoutCUDA.cu
             Math/Reductions/Sum/SumCUDA.cu
             Math/Reductions/Mean/MeanCUDA.cu
+            Math/Normalization/BatchNorm/BatchNormCUDA.cu
             Math/Reductions/Argmax/ArgmaxCUDA.cu
             Math/Reductions/Min/MinCUDA.cu
             Math/Reductions/Max/MaxCUDA.cu
@@ -413,6 +443,7 @@ if (USE_CUDA)
             Math/Autograd/SoftmaxG/SoftmaxGCUDA.cu
             Math/Autograd/TransposeLast2/TransposeLast2CUDA.cu
             Math/Autograd/ElementwiseG/ElementwiseGCUDA.cu
+            Math/Autograd/BatchNormG/BatchNormGCUDA.cu
             Math/Shape/Indexing/IndexingCUDA.cu
             Math/Convolution/Im2Col/OpCUDA.cu
             Math/Convolution/Col2Im/OpCUDA.cu
@@ -561,6 +592,7 @@ if(USE_HIP)
             Math/Autograd/ElementwiseG/ElementwiseGHIP.cpp
             Module/Module.cpp
             Module/Linear.cpp
+            Module/BatchNorm.cpp
             Module/Relu.cpp
             Module/Sigmoid.cpp
             Module/Tanh.cpp
@@ -630,6 +662,7 @@ if(USE_HIP)
             Math/Autograd/ElementwiseG/ElementwiseGHIP.cpp
             Module/Module.cpp
             Module/Linear.cpp
+            Module/BatchNorm.cpp
             Module/Relu.cpp
             Module/Sigmoid.cpp
             Module/Tanh.cpp
@@ -814,6 +847,7 @@ if (USE_CUDA)
             Math/Dropout/DropoutCUDA.cu
             Math/Reductions/Sum/SumCUDA.cu
             Math/Reductions/Mean/MeanCUDA.cu
+            Math/Normalization/BatchNorm/BatchNormCUDA.cu
             Math/Reductions/Argmax/ArgmaxCUDA.cu
             Math/Reductions/Min/MinCUDA.cu
             Math/Reductions/Max/MaxCUDA.cu
@@ -829,6 +863,7 @@ if (USE_CUDA)
             Math/Autograd/SoftmaxCEG/SoftmaxCEGCUDA.cu
             Math/Autograd/SoftmaxG/SoftmaxGCUDA.cu
             Math/Autograd/TransposeLast2/TransposeLast2CUDA.cu
+            Math/Autograd/BatchNormG/BatchNormGCUDA.cu
             Math/Shape/Indexing/IndexingCUDA.cu
             Helpers/KernelTune.cpp
             Math/Convolution/Im2Col/OpCUDA.cu
@@ -976,6 +1011,24 @@ if(BUILD_TESTING)
     )
     add_test(NAME BeanTensorV5MetricsTests COMMAND BeanTensorV5MetricsTests)
 
+    add_executable(BeanTensorV5MetricsEvalTests tests/metrics_eval_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5MetricsEvalTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5MetricsEvalTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5MetricsEvalTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5MetricsEvalTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5MetricsEvalTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5MetricsEvalTests COMMAND BeanTensorV5MetricsEvalTests)
+
     add_executable(BeanTensorV5KernelTuneTests tests/kernel_tune_tests.cpp)
     if(USE_HIP)
         target_compile_definitions(BeanTensorV5KernelTuneTests PRIVATE USE_HIP)
@@ -1083,6 +1136,24 @@ if(BUILD_TESTING)
             -mf16c
     )
     add_test(NAME BeanTensorV5ModuleTests COMMAND BeanTensorV5ModuleTests)
+
+    add_executable(BeanTensorV5BatchNormTests tests/batch_norm_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5BatchNormTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5BatchNormTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5BatchNormTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5BatchNormTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5BatchNormTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5BatchNormTests COMMAND BeanTensorV5BatchNormTests)
 
     add_executable(BeanTensorV5Conv2dTests tests/conv2d_tests.cpp)
     if(USE_HIP)
@@ -1270,6 +1341,9 @@ if(BUILD_TESTING)
             -mf16c
     )
     add_test(NAME BeanTensorV5MaxPool2dTests COMMAND BeanTensorV5MaxPool2dTests)
+
+    add_test(NAME mnist_demo COMMAND BeanTensorV5)
+    set_tests_properties(mnist_demo PROPERTIES LABELS mnist WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
 if(USE_HIP)
@@ -1298,3 +1372,17 @@ done"
 add_dependencies(BeanTensorV5 verify)
 add_dependencies(BeanTensorV5Accelerated verify)
 add_dependencies(BeanTensorV5Core verify)
+
+find_package(Doxygen QUIET)
+if(DOXYGEN_FOUND)
+    add_custom_target(docs
+            COMMAND ${DOXYGEN_EXECUTABLE} ${CMAKE_SOURCE_DIR}/Doxyfile
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Generating API documentation"
+    )
+else()
+    add_custom_target(docs
+            COMMAND ${CMAKE_COMMAND} -E echo "doxygen not found -- install doxygen to generate API docs"
+            COMMENT "Doxygen unavailable"
+    )
+endif()

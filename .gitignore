@@ -13,3 +13,4 @@ safe-delete.sh
 gpu-test.sh
 datasets/
 .superpowers
+docs/doxygen/
