@@ -1,3 +1,6 @@
+[![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/GreenBean657/badge.svg)](https://hub.xerj.org/contributors/GreenBean657)
+[![YES: AI](https://raw.githubusercontent.com/GreenBean657/pro-ai-badge/master/badge.png)](https://github.com/GreenBean657/pro-ai-badge)
+
 # BeanTensor
 BeanTensor is a C++ library built for HIP, CUDA, and CPU (AVX512 accelerated!) neural network inferencing.
 Other libraries have patches for support like this, but it's often buggy or falls apart in high dimensions.
