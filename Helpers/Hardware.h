@@ -18,6 +18,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #if defined(__linux__)
@@ -181,19 +182,21 @@ struct CpuCcdGroups {
     std::vector<uint32_t> cpu_to_group;        // Indexed by logical CPU; size covers the max CPU id seen in topology (at least hardware_concurrency()).
 };
 
-/**
- * Detect the last-level-cache size in bytes via the CPUID deterministic cache leafs
- * (Intel leaf 4, AMD leaf 0x8000001D - same field layout). The largest data/unified
- * cache level wins. Legacy AMD leaf 0x80000006 is used only as a last-resort fallback
- * (it reports the total across CCDs, which is NOT what NT-store gating wants).
- * Results outside [256 KB, 1 GB] are distrusted and replaced with a 16 MB fallback.
- * Memoized; this is a static value and will not change during runtime.
- * @brief Get the last-level-cache size in bytes.
- * @return The clamped LLC size in bytes.
- */
-[[nodiscard]] __inline__ __attribute__((always_inline)) static size_t LastLevelCacheBytes() {
-    // NOLINTNEXTLINE(*-dynamic-static-initializers)
-    static const size_t llc_bytes = [] {
+namespace detail {
+    /**
+     * Uncached last-level-cache probe of the CURRENT core only, via the CPUID
+     * deterministic cache leafs (Intel leaf 4, AMD leaf 0x8000001D - same
+     * field layout). The largest data/unified cache level wins. Legacy AMD
+     * leaf 0x80000006 is used only as a last-resort fallback (it reports the
+     * total across CCDs, which is NOT what NT-store gating wants). Results
+     * outside [256 KB, 1 GB] are distrusted and replaced with a 16 MB
+     * fallback. Heterogeneous machines enumerate different cache hierarchies
+     * per core type, so a single-core probe is NOT process-representative —
+     * LastLevelCacheBytes() probes every online CPU and takes the maximum.
+     * @brief Uncached LLC probe of the core this thread currently runs on.
+     * @return The clamped LLC size in bytes for the current core.
+     */
+    [[nodiscard]] __inline__ static size_t ProbeLlcBytesOnCurrentCore() {
         constexpr size_t kMinSaneBytes = size_t{256} * 1024u;
         constexpr size_t kMaxSaneBytes = size_t{1} * 1024u * 1024u * 1024u;
         constexpr size_t kFallbackBytes = size_t{16} * 1024u * 1024u;
@@ -265,6 +268,81 @@ struct CpuCcdGroups {
             llc = kFallbackBytes;
         }
         return llc;
+    }
+}
+
+/**
+ * Process-representative last-level-cache size in bytes: the MAXIMUM of the
+ * per-core CPUID probes over every online CPU. Heterogeneous machines (mixed
+ * core types; some logical CPUs enumerate no L3) report different caches
+ * depending on which core the first caller happened to run on — taking the
+ * max makes routing decisions independent of process placement. Memoized;
+ * this is a static value and will not change during runtime.
+ * @brief Get the last-level-cache size in bytes.
+ * @return The maximum per-core LLC size in bytes.
+ */
+[[nodiscard]] __inline__ __attribute__((always_inline)) static size_t LastLevelCacheBytes() {
+    // NOLINTNEXTLINE(*-dynamic-static-initializers)
+    static const size_t llc_bytes = [] {
+        auto best = detail::ProbeLlcBytesOnCurrentCore();
+#if defined(__linux__)
+        // Dynamic masks: the fixed cpu_set_t caps at CPU_SETSIZE (1024) CPU
+        // IDs, and systems with sparse or huge ID spaces would silently fall
+        // back to single-core probing (the original placement bug). Size the
+        // masks from the machine instead: the highest ID in
+        // /sys/devices/system/cpu/possible (falling back to the configured
+        // count) covers sparse ID spaces.
+        auto n_slots = static_cast<size_t>(sysconf(_SC_NPROCESSORS_CONF));
+        if (std::ifstream possible{"/sys/devices/system/cpu/possible"}) {
+            auto text = std::string{};
+            possible >> text;
+            if (const auto last_dash = text.rfind('-'); last_dash != std::string::npos) {
+                const auto tail = text.substr(last_dash + 1);
+                if (!tail.empty() && tail.find_first_not_of("0123456789") == std::string::npos) {
+                    const auto max_id = static_cast<size_t>(std::stoul(tail));
+                    n_slots = max_id + 1;
+                }
+            }
+        }
+        if (n_slots > 0) {
+            const auto n_conf = n_slots;
+            const auto mask_bytes = CPU_ALLOC_SIZE(n_conf);
+            if (auto* original = CPU_ALLOC(n_conf)) {
+                if (sched_getaffinity(0, mask_bytes, original) == 0) {
+                    // Probe every CPU the process is allowed to run on and
+                    // take the maximum: heterogeneous cores enumerate
+                    // different caches, and routing must not depend on which
+                    // core the first caller landed on. Cpusets keep the
+                    // probe inside what the scheduler can use.
+                    if (auto* one = CPU_ALLOC(n_conf)) {
+                        for (auto cpu = int32_t{0}; cpu < static_cast<int32_t>(n_conf); ++cpu) {
+                            if (!CPU_ISSET_S(static_cast<size_t>(cpu), mask_bytes, original)) {
+                                continue;
+                            }
+                            CPU_ZERO_S(mask_bytes, one);
+                            CPU_SET_S(static_cast<size_t>(cpu), mask_bytes, one);
+                            if (sched_setaffinity(0, mask_bytes, one) != 0) {
+                                continue;
+                            }
+                            const auto probe = detail::ProbeLlcBytesOnCurrentCore();
+                            if (probe > best) {
+                                best = probe;
+                            }
+                        }
+                        CPU_FREE(one);
+                    }
+                    // Restore the caller's affinity exactly; pool workers
+                    // must not keep a single-core mask. Retry once — a
+                    // transient failure must not strand the caller.
+                    if (sched_setaffinity(0, mask_bytes, original) != 0) {
+                        (void)sched_setaffinity(0, mask_bytes, original);
+                    }
+                }
+                CPU_FREE(original);
+            }
+        }
+#endif
+        return best;
     }();
     return llc_bytes;
 }

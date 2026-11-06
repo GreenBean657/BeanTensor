@@ -6,8 +6,8 @@
  * parameter registration on the Module base, address-stable running-stat
  * slot allocation (mean zeros, var ones, requires_grad false), and the
  * train/eval forward through Tensor::batch_norm.
- * @version 0.2
- * @date 2026-10-30
+ * @version 0.3
+ * @date 2026-11-05
  */
 #include "Module/BatchNorm.h"
 
@@ -73,4 +73,42 @@ namespace BeanTensor::Modules {
     std::pair<const Tensors::Tensor&, const Tensors::Tensor&> BatchNorm::running_stats() const {
         return {*this->running_stats_[0], *this->running_stats_[1]};
     }
+
+    ModuleSpec BatchNorm::spec() const {
+        auto out = ModuleSpec{};
+        out.type = "BatchNorm";
+        out.hyperparameters = {
+            {"num_features", std::to_string(this->num_features_)},
+            {"momentum", format_hyper_f64(this->momentum_)},
+            {"eps", format_hyper_f64(this->eps_)},
+        };
+        return out;
+    }
+
+    std::vector<std::pair<std::string, Tensors::Tensor*>> BatchNorm::state_tensors() {
+        return {{"running_mean", this->running_stats_[0].get()}, {"running_var", this->running_stats_[1].get()}};
+    }
+
+    std::vector<std::pair<std::string, const Tensors::Tensor*>> BatchNorm::state_tensors() const {
+        return {{"running_mean", this->running_stats_[0].get()}, {"running_var", this->running_stats_[1].get()}};
+    }
+
+    /**
+     * Parameter values are overwritten from the file's tensor records after
+     * construction; this only establishes shapes and registry.
+     * @param spec Architecture spec for this node only.
+     * @param dtype Parameter dtype for the rebuilt parameters.
+     * @param device Device to hold the rebuilt parameters on.
+     * @return The constructed module.
+     * @throws ErrorHandling::CorruptFile a hyperparameter is missing, malformed, or out of range.
+     */
+    std::unique_ptr<Module> BatchNorm::construct(const ModuleSpec& spec, DataTypes::DType dtype, Tensors::Device device) {
+        return std::make_unique<BatchNorm>(
+            static_cast<size_t>(require_hyper_u64(spec, "num_features")),
+            dtype,
+            device,
+            require_hyper_f64(spec, "momentum"),
+            require_hyper_f64(spec, "eps"));
+    }
+
 }

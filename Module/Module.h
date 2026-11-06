@@ -7,12 +7,13 @@
  * Tensors::Tensor whose accumulated gradient lives in Tensor::grad), layer
  * injection helpers for container subclasses, Adam/zero_grad training
  * conveniences over the whole tree, and a human-readable string tree printer
- * via print() (terminal only — serialization to .bt files comes later). Also
+ * via print() (terminal only), and the .bt serialization hooks (spec(),
+ * state_tensors(), named_children(), adopt()) the export format drives. Also
  * declares mse_loss, the module-facing entry point to the MSE loss
  * (Math/Loss/Loss.h), and softmax_cross_entropy, the module-facing entry
  * point to Tensor::softmax_ce, for forward/backward training loops.
- * @version 0.6
- * @date 2026-10-28
+ * @version 0.8
+ * @date 2026-11-05
  */
 #pragma once
 
@@ -25,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "Module/ModuleSpec.h"
 #include "Tensor/Tensor.h"
 
 namespace BeanTensor::Modules {
@@ -168,6 +170,55 @@ namespace BeanTensor::Modules {
          * @return (qualified name, const parameter) pairs in registry order.
          */
         [[nodiscard]] std::vector<std::pair<std::string, const Tensors::Tensor*>> named_parameters() const;
+
+        /**
+         * This module's own named child modules in registry order (not
+         * recursive). Mirrors named_parameters() for the module tree.
+         * @brief Ordered (name, child) pairs of this module's own children.
+         * @return (registry name, child) pairs in registry order.
+         */
+        [[nodiscard]] std::vector<std::pair<std::string, const Module*>> named_children() const;
+
+        /**
+         * The .bt architecture description of this module: the type name
+         * (equal to name()), the constructor hyperparameters, and — for
+         * containers — the children. Overridden by every serializable layer;
+         * the base implementation throws, so an un-exported type fails loud
+         * at save time instead of writing an unusable file.
+         * @brief Architecture spec of this module node.
+         * @return This node's spec tree (children recursively).
+         * @throws ErrorHandling::NotSerializable this type does not export a spec.
+         */
+        [[nodiscard]] virtual ModuleSpec spec() const;
+
+        /**
+         * Named state tensors that are NOT parameters and hold no gradient —
+         * tensors a layer needs bit-exact on reload for identical behavior
+         * (BatchNorm's running_mean/running_var). Written to .bt files after
+         * the parameters and re-read by name; the default is empty.
+         * @brief Named non-parameter state tensors of this module.
+         * @return (state name, tensor) pairs in a stable order.
+         */
+        [[nodiscard]] virtual std::vector<std::pair<std::string, Tensors::Tensor*>> state_tensors();
+
+        /**
+         * Const overload of state_tensors().
+         * @brief Named non-parameter state tensors of this module (const).
+         * @return (state name, tensor) pairs in a stable order.
+         */
+        [[nodiscard]] virtual std::vector<std::pair<std::string, const Tensors::Tensor*>> state_tensors() const;
+
+        /**
+         * Container adoption hook used by the .bt loader when a spec node has
+         * children: the node was constructed from its own hyperparameters and
+         * each rebuilt child is handed over under its saved registry name.
+         * The base implementation throws — leaf layers cannot hold children.
+         * @brief Adopt a rebuilt child module.
+         * @param module_name Registry name restored from the file.
+         * @param module The rebuilt child.
+         * @throws ErrorHandling::NotSerializable this module type holds no children.
+         */
+        virtual void adopt(std::string module_name, std::unique_ptr<Module> module);
 
         /**
          * Total parameter count over the subtree: element_count() summed over

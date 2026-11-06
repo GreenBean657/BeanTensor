@@ -3,9 +3,16 @@
 # The verify target glob only executes *.sh, so this .awk is data, not an entry point.
 #
 # Scans a single C++ header and reports public parameters that are not
-# pybind11-friendly: non-const lvalue references to fundamental / fixed-width
-# alias types, plus mutable pointers of any type. Non-const references to
-# class types are permitted.
+# pybind11-friendly:
+#   - non-const lvalue references to fundamental / fixed-width-alias types
+#   - non-const lvalue references to std::optional<...> (class-type refs are
+#     otherwise permitted, but optional is a value-or-absent bundle that must
+#     cross the language boundary by value or by const reference)
+#   - mutable pointers of any type (this also covers function pointers, whose
+#     pointee is a function type and can never be const-qualified)
+#   - C-style variadic parameters ('...'), which pybind11 cannot bind
+#
+# Non-const references to other class types are permitted.
 #
 # Public scope means namespace scope (free functions are public API) plus the
 # public sections of classes/structs. Protected/private sections, function
@@ -517,6 +524,23 @@ function check_segment(seg, file, ln,    masked, type_tok, i, j, ch, pre, has_st
         return 0
     }
 
+    # C-style variadic parameter: a standalone "..." argument. Template
+    # parameter packs ("Args... args", "Args&&... args") attach the ellipsis
+    # to a name and are not variadic parameters.
+    if (seg == "...") {
+        printf("%s:%d: variadic parameter: %s\n", file, ln, seg) > "/dev/stderr"
+        return 1
+    }
+
+    # Function-pointer parameter, regardless of top-level pointer constness:
+    # "void (*fn)(...)" and "void (* const fn)(...)" alike cannot cross the
+    # language boundary. mask_angle_brackets leaves parentheses intact.
+    masked = mask_angle_brackets(seg)
+    if (masked ~ /\([ \t]*\*[ \t]*(const[ \t]+)?[A-Za-z_]/) {
+        printf("%s:%d: function-pointer parameter: %s\n", file, ln, seg) > "/dev/stderr"
+        return 1
+    }
+
     masked = mask_angle_brackets(seg)
     type_tok = first_type_token(masked)
     if (!is_type_like(type_tok)) {
@@ -551,10 +575,10 @@ function check_segment(seg, file, ln,    masked, type_tok, i, j, ch, pre, has_st
                 }
             }
             if (has_star || !has_const) {
-                if (!is_banned_fundamental(type_tok)) {
+                if (!is_banned_fundamental(type_tok) && type_tok !~ /^std::optional/) {
                     continue
                 }
-                printf("%s:%d: non-const lvalue reference to fundamental type: %s\n", file, ln, seg) > "/dev/stderr"
+                printf("%s:%d: non-const lvalue reference to fundamental or optional type: %s\n", file, ln, seg) > "/dev/stderr"
                 return 1
             }
         }

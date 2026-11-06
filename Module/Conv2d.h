@@ -3,8 +3,8 @@
  * @author GreenBean
  * @brief 2-D convolution module: weight {C,R,S,K} plus optional bias {K},
  * He fan-in initialization, and forward = Tensor::conv2d.
- * @version 0.1
- * @date 2026-10-28
+ * @version 0.2
+ * @date 2026-11-05
  */
 #pragma once
 
@@ -63,6 +63,19 @@ namespace BeanTensor::Modules {
          * @return "Conv2d".
          */
         [[nodiscard]] std::string name() const override;
+
+        /**
+         * Exports this layer's constructor facts as a .bt architecture spec.
+         * @brief Architecture spec of this layer.
+         * @return Spec with this layer's type and hyperparameters.
+         */
+        [[nodiscard]] ModuleSpec spec() const override;
+
+        /**
+         * @brief Construct this layer from a parsed spec.
+         * @throws ErrorHandling::CorruptFile a hyperparameter is missing, malformed, or out of range.
+         */
+        [[nodiscard]] static std::unique_ptr<Module> construct(const ModuleSpec&, DataTypes::DType, Tensors::Device);
 
     private:
         uint32_t in_ch_;

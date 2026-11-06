@@ -3,8 +3,8 @@
  * @author GreenBean
  * @brief Ordered container module: an append/insert/replace/remove registry
  * of named child modules whose forward chains outputs through in order.
- * @version 0.3
- * @date 2026-10-23
+ * @version 0.4
+ * @date 2026-11-05
  */
 #pragma once
 
@@ -52,6 +52,23 @@ namespace BeanTensor::Modules {
          * @return "Sequential".
          */
         [[nodiscard]] std::string name() const override;
+
+        /**
+         * Exports the child modules, recursively, in registry order.
+         * @brief Architecture spec of this Sequential.
+         * @return Spec with type "Sequential" and named child specs.
+         */
+        [[nodiscard]] ModuleSpec spec() const override;
+
+        /**
+         * Container adoption hook used by the .bt loader: registers a rebuilt
+         * child under its saved registry name.
+         * @brief Adopt a rebuilt child module.
+         * @param module_name Registry name restored from the file.
+         * @param module The rebuilt child.
+         */
+        void adopt(std::string module_name, std::unique_ptr<Module> module) override;
+
 
         /**
          * Append a child at the end of the registry.

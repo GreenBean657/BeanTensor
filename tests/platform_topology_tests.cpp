@@ -34,6 +34,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <future>
 #include <iostream>
 #include <limits>
@@ -107,6 +108,57 @@ static void test_llc_and_threshold() {
     CHECK(nt <= k1gb / 2u);
 
     std::cout << "LastLevelCacheBytes() = " << llc << ", NtStoreMinBytes() = " << nt << "\n";
+}
+
+
+// --- 1b: LLC detection must not depend on which core probes it ---
+
+static void test_llc_core_independent() {
+    // On heterogeneous machines (mixed core types where some logical CPUs
+    // enumerate no L3 via CPUID), a first-call-on-the-wrong-core detection
+    // returns that core's smaller cache and poisons routing for the whole
+    // process. Probe from every CPU in the affinity mask: all observations
+    // must agree. Everything derives from runtime detection — no constants.
+    cpu_set_t avail;
+    CPU_ZERO(&avail);
+    if (sched_getaffinity(0, sizeof(avail), &avail) != 0) {
+        std::cout << "llc core-independence skipped: sched_getaffinity failed\n";
+        return;
+    }
+    // Heterogeneous cores may legitimately enumerate different caches; the
+    // process-wide value must be the MAX of the per-core probes, no matter
+    // which core the first caller landed on.
+    auto per_core_max = size_t{0};
+    for (int32_t cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (!CPU_ISSET(static_cast<size_t>(cpu), &avail)) {
+            continue;
+        }
+        const auto observed = std::async(std::launch::async, [cpu] {
+            cpu_set_t one;
+            CPU_ZERO(&one);
+            CPU_SET(static_cast<size_t>(cpu), &one);
+            if (sched_setaffinity(0, sizeof(one), &one) != 0) {
+                return size_t{0};
+            }
+            return ::detail::ProbeLlcBytesOnCurrentCore();
+        }).get();
+        if (observed == size_t{0}) {
+            continue; // could not pin there; nothing to compare
+        }
+        per_core_max = observed > per_core_max ? observed : per_core_max;
+    }
+    // Detection must hand the caller's affinity mask back untouched.
+    cpu_set_t after;
+    CPU_ZERO(&after);
+    CHECK(sched_getaffinity(0, sizeof(after), &after) == 0);
+    CHECK(std::memcmp(&avail, &after, sizeof(avail)) == 0);
+
+    const auto reference = LastLevelCacheBytes();
+    if (per_core_max != size_t{0}) {
+        CHECK(reference == per_core_max);
+    }
+    std::cout << "llc core-independence ok (process " << reference
+              << " bytes, per-core max " << per_core_max << ")\n";
 }
 
 // --- 2: CCD topology invariants ---
@@ -474,13 +526,20 @@ static void test_routed_matmul() {
     const auto threads = static_cast<size_t>(IncludedCPUFeatures().threads);
     const auto llc = LastLevelCacheBytes();
 
-    // Restricted path: batched GEMM whose C span fits one CCD's LLC. m < the
-    // per-thread chunk, so chunks straddle batch boundaries inside the worker.
-    {
+    // Restricted path: batched GEMM whose C span fits the detected LLC. m <
+    // the per-thread chunk, so chunks straddle batch boundaries inside the
+    // worker. n derives from the detected LLC (project rule: sizes come
+    // from runtime detection, never the dev box); machines whose LLC cannot hold
+    // the minimum meaningful span skip this case.
+    const auto total = size_t{48} * size_t{48};
+    const auto n_by_llc = llc / (total * sizeof(float32_t));
+    if (n_by_llc < 64) {
+        std::cout << "matmul restricted path skipped: LLC " << llc << " too small for a meaningful span\n";
+    } else {
         constexpr size_t batch = 48;
         constexpr size_t m = 48;
         constexpr size_t k = 96;
-        constexpr size_t n = 512;
+        const auto n = n_by_llc > 4096 ? size_t{4096} : n_by_llc;
         auto a = Tensor({batch, m, k}, DType::Float32);
         auto b = Tensor({batch, k, n}, DType::Float32);
         a.random(-1.0, 1.0, 1001);
@@ -488,7 +547,6 @@ static void test_routed_matmul() {
         auto c = a.matmul(b);
         c.sync();
 
-        const auto total = batch * m;
         const auto c_bytes = total * n * sizeof(float32_t);
         const auto chunk = (total + threads - 1) / threads;
         CHECK(total * n * k > size_t{32768}); // past the inline gate: pool-chunked
@@ -496,7 +554,7 @@ static void test_routed_matmul() {
         CHECK(KeepWorkLocal(c_bytes));        // restricted: submit_to_group
 
         check_matmul_samples("routed batched matmul", a, b, c, batch, m, n, k, 800);
-        std::cout << "matmul batched 48x48x96x512 (C span " << c_bytes
+        std::cout << "matmul batched 48x48x96x" << n << " (C span " << c_bytes
                   << " B <= LLC " << llc << "): restricted path, sampled vs triple-loop reference\n";
     }
 
@@ -1475,6 +1533,7 @@ void test_pool_monitor_render() {
 int main() {
     std::cout << "PlatformTopologyTests" << std::endl;
     test_llc_and_threshold();
+    test_llc_core_independent();
     test_ccd_topology();
     test_submit_to_group();
     test_keep_work_local();

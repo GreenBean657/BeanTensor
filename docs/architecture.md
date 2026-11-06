@@ -40,6 +40,54 @@ Inside pool tasks, use `Threading::HelpWait` instead of blocking on futures.
 pending work and discard unobserved errors, so if you care about a failure,
 sync first.
 
+## Python binding readiness
+
+The public headers in `Module/`, `Random/`, `Data/`, and `Metrics/` are kept
+pybind11-friendly by `verifications/bind_clean_public_api.sh`, which fails the
+verify target on: non-const references to fundamental or fixed-width-alias
+types, non-const references to `std::optional<...>`, mutable pointer
+parameters, and C-style variadic parameters. Function-pointer parameters are
+caught by the mutable-pointer rule. New public API must stay inside these
+rules; `verifications/bind_clean_negative_controls.sh` proves each rule fires.
+
+Deliberate exceptions — C++-centric surface that bindings will wrap with
+explicit policies rather than reshape:
+
+- `Module::named_parameters()` returns `std::vector<std::pair<std::string,
+  Tensor*>>`: the pointer is the address-stable identity that
+  `Tensor::adam_step` keys optimizer state on, so it cannot become a value.
+- `Module::parameter()` / `Module::grad()` return `Tensors::Tensor&` into
+  those address-stable slots (bind with a reference return policy).
+- `BatchNorm::running_stats()` returns a pair of const tensor references
+  (views of the running statistic buffers).
+- `DataLoader::Iterator`'s dereference returns a reference pair; it is a
+  C++-only convenience layer — language bindings use `next_batch()`.
+- `Random::default_generator()` returns the process-wide generator by
+  reference; its copy constructor is deleted, so a by-value binding fails to
+  compile. Bindings route through the `set_seed` / `draw_seed` free
+  functions instead.
+- `Tensor::read_element()` / `Tensor::write_element()` are C++-only bulk
+  byte I/O (bounds-checked; the offset is in elements of size `bytes`). They
+  are the primitives behind `.bt` export; language bindings get bulk access
+  via a future buffer protocol, not these.
+
+`Tensor/Tensor.h` and `Tensor/Ops/TensorOps.h` are excluded from the checked
+set: their scanner findings are namespace-scope `detail` internals (autograd
+trampolines, dispatcher hooks) — not binding surface — plus the explicit
+byte-I/O exception above. See `docs/roadmap.md`.
+
+## Model export (.bt)
+
+`Serialization::save(module, path)` / `Serialization::load(path, device)`
+persist and rebuild a module tree. A `.bt` file holds a versioned
+architecture spec (layer types, constructor hyperparameters as lossless
+hexfloat strings, named children) plus CRC32-verified tensor records —
+parameters and BatchNorm running statistics — in registry order. The format
+byte layout lives in `docs/roadmap.md`. Bit-exactness contract: a
+save → load roundtrip on one machine is byte-identical per tensor (dtypes
+are restored from the records), and a CPU-saved file loads on GPU with
+identical values because only the device move is backend-defined.
+
 ## Tensors and memory
 
 Tensor dtypes are selected through `DataTypes::DType` and exposed as fixed-width

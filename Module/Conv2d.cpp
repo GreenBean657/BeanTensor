@@ -3,8 +3,8 @@
  * @author GreenBean
  * @brief Conv2d layer implementation: He-uniform weight init, zero bias,
  * and Tensor::conv2d forward.
- * @version 0.1
- * @date 2026-10-28
+ * @version 0.2
+ * @date 2026-11-05
  */
 #include "Module/Conv2d.h"
 
@@ -48,4 +48,48 @@ namespace BeanTensor::Modules {
     std::string Conv2d::name() const {
         return "Conv2d";
     }
+
+    ModuleSpec Conv2d::spec() const {
+        auto out = ModuleSpec{};
+        out.type = "Conv2d";
+        out.hyperparameters = {
+            {"in_channels", std::to_string(this->in_ch_)},
+            {"out_channels", std::to_string(this->out_ch_)},
+            {"kernel", std::to_string(this->kernel_)},
+            {"stride", std::to_string(this->stride_)},
+            {"padding", std::to_string(this->padding_)},
+            {"bias", this->has_bias_ ? "1" : "0"},
+        };
+        return out;
+    }
+
+    /**
+     * Parameter values are overwritten from the file's tensor records after
+     * construction; this only establishes shapes and registry.
+     * @param spec Architecture spec for this node only.
+     * @param dtype Parameter dtype for the rebuilt parameters.
+     * @param device Device to hold the rebuilt parameters on.
+     * @return The constructed module.
+     * @throws ErrorHandling::CorruptFile a hyperparameter is missing, malformed, or out of range.
+     */
+    std::unique_ptr<Module> Conv2d::construct(const ModuleSpec& spec, DataTypes::DType dtype, Tensors::Device device) {
+        const auto to_u32 = [](const char* key, const ModuleSpec& s) {
+            const auto v = require_hyper_u64(s, key);
+            if (v > std::numeric_limits<uint32_t>::max()) {
+                throw ErrorHandling::CorruptFile(std::string("hyperparameter '") + key + "' exceeds uint32 range");
+            }
+            return static_cast<uint32_t>(v);
+        };
+        return std::make_unique<Conv2d>(
+            to_u32("in_channels", spec),
+            to_u32("out_channels", spec),
+            to_u32("kernel", spec),
+            to_u32("stride", spec),
+            to_u32("padding", spec),
+            dtype,
+            device,
+            require_hyper_bool(spec, "bias"),
+            std::nullopt);
+    }
+
 }

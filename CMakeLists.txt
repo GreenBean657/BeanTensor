@@ -388,6 +388,11 @@ set(CORE_SOURCES
         Helpers/KernelTune.cpp
         Metrics/Metrics.h
         Metrics/Metrics.cpp
+        Module/ModuleSpec.h
+        Serialization/Serialization.h
+        Serialization/Serialization.cpp
+        Serialization/Lz77.h
+        Serialization/Lz77.cpp
 )
 
 # AVX512/AVX2 conversion kernels are always compiled with AVX512/AVX2 codegen
@@ -1341,6 +1346,24 @@ if(BUILD_TESTING)
             -mf16c
     )
     add_test(NAME BeanTensorV5MaxPool2dTests COMMAND BeanTensorV5MaxPool2dTests)
+
+    add_executable(BeanTensorV5SerializationTests tests/serialization_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5SerializationTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5SerializationTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5SerializationTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5SerializationTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5SerializationTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5SerializationTests COMMAND BeanTensorV5SerializationTests)
 
     add_test(NAME mnist_demo COMMAND BeanTensorV5)
     set_tests_properties(mnist_demo PROPERTIES LABELS mnist WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

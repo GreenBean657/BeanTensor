@@ -32,7 +32,7 @@ fi
 # Glob public headers from the known surface directories. ModuleStream.h is
 # excluded by design because its streaming operators take std::ostream&.
 HEADERS=()
-for h in Module/*.h Random/*.h Data/*.h Metrics/*.h; do
+for h in Module/*.h Random/*.h Data/*.h Metrics/*.h Serialization/*.h; do
     if [[ "$(basename "$h")" == "ModuleStream.h" ]]; then
         continue
     fi

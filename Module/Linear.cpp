@@ -4,8 +4,8 @@
  * @brief Linear layer implementation: He-uniform weight initialization
  * (bound sqrt(6 / in_features)), zero bias, and the matmul + bias_add
  * forward.
- * @version 0.3
- * @date 2026-10-28
+ * @version 0.4
+ * @date 2026-11-05
  */
 #include "Module/Linear.h"
 
@@ -64,4 +64,35 @@ namespace BeanTensor::Modules {
     bool Linear::has_bias() const noexcept {
         return this->has_bias_;
     }
+
+    ModuleSpec Linear::spec() const {
+        auto out = ModuleSpec{};
+        out.type = "Linear";
+        out.hyperparameters = {
+            {"in_features", std::to_string(this->in_features_)},
+            {"out_features", std::to_string(this->out_features_)},
+            {"bias", this->has_bias_ ? "1" : "0"},
+        };
+        return out;
+    }
+
+    /**
+     * Parameter values are overwritten from the file's tensor records after
+     * construction; this only establishes shapes and registry.
+     * @param spec Architecture spec for this node only.
+     * @param dtype Parameter dtype for the rebuilt parameters.
+     * @param device Device to hold the rebuilt parameters on.
+     * @return The constructed module.
+     * @throws ErrorHandling::CorruptFile a hyperparameter is missing, malformed, or out of range.
+     */
+    std::unique_ptr<Module> Linear::construct(const ModuleSpec& spec, DataTypes::DType dtype, Tensors::Device device) {
+        return std::make_unique<Linear>(
+            static_cast<size_t>(require_hyper_u64(spec, "in_features")),
+            static_cast<size_t>(require_hyper_u64(spec, "out_features")),
+            dtype,
+            device,
+            require_hyper_bool(spec, "bias"),
+            std::nullopt);
+    }
+
 }

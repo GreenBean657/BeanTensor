@@ -41,6 +41,7 @@
 namespace BeanTensor::Tensors {
     class Tensor;
     struct Node;
+    struct AdamSnapshot;
 }
 namespace BeanTensor::Intrinsics::detail {
     void launch_conv_cpu(Tensors::Tensor& t, const DataTypes::DType& new_dtype, ConversionClampMethod method);
@@ -720,6 +721,65 @@ namespace BeanTensor::Tensors {
         }
 
         /**
+         * Checkpoint I/O (C++-only surface, behind .bt export).
+         * @brief Adopt a checkpointed gradient buffer.
+         * @throws ErrorHandling::MismatchedShapes g's shape differs from this tensor's.
+         * @throws ErrorHandling::MismatchedDevices g lives on another device.
+         */
+        void restore_grad(Tensor);
+
+        /**
+         * Checkpoint I/O: whether the optimizer-side Adam map holds moment
+         * state for this tensor (i.e. at least one adam_update ran on it and
+         * the entry has not been reset).
+         * @brief Does this tensor hold Adam moment state?
+         * @return True when first/second moments exist.
+         */
+        [[nodiscard]] bool has_adam_state() const;
+
+        /**
+         * Checkpoint I/O: the Adam step counter driving bias correction, or
+         * nullopt when no moment state exists. A restored checkpoint resumes
+         * at this t, so (m/bc1, v/bc2) continue exactly where they stopped.
+         * @brief Adam step count for this tensor.
+         * @return The step count, or std::nullopt when no state exists.
+         */
+        [[nodiscard]] std::optional<uint64_t> adam_step_count() const;
+
+        /**
+         * Checkpoint I/O: borrowed references to the first/second moment
+         * buffers (same shape/dtype/device as the parameter). The pointers are
+         * owned by the optimizer-side map and stay valid until the next
+         * adam/restore operation on this tensor.
+         * @brief Borrowed Adam moment buffers.
+         * @return (m, v) pointers, or std::nullopt when no state exists.
+         */
+        [[nodiscard]] std::optional<std::pair<const Tensor*, const Tensor*>> adam_moments() const;
+
+        /**
+         * Checkpoint I/O: m/v must match this tensor's shape, dtype, and
+         * device; the stored copies are deep clones owned by the map.
+         * @brief Restore Adam moments from a checkpoint.
+         * @throws ErrorHandling::MismatchedShapes m or v shape differs.
+         * @throws ErrorHandling::MismatchedDTypes m or v dtype differs.
+         * @throws ErrorHandling::MismatchedDevices m or v lives on another device.
+         */
+        void adam_restore_moments(const Tensor&, const Tensor&, uint64_t);
+
+        /**
+         * Checkpoint I/O: a coherent single point-in-time view of this
+         * tensor's Adam state — deep copies of both moments plus the step
+         * counter, taken while holding the optimizer map lock, so a .bt
+         * Full save writes one generation even if another thread steps the
+         * optimizer concurrently. (Checkpointing a model that is being
+         * trained concurrently is still not whole-file coherent: the
+         * parameters themselves are snapshotted record by record.)
+         * @brief Locked, owned Adam state snapshot.
+         * @return The owned snapshot, or std::nullopt when no state exists.
+         */
+        [[nodiscard]] std::optional<AdamSnapshot> adam_snapshot() const;
+
+        /**
          * Sum of every element, reduced to a shape-{1} tensor of the same dtype
          * and device. Accumulation: fp32 in fp32, fp64 in fp64, fp16/bf16 in
          * widened fp32 (RNE narrow on store), packed x2 per-lane fp32, integers
@@ -1306,7 +1366,42 @@ namespace BeanTensor::Tensors {
         }
 
 
+        /**
+         * Bulk host-side read of this tensor's element bytes: copies @p bytes
+         * from data[elem_offset * bytes] into @p dst. On a GPU tensor this is
+         * a synchronous device-to-host copy. Callers must sync() first so any
+         * pending in-place work (e.g. convert_dtype) has landed. This is the
+         * byte-level I/O primitive behind .bt model export; element-wise
+         * reads go through at().
+         * @brief Copy element bytes out to host memory.
+         * @param elem_offset Element offset into this tensor.
+         * @param dst Destination buffer of at least @p bytes.
+         * @param bytes Number of bytes to copy.
+         */
+        void read_element(size_t elem_offset, void* dst, size_t bytes) const;
+
+        /**
+         * Bulk host-side write of this tensor's element bytes: copies @p bytes
+         * from @p src into data[elem_offset * bytes]. On a GPU tensor this is a
+         * synchronous host-to-device copy. This is the byte-level I/O primitive
+         * behind .bt model import; element-wise writes go through at() (set).
+         * @brief Copy element bytes in from host memory.
+         * @param elem_offset Element offset into this tensor.
+         * @param src Source buffer of at least @p bytes.
+         * @param bytes Number of bytes to copy.
+         */
+        void write_element(size_t elem_offset, const void* src, size_t bytes);
+
     private:
+        /**
+         * Shared bounds check behind read_element/write_element: verifies
+         * [elem_offset * bytes, elem_offset * bytes + bytes) lies inside this
+         * tensor's reachable footprint measured from its data buffer base
+         * (offset + strided span), so strided views are handled correctly.
+         * @throws ErrorHandling::IndexOutOfRange the byte range leaves the footprint.
+         */
+        void check_element_span(size_t elem_offset, size_t bytes) const;
+
         //Multi-dimensional array data
         size_t shape[BT_TENSOR_MAX_DIMS]{}; // Indexes
         size_t dims[BT_TENSOR_MAX_DIMS]{}; // Strides
@@ -1554,18 +1649,6 @@ namespace BeanTensor::Tensors {
         void require_dtype(DataTypes::DType) const;
 
         /**
-         * Read one element (bytes at elem_offset * bytes) into dst.
-         * Blocks on GPU tensors via a synchronous device-to-host copy.
-         */
-        void read_element(size_t elem_offset, void* dst, size_t bytes);
-
-        /**
-         * Write one element (bytes at elem_offset * bytes) from src.
-         * Blocks on GPU tensors via a synchronous host-to-device copy.
-         */
-        void write_element(size_t elem_offset, const void* src, size_t bytes);
-
-        /**
          * Lazily allocate this tensor's gradient buffer (same shape and device,
          * grad_dtype element type, zero-filled). No-op when grad already exists.
          * @brief Lazily allocate a zeroed gradient tensor in grad_dtype.
@@ -1752,4 +1835,17 @@ namespace BeanTensor::Tensors {
         friend Tensor BeanTensor::Math::Dropout::train_mask_gpu(const Tensor&, float64_t, int64_t);
 
     };
+
+    /**
+     * Owned first/second Adam moments plus the step counter, deep-copied
+     * under the optimizer map lock (see Tensor::adam_snapshot).
+     * @brief A coherent Adam state snapshot.
+     */
+    struct AdamSnapshot {
+        Tensor m;
+        Tensor v;
+        uint64_t step_count;
+    };
+
+
 }

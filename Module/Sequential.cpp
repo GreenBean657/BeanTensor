@@ -3,8 +3,8 @@
  * @author GreenBean
  * @brief Sequential container implementation: the chained forward and the
  * append/insert/replace/remove registry wrappers.
- * @version 0.1
- * @date 2026-10-23
+ * @version 0.2
+ * @date 2026-11-05
  */
 #include "Module/Sequential.h"
 
@@ -87,4 +87,18 @@ namespace BeanTensor::Modules {
     const std::string& Sequential::name_at(const size_t pos) const {
         return this->module_name_at(pos);
     }
+
+    ModuleSpec Sequential::spec() const {
+        auto out = ModuleSpec{};
+        out.type = "Sequential";
+        for (const auto&[child_name, child] : this->named_children()) {
+            out.children.emplace_back(child_name, child->spec());
+        }
+        return out;
+    }
+
+    void Sequential::adopt(std::string module_name, std::unique_ptr<Module> module) {
+        this->add_module(std::move(module_name), std::move(module));
+    }
+
 }

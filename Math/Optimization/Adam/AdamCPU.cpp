@@ -15,6 +15,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
@@ -440,6 +441,130 @@ namespace BeanTensor::Tensors {
         } else [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
+    }
+
+    /**
+     * Checkpoint I/O: the entry exists with both moment buffers allocated.
+     * @brief Does this tensor hold Adam moment state?
+     * @return True when first/second moments exist.
+     */
+    bool Tensor::has_adam_state() const {
+        const auto lock = std::lock_guard{detail::adam_state_mutex()};
+        const auto& states = detail::adam_states();
+        const auto found = states.find(this);
+        return found != states.end() && found->second &&
+               found->second->m != nullptr && found->second->v != nullptr;
+    }
+
+    /**
+     * Checkpoint I/O: a restored checkpoint resumes at this t, so (m/bc1,
+     * v/bc2) continue exactly where they stopped.
+     * @brief Adam step count for this tensor.
+     * @return The step count, or std::nullopt when no state exists.
+     */
+    std::optional<uint64_t> Tensor::adam_step_count() const {
+        const auto lock = std::lock_guard{detail::adam_state_mutex()};
+        const auto& states = detail::adam_states();
+        const auto found = states.find(this);
+        if (found == states.end() || !found->second || found->second->m == nullptr) {
+            return std::nullopt;
+        }
+        return found->second->t;
+    }
+
+    /**
+     * Checkpoint I/O: borrowed references to the first/second moment buffers
+     * (same shape/dtype/device as the parameter). The pointers are owned by
+     * the optimizer-side map and stay valid until the next adam/restore
+     * operation on this tensor.
+     * @brief Borrowed Adam moment buffers.
+     * @return (m, v) pointers, or std::nullopt when no state exists.
+     */
+    std::optional<std::pair<const Tensor*, const Tensor*>> Tensor::adam_moments() const {
+        const auto lock = std::lock_guard{detail::adam_state_mutex()};
+        const auto& states = detail::adam_states();
+        const auto found = states.find(this);
+        if (found == states.end() || !found->second || found->second->m == nullptr) {
+            return std::nullopt;
+        }
+        return std::make_pair<const Tensor*, const Tensor*>(
+            found->second->m.get(), found->second->v.get());
+    }
+
+    /**
+     * Checkpoint I/O: replace the Adam moment state for this tensor with
+     * checkpointed moments, resuming bias correction at @p step_count. Both
+     * moments are deep-copied BEFORE the map slot is replaced, so restoring
+     * from this parameter's own borrowed moments is safe and a clone failure
+     * keeps the old state.
+     * @brief Restore Adam moments from a checkpoint.
+     * @param m First moments (same shape/dtype/device as this tensor).
+     * @param v Second moments (same shape/dtype/device as this tensor).
+     * @param step_count The Adam step counter to resume from.
+     * @throws ErrorHandling::MismatchedShapes m or v shape differs.
+     * @throws ErrorHandling::MismatchedDTypes m or v dtype differs.
+     * @throws ErrorHandling::MismatchedDevices m or v lives on another device.
+     */
+    void Tensor::adam_restore_moments(const Tensor& m, const Tensor& v, const uint64_t step_count) {
+        if (!m.is_same_shape(*this) || !v.is_same_shape(*this)) {
+            throw ErrorHandling::MismatchedShapes("adam_restore_moments requires moment shapes to match the parameter");
+        }
+        if (m.get_dtype() != this->dtype || v.get_dtype() != this->dtype) {
+            throw ErrorHandling::MismatchedDTypes();
+        }
+        if (m.get_device() != this->device || v.get_device() != this->device) {
+            throw ErrorHandling::MismatchedDevices();
+        }
+        this->sync();
+        m.sync();
+        v.sync();
+        // Deep-copy BOTH moments BEFORE touching the map slot: the caller may
+        // be restoring from the parameter's own borrowed moments, whose
+        // buffers the slot replacement frees. Allocating both clones first
+        // also keeps the old state intact if a clone fails.
+        // (clone() is the non-const one: it drains pending work, not value
+        // state; sync() is const.)
+        auto m_copy = std::make_unique<Tensor>(const_cast<Tensors::Tensor&>(m).clone(true));
+        auto v_copy = std::make_unique<Tensor>(const_cast<Tensors::Tensor&>(v).clone(true));
+        m_copy->sync();
+        v_copy->sync();
+        auto& states = detail::adam_states();
+        const auto lock = std::lock_guard{detail::adam_state_mutex()};
+        auto& slot = states[this];
+        slot = std::make_unique<detail::AdamStateEntry>();
+        slot->m = std::move(m_copy);
+        slot->v = std::move(v_copy);
+        slot->t = step_count;
+        slot->device = this->device;
+    }
+
+    /**
+     * Checkpoint I/O: a coherent single point-in-time view of this tensor's
+     * Adam state — deep copies of both moments plus the step counter, taken
+     * while holding the optimizer map lock, so a .bt Full save writes one
+     * generation even if another thread steps the optimizer concurrently.
+     * (Checkpointing a model that is being trained concurrently is still not
+     * whole-file coherent: the parameters themselves are snapshotted record
+     * by record.)
+     * @brief Locked, owned Adam state snapshot.
+     * @return The owned snapshot, or std::nullopt when no state exists.
+     */
+    std::optional<AdamSnapshot> Tensor::adam_snapshot() const {
+        auto& states = detail::adam_states();
+        const auto lock = std::lock_guard{detail::adam_state_mutex()};
+        const auto found = states.find(this);
+        if (found == states.end() || !found->second ||
+            found->second->m == nullptr || found->second->v == nullptr) {
+            return std::nullopt;
+        }
+        // Clone under the lock so the copies cannot interleave with an
+        // adam_update dispatch (which serializes on the same mutex).
+        auto snap = AdamSnapshot{found->second->m->clone(true),
+                                 found->second->v->clone(true),
+                                 found->second->t};
+        snap.m.sync();
+        snap.v.sync();
+        return snap;
     }
 
     /**

@@ -5,8 +5,8 @@
  * optional bias {out_features}, both registered as named parameters
  * ("weight", "bias") on the Module base, and forward = matmul + bias_add
  * following the project's x(m×k)·w(k×n) GEMM convention.
- * @version 0.3
- * @date 2026-10-28
+ * @version 0.4
+ * @date 2026-11-05
  */
 #pragma once
 
@@ -69,6 +69,19 @@ namespace BeanTensor::Modules {
          * @return "Linear".
          */
         [[nodiscard]] std::string name() const override;
+
+        /**
+         * Exports this layer's constructor facts as a .bt architecture spec.
+         * @brief Architecture spec of this layer.
+         * @return Spec with this layer's type and hyperparameters.
+         */
+        [[nodiscard]] ModuleSpec spec() const override;
+
+        /**
+         * @brief Construct this layer from a parsed spec.
+         * @throws ErrorHandling::CorruptFile a hyperparameter is missing, malformed, or out of range.
+         */
+        [[nodiscard]] static std::unique_ptr<Module> construct(const ModuleSpec&, DataTypes::DType, Tensors::Device);
 
         /**
          * @brief Input feature count.

@@ -4,8 +4,8 @@
  * @brief Parameter-free ReLU layer: forward = Tensor::relu on the input. Its
  * graph node points at its input, so a container such as Sequential keeps the
  * preceding stage's output alive in its forward cache.
- * @version 0.1
- * @date 2026-10-23
+ * @version 0.2
+ * @date 2026-11-05
  */
 #pragma once
 
@@ -33,5 +33,18 @@ namespace BeanTensor::Modules {
          * @return "Relu".
          */
         [[nodiscard]] std::string name() const override;
+
+        /**
+         * Exports this layer's constructor facts as a .bt architecture spec.
+         * @brief Architecture spec of this layer.
+         * @return Spec with this layer's type and hyperparameters.
+         */
+        [[nodiscard]] ModuleSpec spec() const override;
+
+        /**
+         * @brief Construct this layer from a parsed spec.
+         * @throws ErrorHandling::CorruptFile a hyperparameter is missing, malformed, or out of range.
+         */
+        [[nodiscard]] static std::unique_ptr<Module> construct(const ModuleSpec&, DataTypes::DType, Tensors::Device);
     };
 }

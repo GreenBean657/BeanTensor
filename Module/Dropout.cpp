@@ -2,8 +2,8 @@
  * @file Dropout.cpp
  * @brief Dropout module implementation: train multiplies by a seeded threshold
  * mask, eval multiplies by the scalar 1.0 identity passthrough.
- * @version 0.1
- * @date 2026-10-28
+ * @version 0.2
+ * @date 2026-11-05
  */
 #include "Module/Dropout.h"
 
@@ -33,6 +33,25 @@ namespace BeanTensor::Modules {
 
     std::string Dropout::name() const {
         return "Dropout";
+    }
+
+
+    ModuleSpec Dropout::spec() const {
+        auto out = ModuleSpec{};
+        out.type = "Dropout";
+        out.hyperparameters = {{"p", format_hyper_f64(this->p_)}};
+        return out;
+    }
+
+    /**
+     * Parameter values are overwritten from the file's tensor records after
+     * construction; this only establishes shapes and registry.
+     * @param spec Architecture spec for this node only.
+     * @return The constructed module.
+     * @throws ErrorHandling::CorruptFile a hyperparameter is missing, malformed, or out of range.
+     */
+    std::unique_ptr<Module> Dropout::construct(const ModuleSpec& spec, DataTypes::DType, Tensors::Device) {
+        return std::make_unique<Dropout>(require_hyper_f64(spec, "p"));
     }
 
 }

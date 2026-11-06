@@ -6,8 +6,8 @@
  * buffers, forwarding through Tensor::batch_norm — train mode normalizes with
  * batch statistics and blends them into the buffers, eval mode normalizes
  * with the running statistics and leaves the buffers untouched.
- * @version 0.2
- * @date 2026-10-30
+ * @version 0.3
+ * @date 2026-11-05
  */
 #pragma once
 
@@ -82,6 +82,35 @@ namespace BeanTensor::Modules {
          * @return "BatchNorm".
          */
         [[nodiscard]] std::string name() const override;
+
+        /**
+         * Exports feature count, momentum, and eps as a .bt architecture spec.
+         * @brief Architecture spec of this BatchNorm.
+         * @return Spec with type "BatchNorm" and its hyperparameters.
+         */
+        [[nodiscard]] ModuleSpec spec() const override;
+
+        /**
+         * The running statistic buffers (running_mean, running_var) as named
+         * state tensors: not parameters, hold no gradient, but must reload
+         * bit-exact for identical eval-mode behavior.
+         * @brief Named non-parameter state tensors.
+         * @return ("running_mean"|"running_var", buffer) pairs.
+         */
+        [[nodiscard]] std::vector<std::pair<std::string, Tensors::Tensor*>> state_tensors() override;
+
+        /**
+         * Const overload of state_tensors().
+         * @brief Named non-parameter state tensors (const).
+         * @return ("running_mean"|"running_var", buffer) pairs.
+         */
+        [[nodiscard]] std::vector<std::pair<std::string, const Tensors::Tensor*>> state_tensors() const override;
+
+        /**
+         * @brief Construct a BatchNorm from a parsed spec.
+         * @throws ErrorHandling::CorruptFile a hyperparameter is missing, malformed, or out of range.
+         */
+        [[nodiscard]] static std::unique_ptr<Module> construct(const ModuleSpec&, DataTypes::DType, Tensors::Device);
 
         /**
          * Read-only view of the running statistics (mean, var). These are

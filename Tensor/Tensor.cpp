@@ -643,7 +643,11 @@ namespace BeanTensor::Tensors {
      * @param dst
      * @param bytes
      */
-    void Tensor::read_element(const size_t elem_offset, void* dst, const size_t bytes) {
+    void Tensor::read_element(const size_t elem_offset, void* dst, const size_t bytes) const {
+        this->check_element_span(elem_offset, bytes);
+        if (bytes == 0) {
+            return;
+        }
         if (this->device == Device::CPU) {
             memcpy(dst, static_cast<uint8_t*>(this->data) + elem_offset * bytes, bytes);
         } else if (this->device == Device::GPU) {
@@ -666,6 +670,10 @@ namespace BeanTensor::Tensors {
      * @param bytes
      */
     void Tensor::write_element(const size_t elem_offset, const void* src, const size_t bytes) {
+        this->check_element_span(elem_offset, bytes);
+        if (bytes == 0) {
+            return;
+        }
         if (this->device == Device::CPU) {
             memcpy(static_cast<uint8_t*>(this->data) + elem_offset * bytes, src, bytes);
         } else if (this->device == Device::GPU) {
@@ -679,6 +687,55 @@ namespace BeanTensor::Tensors {
         } else [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
+    }
+
+    void Tensor::check_element_span(const size_t elem_offset, const size_t bytes) const {
+        if (bytes == 0) {
+            return;
+        }
+        // The reachable footprint from the buffer base: views address
+        // data[buffer_base + elem_offset * bytes], where elem_offset is
+        // buffer-relative (at() adds this->offset), so the sound bound is the
+        // view footprint, not this tensor's own nbytes.
+        auto span_elems = size_t{0};
+        if (this->numel != 0) {
+            span_elems = this->offset + 1;
+            for (auto d = size_t{0}; d < this->ndim; ++d) {
+                span_elems += (this->shape[d] - 1) * this->dims[d];
+            }
+        }
+        const auto span_bytes = span_elems * DataTypes::dtype_bytes(this->dtype);
+        if (elem_offset > (span_bytes - 1) / bytes || bytes > span_bytes - elem_offset * bytes) {
+            throw ErrorHandling::IndexOutOfRange();
+        }
+    }
+
+    /**
+     * Checkpoint I/O (C++-only surface, behind .bt export): replaces this
+     * tensor's gradient buffer with a checkpointed one. Shape and device must
+     * match; the dtype is the buffer's own (grad dtypes are pinned per leaf
+     * by backward, so the record's dtype is authoritative). Replaces any
+     * existing buffer; the replacement is allocated before the old buffer is
+     * dropped. Syncs both tensors first so pending work lands.
+     * @brief Adopt a checkpointed gradient buffer.
+     * @param g The checkpointed gradient buffer (same shape/device as this tensor).
+     * @throws ErrorHandling::MismatchedShapes g's shape differs from this tensor's.
+     * @throws ErrorHandling::MismatchedDevices g lives on another device.
+     */
+    void Tensor::restore_grad(Tensor g) {
+        if (!g.is_same_shape(*this)) {
+            throw ErrorHandling::MismatchedShapes("restore_grad requires the gradient to match the tensor's shape");
+        }
+        if (g.get_device() != this->device) {
+            throw ErrorHandling::MismatchedDevices();
+        }
+        this->sync();
+        g.sync();
+        // Allocate the replacement before dropping the old buffer so a
+        // failure leaves the existing gradient intact.
+        auto* replacement = new Tensor(std::move(g));
+        delete this->grad;
+        this->grad = replacement;
     }
 
     /**

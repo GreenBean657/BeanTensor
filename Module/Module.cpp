@@ -7,11 +7,14 @@
  * mse_loss forwarder to BeanTensor::Loss::mse, the softmax_cross_entropy
  * forwarder to Tensor::softmax_ce, and the subtree-wide gradient-dtype
  * setter (validate-all-then-apply) with its per-parameter getter.
- * @version 0.5
- * @date 2026-10-28
+ * @version 0.6
+ * @date 2026-11-05
  */
 #include "Module/Module.h"
 
+#include <array>
+#include <charconv>
+#include <cmath>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -79,6 +82,35 @@ namespace BeanTensor::Modules {
         auto out = std::vector<std::pair<std::string, const Tensors::Tensor*>>();
         this->collect_named_parameters<const Tensors::Tensor*>("", out);
         return out;
+    }
+
+    std::vector<std::pair<std::string, const Module*>> Module::named_children() const {
+        auto out = std::vector<std::pair<std::string, const Module*>>();
+        out.reserve(this->modules.size());
+        for (const auto&[name, module] : this->modules) {
+            out.emplace_back(name, module.get());
+        }
+        return out;
+    }
+
+    ModuleSpec Module::spec() const {
+        throw ErrorHandling::NotSerializable(this->name());
+    }
+
+    std::vector<std::pair<std::string, Tensors::Tensor*>> Module::state_tensors() {
+        return {};
+    }
+
+    std::vector<std::pair<std::string, const Tensors::Tensor*>> Module::state_tensors() const {
+        return {};
+    }
+
+    /**
+     * @brief Adopt a rebuilt child module.
+     * @throws ErrorHandling::NotSerializable this module type holds no children.
+     */
+    void Module::adopt(std::string, std::unique_ptr<Module>) {
+        throw ErrorHandling::NotSerializable(this->name() + " holds no children");
     }
 
     size_t Module::parameter_count() const {
@@ -336,4 +368,101 @@ namespace BeanTensor::Modules {
         this->forward_cache.push_back(std::move(slot));
         return ref;
     }
+    /**
+     * @param spec The spec to search.
+     * @param key The hyperparameter name.
+     * @return Pointer to the value, or nullptr when the key is absent.
+     */
+    const std::string* find_hyper(const ModuleSpec& spec, const std::string& key) {
+        for (const auto&[k, v] : spec.hyperparameters) {
+            if (k == key) {
+                return &v;
+            }
+        }
+        return nullptr;
+    }
+
+    /**
+     * @param spec The spec to search.
+     * @param key The hyperparameter name.
+     * @return The parsed value.
+     */
+    uint64_t require_hyper_u64(const ModuleSpec& spec, const std::string& key) {
+        const std::string* value = find_hyper(spec, key);
+        if (value == nullptr) {
+            throw ErrorHandling::CorruptFile("missing hyperparameter '" + key + "' for type '" + spec.type + "'");
+        }
+        if (value->empty() || (*value)[0] == '-') {
+            throw ErrorHandling::CorruptFile("malformed unsigned hyperparameter '" + key + "': '" + *value + "'");
+        }
+        try {
+            size_t consumed = 0;
+            const auto parsed = std::stoull(*value, &consumed, 10);
+            if (consumed != value->size()) {
+                throw ErrorHandling::CorruptFile("malformed unsigned hyperparameter '" + key + "': '" + *value + "'");
+            }
+            return parsed;
+        } catch (const ErrorHandling::CorruptFile&) {
+            throw;
+        } catch (const std::exception&) {
+            throw ErrorHandling::CorruptFile("malformed unsigned hyperparameter '" + key + "': '" + *value + "'");
+        }
+    }
+
+    /**
+     * @param spec The spec to search.
+     * @param key The hyperparameter name.
+     * @return The parsed value.
+     */
+    float64_t require_hyper_f64(const ModuleSpec& spec, const std::string& key) {
+        const std::string* value = find_hyper(spec, key);
+        if (value == nullptr) {
+            throw ErrorHandling::CorruptFile("missing hyperparameter '" + key + "' for type '" + spec.type + "'");
+        }
+        // std::from_chars with chars_format::hex: exactly inverse to
+        // format_hyper_f64's std::to_chars hex (both prefix-free), and
+        // locale-independent unlike std::stod.
+        const float64_t parsed = [&]() {
+            auto result = float64_t{0};
+            const auto fc = std::from_chars(value->data(), value->data() + value->size(), result, std::chars_format::hex);
+            if (fc.ec != std::errc() || fc.ptr != value->data() + value->size() || !std::isfinite(result)) {
+                throw ErrorHandling::CorruptFile("malformed floating-point hyperparameter '" + key + "': '" + *value + "'");
+            }
+            return result;
+        }();
+        return parsed;
+    }
+
+    /**
+     * @param value The value to format.
+     * @return The spec string (parses back to the identical bits).
+     */
+    std::string format_hyper_f64(const float64_t value) {
+        auto buf = std::array<char, 32>{};
+        const auto res = std::to_chars(buf.data(), buf.data() + buf.size(), value, std::chars_format::hex);
+        if (res.ec != std::errc()) {
+            throw ErrorHandling::SerializationError("failed to format a floating-point hyperparameter");
+        }
+        return std::string(buf.data(), res.ptr);
+    }
+
+    /**
+     * @param spec The spec to search.
+     * @param key The hyperparameter name.
+     * @return The parsed value.
+     */
+    bool require_hyper_bool(const ModuleSpec& spec, const std::string& key) {
+        const std::string* value = find_hyper(spec, key);
+        if (value == nullptr) {
+            throw ErrorHandling::CorruptFile("missing hyperparameter '" + key + "' for type '" + spec.type + "'");
+        }
+        if (*value == "1") {
+            return true;
+        }
+        if (*value == "0") {
+            return false;
+        }
+        throw ErrorHandling::CorruptFile("malformed boolean hyperparameter '" + key + "': '" + *value + "'");
+    }
+
 }

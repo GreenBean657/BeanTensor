@@ -289,6 +289,58 @@ namespace BeanTensor::ErrorHandling {
         explicit NameError(const std::string& detail) : std::out_of_range("Name error: " + detail) { }
     };
 
+    class SerializationError : public std::runtime_error {
+    public:
+        SerializationError() = delete;
+        /**
+         * @brief Exception thrown when a .bt file cannot be written or read (I/O failure, unopenable path).
+         * @param detail What failed.
+         */
+        explicit SerializationError(const std::string& detail) : std::runtime_error("Serialization error: " + detail) { }
+    };
+
+    class CorruptFile : public SerializationError {
+    public:
+        CorruptFile() = delete;
+        /**
+         * @brief Exception thrown when a .bt file is malformed: bad magic, truncated records,
+         *        shape/dtype mismatch against the architecture spec, CRC mismatch, or a
+         *        codec stream that does not decode to the recorded size.
+         * @param detail What failed.
+         */
+        explicit CorruptFile(const std::string& detail) : SerializationError("corrupt file: " + detail) { }
+    };
+
+    class UnsupportedVersion : public SerializationError {
+    public:
+        UnsupportedVersion() = delete;
+        /**
+         * @brief Exception thrown when a .bt file was written by a newer format version than this build reads.
+         * @param detail The file version and the newest supported version.
+         */
+        explicit UnsupportedVersion(const std::string& detail) : SerializationError("unsupported version: " + detail) { }
+    };
+
+    class UnknownModuleType : public SerializationError {
+    public:
+        UnknownModuleType() = delete;
+        /**
+         * @brief Exception thrown when a .bt file names a module type no factory in this build constructs.
+         * @param detail The unknown type name.
+         */
+        explicit UnknownModuleType(const std::string& detail) : SerializationError("unknown module type: " + detail) { }
+    };
+
+    class NotSerializable : public std::logic_error {
+    public:
+        NotSerializable() = delete;
+        /**
+         * @brief Exception thrown when save() reaches a module whose type does not export a .bt spec.
+         * @param detail The module type that has no spec hook.
+         */
+        explicit NotSerializable(const std::string& detail) : std::logic_error("Module type is not serializable: " + detail) { }
+    };
+
     class NoGradient : public std::logic_error {
     public:
         /**

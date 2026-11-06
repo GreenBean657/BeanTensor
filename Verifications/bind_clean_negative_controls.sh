@@ -54,6 +54,16 @@ EOF
 expect "$PROBE_DIR/const_ref_alias.h" 0 "const float64_t& is allowed"
 expect "$PROBE_DIR/class_ref.h" 0 "class-type non-const references are allowed"
 
+# std::optional positive controls: by value and by const reference are allowed.
+cat > "$PROBE_DIR/optional_value.h" <<'EOF'
+void j(std::optional<int32_t> value);
+EOF
+cat > "$PROBE_DIR/optional_const_ref.h" <<'EOF'
+void k(const std::optional<float32_t>& value);
+EOF
+expect "$PROBE_DIR/optional_value.h" 0 "std::optional by value is allowed"
+expect "$PROBE_DIR/optional_const_ref.h" 0 "const std::optional& is allowed"
+
 # Negative controls: banned declarations must fail.
 cat > "$PROBE_DIR/bare_int_ref.h" <<'EOF'
 void f(int& value);
@@ -92,6 +102,53 @@ EOF
 expect "$PROBE_DIR/packed_float16x2.h" 1 "float16x2_t& is banned"
 expect "$PROBE_DIR/packed_bfloat16x2.h" 1 "bfloat16x2_t& is banned"
 expect "$PROBE_DIR/packed_int4x2.h" 1 "int4x2_t& is banned"
+
+# Non-const lvalue reference to std::optional is banned.
+cat > "$PROBE_DIR/optional_ref.h" <<'EOF'
+void f(std::optional<int32_t>& value);
+EOF
+cat > "$PROBE_DIR/optional_alias_ref.h" <<'EOF'
+void f(std::optional<float64_t>& value);
+EOF
+expect "$PROBE_DIR/optional_ref.h" 1 "std::optional<int32_t>& is banned"
+expect "$PROBE_DIR/optional_alias_ref.h" 1 "std::optional<float64_t>& is banned"
+
+# C-style variadic parameters are banned.
+cat > "$PROBE_DIR/variadic.h" <<'EOF'
+void f(const char* fmt, ...);
+EOF
+expect "$PROBE_DIR/variadic.h" 1 "C-style variadic parameter is banned"
+
+# Function-pointer parameters are banned.
+cat > "$PROBE_DIR/function_pointer.h" <<'EOF'
+void f(void (*callback)(int32_t));
+EOF
+cat > "$PROBE_DIR/function_pointer_alias_args.h" <<'EOF'
+void g(int32_t (*hook)(float32_t, Tensor&));
+EOF
+cat > "$PROBE_DIR/const_function_pointer.h" <<'EOF'
+void f(void (* const callback)(int32_t));
+EOF
+expect "$PROBE_DIR/function_pointer.h" 1 "function-pointer parameter is banned"
+expect "$PROBE_DIR/function_pointer_alias_args.h" 1 "function-pointer with alias args is banned"
+expect "$PROBE_DIR/const_function_pointer.h" 1 "const function-pointer parameter is banned"
+
+# Template parameter packs are NOT C-style variadics; similarly-named class
+# types are NOT std::optional.
+cat > "$PROBE_DIR/template_pack.h" <<'EOF'
+template <typename... Args>
+void f(Args... args);
+EOF
+cat > "$PROBE_DIR/template_forwarding_pack.h" <<'EOF'
+template <typename... Args>
+void g(Args&&... args);
+EOF
+cat > "$PROBE_DIR/optional_lookalike_class.h" <<'EOF'
+void h(my_namespace::optional_config& cfg);
+EOF
+expect "$PROBE_DIR/template_pack.h" 0 "template parameter pack is allowed"
+expect "$PROBE_DIR/template_forwarding_pack.h" 0 "template forwarding pack is allowed"
+expect "$PROBE_DIR/optional_lookalike_class.h" 0 "class type containing 'optional' is allowed"
 
 if [[ "$fail" -ne 0 ]]; then
     exit 1
