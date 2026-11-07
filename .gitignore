@@ -5,7 +5,11 @@ cmake-build-release/
 scratch/
 __pycache__/
 safe-delete.sh
-/benchmark/
+/benchmark/results/
+!/benchmark/
+/benchmark/*
+!/benchmark/*.cpp
+!/benchmark/*.sh
 .idea/
 *.d
 *.ddi

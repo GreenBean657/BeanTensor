@@ -2,8 +2,8 @@
  * @file Tensor.h
  * @author GreenBean
  * @brief Tensor class declaration: dtype, shape, device and buffer ownership.
- * @version 0.4.14
- * @date 2026-10-30
+ * @version 0.4.15
+ * @date 2026-11-06
  */
 #pragma once
 #define BT_TENSOR_MAX_DIMS 4
@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "DTypes.h"
+#include "Helpers/CPUThreading.h"
 #include "Helpers/Errors.h"
 #include "Intrinsics/ConversionMethods.h"
 #ifdef USE_HIP
@@ -158,6 +159,7 @@ namespace BeanTensor::Tensors {
             this->grad = nullptr;
             steal_from(o);
             if (own_error.valid()) {
+                const auto lock = std::lock_guard{pending_tasks_mutex()};
                 this->pending_tasks.insert(this->pending_tasks.begin(), own_error);
             }
             return *this;
@@ -199,16 +201,42 @@ namespace BeanTensor::Tensors {
 
 
         /**
+         * Copy the pending task futures under the mutation lock. Readers that
+         * only need a point-in-time dependency set (e.g. backward trampolines
+         * capturing deps before submit) must use this instead of reading
+         * pending_tasks directly — the vector mutates concurrently.
+         * @brief Locked snapshot of the pending task futures.
+         */
+        [[nodiscard]] std::vector<std::shared_future<void>> snapshot_pending_tasks() const {
+            const auto lock = std::lock_guard{pending_tasks_mutex()};
+            return pending_tasks;
+        }
+
+        /**
          * @brief Sync Threaded Tensor tasks.
          * Manually force a resync of this Tensor, blocking the calling thread until all pending operations are complete. Used for multithreaded syncs.
          * @note Safe to call multiple times. An error from a pending task is
          * thrown once; the task list is drained regardless, so a later sync()
          * does not rethrow it.
+         * @note On a pool worker the wait runs through Threading::HelpWait
+         * (the worker keeps executing pool tasks until every future is ready),
+         * so sync() is safe to call from inside pool tasks — a blocking get()
+         * there can wait on a task no free worker is able to reach. User
+         * threads keep the plain blocking wait.
          */
         void sync() const {
-            const auto tasks = std::move(pending_tasks);
-            pending_tasks.clear();
-            for (auto& f : tasks) f.get();
+            std::vector<std::shared_future<void>> tasks;
+            {
+                const auto lock = std::lock_guard{pending_tasks_mutex()};
+                tasks = std::move(pending_tasks);
+                pending_tasks.clear();
+            }
+            if (Threading::IsInPoolWorker()) {
+                Threading::GetCPUThreadPool().HelpWait(tasks);
+            }
+            for (auto& f : tasks) {
+                f.get();
+            }
         }
 
         /**
@@ -217,6 +245,7 @@ namespace BeanTensor::Tensors {
          * @param futures Vectorized futures.
          */
         void give_futures(const std::vector<std::shared_future<void>>& futures) const {
+            const auto lock = std::lock_guard{pending_tasks_mutex()};
             for (const auto& f : futures) pending_tasks.push_back(f);
         }
 
@@ -226,6 +255,7 @@ namespace BeanTensor::Tensors {
          * @param future Future to give.
          */
         void give_future(const std::shared_future<void>& future) const {
+            const auto lock = std::lock_guard{pending_tasks_mutex()};
             pending_tasks.push_back(future);
         }
 
@@ -1412,6 +1442,19 @@ namespace BeanTensor::Tensors {
 
         mutable std::vector<std::shared_future<void>> pending_tasks;
 
+        /**
+         * Process-wide mutex serializing pending_tasks mutation. Submission
+         * (user threads), kernel launches (pool workers), and drains all
+         * append to or swap the same vectors concurrently — a racy push_back
+         * corrupts the vector and can lose futures, hanging waiters. Static,
+         * not a member, so sizeof(Tensor) is unchanged; held only across the
+         * vector operation, never across a wait.
+         */
+        [[nodiscard]] static std::mutex& pending_tasks_mutex() {
+            static std::mutex m;
+            return m;
+        }
+
         void* convert_buffer = nullptr;
         size_t convert_buffer_size = 0;
 
@@ -1559,11 +1602,26 @@ namespace BeanTensor::Tensors {
          * @return Poisoned future holding the first drained error, or invalid.
          */
         [[nodiscard]] std::shared_future<void> drain_tasks() const noexcept {
-            const auto tasks = std::move(pending_tasks);
-            pending_tasks.clear();
+            std::vector<std::shared_future<void>> tasks;
+            {
+                const auto lock = std::lock_guard{pending_tasks_mutex()};
+                tasks = std::move(pending_tasks);
+                pending_tasks.clear();
+            }
             std::shared_future<void> deferred_error;
             for (const auto& f : tasks) {
                 try {
+                    if (
+                        const auto in_worker = Threading::IsInPoolWorker();
+                        in_worker
+                    ) {
+                        // This drain can run inside a pool worker (a
+                        // temporary destroyed at task scope end). A blocking
+                        // get() there deadlocks the pool; HelpWait executes
+                        // pending work until the future is ready, and the
+                        // get() below rethrows the stored error as usual.
+                        Threading::GetCPUThreadPool().HelpWait(f);
+                    }
                     f.get();
                 } catch (...) {
                     if (!deferred_error.valid()) {
@@ -1593,7 +1651,10 @@ namespace BeanTensor::Tensors {
             this->numel = o.numel;
             this->nbytes = o.nbytes;
             this->offset = o.offset;
-            this->pending_tasks = std::move(o.pending_tasks);
+            {
+                const auto lock = std::lock_guard{pending_tasks_mutex()};
+                this->pending_tasks = std::move(o.pending_tasks);
+            }
             if (deferred_error.valid()) {
                 this->pending_tasks.insert(this->pending_tasks.begin(), deferred_error);
             }

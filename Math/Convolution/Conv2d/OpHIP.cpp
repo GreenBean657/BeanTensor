@@ -86,7 +86,7 @@ namespace BeanTensor::Tensors::detail {
 
             matmul_gpu(col, weight2d, gemm_out);
 
-            const auto gemm_deps = gemm_out.pending_tasks;
+            const auto gemm_deps = gemm_out.snapshot_pending_tasks();
             auto& threadMgr = Threading::GetCPUThreadPool();
             threadMgr.HelpWait(gemm_deps);
 

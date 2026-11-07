@@ -42,7 +42,7 @@ namespace BeanTensor::Tensors::detail {
         const auto w_shape = std::vector<size_t>(weight.shape, weight.shape + weight.ndim);
         const auto s = make_conv2d_shape(x_shape, w_shape, stride, padding);
 
-        const auto deps = output_grad->pending_tasks;
+        const auto deps = output_grad->snapshot_pending_tasks();
         Tensor* const x_ptr = &x;
         Tensor* const weight_ptr = &weight;
 
@@ -76,6 +76,9 @@ namespace BeanTensor::Tensors::detail {
                               s, static_cast<size_t>(DataTypes::dtype_bytes(dyT.dtype)));
 
             if (weight.requires_grad) {
+                // im2col queued async chunks on col; the transpose reads col
+                // through raw pointers, so order them with the in-worker wait.
+                threadMgr.HelpWait(col.snapshot_pending_tasks());
                 auto colT_shape = std::vector<size_t>{s.CRS, s.M};
                 auto colT = Tensor(colT_shape, col.dtype, col.device, false);
                 if (col.device == Device::CPU) {
@@ -87,6 +90,8 @@ namespace BeanTensor::Tensors::detail {
                 }
                 grad_convert_inplace(colT, grad_dtype);
                 grad_convert_inplace(dyT, grad_dtype);
+                threadMgr.HelpWait(colT.snapshot_pending_tasks());
+                threadMgr.HelpWait(dyT.snapshot_pending_tasks());
                 auto dW2d = Tensor(std::vector<size_t>{s.CRS, s.K}, grad_dtype, x.device, false);
                 if (x.device == Device::CPU) {
                     matmul_cpu(colT, dyT, dW2d);
@@ -104,6 +109,7 @@ namespace BeanTensor::Tensors::detail {
 
             if (bias != nullptr && bias->requires_grad) {
                 grad_convert_inplace(dyT, grad_dtype);
+                threadMgr.HelpWait(dyT.snapshot_pending_tasks());
                 auto db = Tensor(std::vector<size_t>{s.K}, grad_dtype, x.device, false);
                 rowsum_mk_dispatch(dyT, db);
                 if (bias->node != nullptr) {
@@ -136,6 +142,8 @@ namespace BeanTensor::Tensors::detail {
                 }
                 grad_convert_inplace(weight2dT, grad_dtype);
                 grad_convert_inplace(dyT, grad_dtype);
+                threadMgr.HelpWait(weight2dT.snapshot_pending_tasks());
+                threadMgr.HelpWait(dyT.snapshot_pending_tasks());
                 auto dcol = Tensor(std::vector<size_t>{s.M, s.CRS}, grad_dtype, x.device, false);
                 if (x.device == Device::CPU) {
                     matmul_cpu(dyT, weight2dT, dcol);
@@ -148,6 +156,9 @@ namespace BeanTensor::Tensors::detail {
                 } else [[unlikely]] {
                     throw ErrorHandling::UnReachableCode();
                 }
+                // col2im reads dcol through raw pointers; the dx GEMM queued
+                // async chunks on dcol, so order them with the in-worker wait.
+                threadMgr.HelpWait(dcol.snapshot_pending_tasks());
                 auto dx = Tensor(x_shape, grad_dtype, x.device, false);
                 if (x.device == Device::CPU) {
                     col2im_cpu(dcol, dx, stride, padding, s.R, s.S);
@@ -165,6 +176,7 @@ namespace BeanTensor::Tensors::detail {
                 }
                 x.accumulate_grad(std::move(dx));
             }
+
         };
 
         auto& threadMgr = Threading::GetCPUThreadPool();

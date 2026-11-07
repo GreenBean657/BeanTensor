@@ -898,6 +898,10 @@ add_executable(BeanTensorV5 main.cpp)
 target_link_libraries(BeanTensorV5 PRIVATE BeanTensorV5Core)
 target_compile_options(BeanTensorV5 PRIVATE -O2)
 
+add_executable(BeanTensorV5CNN cnn.cpp)
+target_link_libraries(BeanTensorV5CNN PRIVATE BeanTensorV5Core)
+target_compile_options(BeanTensorV5CNN PRIVATE -O2)
+
 add_executable(BeanTensorV5Accelerated main.cpp)
 target_link_libraries(BeanTensorV5Accelerated PRIVATE BeanTensorV5Core)
 target_compile_options(BeanTensorV5Accelerated PRIVATE -O3)
@@ -1365,17 +1369,57 @@ if(BUILD_TESTING)
     )
     add_test(NAME BeanTensorV5SerializationTests COMMAND BeanTensorV5SerializationTests)
 
+    add_executable(BeanTensorV5CNNTests tests/cnn_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5CNNTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5CNNTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5CNNTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5CNNTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5CNNTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5CNNTests COMMAND BeanTensorV5CNNTests)
+
     add_test(NAME mnist_demo COMMAND BeanTensorV5)
     set_tests_properties(mnist_demo PROPERTIES LABELS mnist WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME mnist_cnn COMMAND BeanTensorV5CNN --train-rows 2048 --test-rows 512 --epochs 1)
+    set_tests_properties(mnist_cnn PROPERTIES LABELS mnist WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    add_executable(BeanTensorV5Benchmarks benchmark/benchmark.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5Benchmarks PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5Benchmarks PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5Benchmarks PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5Benchmarks PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5Benchmarks PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME benchmark_smoke COMMAND BeanTensorV5Benchmarks --smoke)
 endif()
 
 if(USE_HIP)
     target_compile_definitions(BeanTensorV5Core PRIVATE USE_HIP)
     target_compile_definitions(BeanTensorV5 PRIVATE USE_HIP)
+    target_compile_definitions(BeanTensorV5CNN PRIVATE USE_HIP)
     target_compile_definitions(BeanTensorV5Accelerated PRIVATE USE_HIP)
 elseif(USE_CUDA)
     # target_compile_definitions(BeanTensorV5Core PRIVATE USE_CUDA)
     target_compile_definitions(BeanTensorV5 PRIVATE USE_CUDA)
+    target_compile_definitions(BeanTensorV5CNN PRIVATE USE_CUDA)
     target_compile_definitions(BeanTensorV5Accelerated PRIVATE USE_CUDA)
 endif()
 if(USE_STRIX_HALO)

@@ -115,7 +115,7 @@ namespace BeanTensor::Tensors::detail {
             auto dcol = Tensor(std::vector<size_t>{s.M, s.CRS}, grad_dtype, Device::GPU, false);
             matmul_gpu(dyT, weight2dT, dcol);
 
-            const auto dcol_deps = dcol.pending_tasks;
+            const auto dcol_deps = dcol.snapshot_pending_tasks();
             auto& threadMgr = Threading::GetCPUThreadPool();
             threadMgr.HelpWait(dcol_deps);
 

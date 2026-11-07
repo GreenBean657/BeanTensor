@@ -5,8 +5,8 @@
  * task submission, a helping wait so in-worker waits stay deadlock-free, and
  * relaxed-atomics worker telemetry with a best-effort snapshot + formatter
  * for live worker views.
- * @version 0.5
- * @date 2026-10-26
+ * @version 0.6
+ * @date 2026-11-06
  */
 #pragma once
 #include <atomic>
@@ -217,12 +217,11 @@ namespace BeanTensor::Threading {
                                 this->execute_task(std::move(*task), TaskProvenance::Own);
                                 continue;
                             }
-                            if (auto stolen = this->steal(i);
-                                !stolen.empty()
+                            if (
+                                auto stolen = this->steal(i);
+                                stolen.has_value()
                                 ) {
-                                for (auto& task : stolen) {
-                                    this->execute_task(std::move(task), TaskProvenance::Stolen);
-                                }
+                                this->execute_task(std::move(*stolen), TaskProvenance::Stolen);
                                 continue;
                             }
                             if (
@@ -364,12 +363,10 @@ namespace BeanTensor::Threading {
                     }
                     if (
                         auto stolen = this->steal(idx);
-                        !stolen.empty()
+                        stolen.has_value()
                         ) {
                         tele.futures_awaited.store(0, std::memory_order_relaxed);
-                        for (auto& task : stolen) {
-                            this->execute_task(std::move(task), TaskProvenance::Helped);
-                        }
+                        this->execute_task(std::move(*stolen), TaskProvenance::Helped);
                         continue;
                     }
                     static_cast<void>(f.wait_for(std::chrono::microseconds(100)));
@@ -423,12 +420,11 @@ namespace BeanTensor::Threading {
                         continue;
                     }
                     if (
-                        auto stolen = this->steal(idx); !stolen.empty()
+                        auto stolen = this->steal(idx);
+                        stolen.has_value()
                         ) {
                         tele.futures_awaited.store(0, std::memory_order_relaxed);
-                        for (auto& task : stolen) {
-                            this->execute_task(std::move(task), TaskProvenance::Helped);
-                        }
+                        this->execute_task(std::move(*stolen), TaskProvenance::Helped);
                         continue;
                     }
                     static_cast<void>(pending->wait_for(std::chrono::microseconds(100)));
@@ -708,39 +704,37 @@ namespace BeanTensor::Threading {
 
         /**
          * Scan the other workers round-robin (offset by the thief, so thieves
-         * start at different victims) and, from the first non-trivial victim,
-         * steal up to half its tasks from the worst end (rbegin()-ward: lowest
-         * priority, then newest sequence). The victim keeps at least half its
-         * work; accounting flips inside the victim's deque lock.
-         * @brief Steal up to half of one victim's worst tasks.
+         * start at different victims) and take ONE task from the first
+         * non-empty victim: its worst (rbegin(): lowest priority, then newest
+         * sequence). One task per call, never a batch into a caller-local
+         * vector: batched loot is invisible to every other worker, so a
+         * blocking first task (a helping wait on a task sitting later in the
+         * same batch) strands the rest — a permanent, race-free deadlock.
+         * Lone tasks are taken too (no size/2 floor): a task queued in a busy
+         * or parked worker's deque must stay claimable by everyone, or that
+         * task starves while the rest of the pool spins. The queued/active
+         * accounting flips inside the victim's deque lock, as in pop_own.
+         * @brief Steal a victim's worst task from the first non-empty victim.
          * @param idx The stealing worker's index.
-         * @return Stolen tasks, empty when every victim was empty/trivial.
+         * @return The stolen task, or nullopt when every other deque is empty.
          */
-        std::vector<Task> steal(const size_t idx) {
+        std::optional<Task> steal(const size_t idx) {
                 const auto count = this->deques.size();
-                auto stolen = std::vector<Task>{};
                 for (size_t step = 1; step < count; step++) {
                     const auto victim = (idx + step) % count;
                     auto& deque = this->deques[victim];
                     const auto lock = std::lock_guard{this->deque_mutexes[victim]};
-                    const auto half = deque.size() / 2;
-                    if (half == 0) {
+                    if (deque.empty()) {
                         continue;
                     }
-                    auto split = deque.end();
-                    for (size_t j = 0; j < half; j++) {
-                        --split;
-                    }
-                    stolen.reserve(half);
-                    for (auto it = split; it != deque.end(); ++it) {
-                        stolen.emplace_back(std::move(*it));
-                    }
-                    deque.erase(split, deque.end());
-                    this->active_tasks.fetch_add(half);
-                    this->queued_count.fetch_sub(half);
-                    break;
+                    auto it = std::prev(deque.end());
+                    auto task = std::optional<Task>{std::in_place, std::move(*it)};
+                    deque.erase(it);
+                    ++this->active_tasks;
+                    --this->queued_count;
+                    return task;
                 }
-                return stolen;
+                return std::nullopt;
             }
 
         std::atomic<size_t> active_tasks{0};

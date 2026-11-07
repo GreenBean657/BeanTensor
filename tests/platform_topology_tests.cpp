@@ -20,12 +20,14 @@
  * under 4-way submission, FIFO order on a single worker, the helping wait
  * (HelpWait) as the deadlock-free in-worker join under pool saturation,
  * nesting-safe CCD group pins, the three set_zero paths (routed chunk,
- * inline, and the in-worker inline fallback), and the worker telemetry
+ * inline, and the in-worker inline fallback), lone-task stealing from a busy
+ * worker's deque, in-worker Tensor::sync() joining through the helping wait,
+ * and the worker telemetry
  * snapshot API (idle pool, snapshot under saturation, a deterministic HelpWaiting
  * observation via a non-pool gate future, exact completed counters, and the text
  * formatter).
- * @version 0.8
- * @date 2026-10-25
+ * @version 0.9
+ * @date 2026-11-06
  */
 #include <algorithm>
 #include <atomic>
@@ -1337,8 +1339,8 @@ static void test_set_zero_paths() {
     }
 
     // (c) inside a pool worker: inline fallback (the worker must not submit
-    // chunk work back into the pool). The tensor carries no pending futures —
-    // sync() inside a worker remains a documented deadlock.
+    // chunk work back into the pool). The tensor carries no pending futures,
+    // so its in-worker at() sync()s have nothing to help-wait on.
     auto worker_t = Tensor({n_big}, DType::Float32);
     for (auto i = size_t{0}; i < n_big; i += 8191u) {
         worker_t.set<float32_t>({i}, 7.0f);
@@ -1500,6 +1502,92 @@ static void test_pool_snapshot_counters() {
     std::cout << "snapshot counters: 1000 tasks on a 1-worker pool -> tasks_completed == 1000 exactly\n";
 }
 
+// --- 28: steal() claims a lone task from a busy worker's deque ---
+
+// Regression: steal used to move half a victim's deque and skip size-1
+// deques outright, so a task stranded behind a busy owner could never be
+// claimed while every other worker spun (the CNN deadlock's starvation leg).
+// Choreography on a fresh 2-worker pool (round-robin from push_counter 0:
+// H -> deque 0, X -> deque 1, B -> deque 0): H parks whichever worker claims
+// it in a plain spin, then one of X/B necessarily lands lone in the busy
+// worker's deque and only a lone-task steal can free it before H releases.
+static void test_pool_steal_takes_lone_task() {
+    auto pool = bt::ThreadPool(2);
+    auto h_started = std::atomic<bool>{false};
+    auto release_h = std::atomic<bool>{false};
+    auto x_ran = std::atomic<bool>{false};
+    auto b_ran = std::atomic<bool>{false};
+
+    auto h = pool.submit([&h_started, &release_h] {
+        h_started.store(true, std::memory_order_release);
+        while (!release_h.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+    });
+    while (!h_started.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    auto x = pool.submit([&x_ran] { x_ran.store(true, std::memory_order_release); });
+    auto b = pool.submit([&b_ran] { b_ran.store(true, std::memory_order_release); });
+
+    // Both must complete while H still occupies its worker. The event is
+    // bounded-polled, not timed, so the ceiling is machine-independent.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    auto both_ran = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (x_ran.load(std::memory_order_acquire) && b_ran.load(std::memory_order_acquire)) {
+            both_ran = true;
+            break;
+        }
+        std::this_thread::yield();
+    }
+    release_h.store(true, std::memory_order_release);
+    h.wait();
+    x.wait();
+    b.wait();
+    CHECK(both_ran); // pre-fix: the stranded lone task only runs after H releases
+    std::cout << "pool steal: lone task claimed from a busy worker's deque while it spun\n";
+}
+
+// --- 29: Tensor::sync() inside a pool worker joins through the helping wait ---
+
+// Regression: a blocking sync() inside a worker parked it on a futex while
+// the chunks it awaited sat stranded in deques no thief could reach, hanging
+// the whole pool (the CNN demo's conv backward hit this via
+// grad_convert_inplace -> convert_dtype -> sync). sync() now routes the wait
+// through HelpWait on workers. Concurrent parents cross-strand their fill
+// chunks across deques; every parent must still finish with intact values.
+static void test_pool_in_worker_sync() {
+    auto& pool = bt::GetCPUThreadPool();
+    const auto threads = static_cast<size_t>(IncludedCPUFeatures().threads);
+    const auto n = threads * 1024u + 4096u; // past the fill chunk gate
+    CHECK(n > threads * 1024u);
+
+    auto failures_inner = std::atomic<uint32_t>{0};
+    auto parents = std::vector<std::shared_future<void>>{};
+    for (auto p = size_t{0}; p < 8u; p++) {
+        parents.push_back(pool.submit([n, p, &failures_inner] {
+            for (auto iter = size_t{0}; iter < 25u; iter++) {
+                auto t = Tensor({n}, DType::Float32);
+                t.random(-1.0, 1.0, static_cast<int64_t>(4242 + p * 100u + iter));
+                t.sync(); // inside a pool worker: must help, not park
+                for (auto i = size_t{0}; i < n; i += 997u) {
+                    const auto v = t.at<float32_t>({i}); // at() syncs too, still in-worker
+                    if (v < -1.0f || v > 1.0f) {
+                        failures_inner.fetch_add(1u, std::memory_order_relaxed);
+                        break;
+                    }
+                }
+            }
+        }).share());
+    }
+    for (const auto& f : parents) {
+        f.get();
+    }
+    CHECK(failures_inner.load(std::memory_order_relaxed) == 0);
+    std::cout << "in-worker sync: 8 parents x 25 chunked fills joined via HelpWait, values intact\n";
+}
+
 void test_pool_monitor_render() {
     bt::PoolSnapshot snap{};
     snap.snapshot_ms = 12345;
@@ -1560,6 +1648,8 @@ int main() {
     test_pool_snapshot_idle();
     test_pool_snapshot_under_load();
     test_pool_snapshot_counters();
+    test_pool_steal_takes_lone_task();
+    test_pool_in_worker_sync();
     test_pool_monitor_render();
     if (failures == 0) {
         std::cout << "ALL TESTS PASSED" << std::endl;

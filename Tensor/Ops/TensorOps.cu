@@ -861,10 +861,9 @@ namespace BeanTensor::Tensors::detail {
         t.sync();
         const auto worker = [&t, min, max, seed] {
             // This body runs on a pool worker, so temp's queued work (the
-            // chunked host fill, then the upload) must be awaited with a
-            // helping wait. A blocking temp.sync() here parks the worker while
-            // a fill chunk sits in its own deque; steal() never takes a lone
-            // task, so the pool spins forever and the GPU never sees work.
+            // chunked host fill, then the upload) is awaited with a helping
+            // wait: the worker keeps executing pool tasks (its own fill
+            // chunks included) until the futures are ready.
             auto& pool = Threading::GetCPUThreadPool();
             const auto help_sync = [&pool](const Tensor& pending) {
                 const auto tasks = std::move(pending.pending_tasks);

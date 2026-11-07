@@ -97,3 +97,19 @@ Load restores whatever sections exist, after the device move, via
 checkpoint resumes training bit-reproducibly (grads + moments + step counter).
 Adam state access is the C++-only `has_adam_state` / `adam_step_count` /
 `adam_moments` / `adam_restore_moments` surface on Tensor.
+
+## 2026-11-06 — Demos and benchmarking decisions (Tasks 4, 5)
+
+- **Demo layout:** demos stay separate top-level programs (`main.cpp` MLP,
+  `cnn.cpp` CNN) sharing `demos/Mnist.h` (IDX parsing + flat/NCHW upload).
+  The library itself has no dataset reader; the CSV loader (Task 6) is the
+  planned general path.
+- **GPU op-level benchmarking is out of scope** for the benchmark harness:
+  timing queued async GPU work needs per-iteration device-sync semantics the
+  harness does not implement, and GPU traffic must go through `gpu-test.sh`.
+  End-to-end GPU numbers live in `docs/mnist-results.md` and
+  `docs/cnn-results.md`.
+- **Benchmark methodology:** one warmup + median of 5 timed iterations per
+  row, sync inside the timed region; sizes derive from the detected LLC at
+  runtime with floors; `benchmark_smoke` fails the suite if any family stops
+  producing rows.
