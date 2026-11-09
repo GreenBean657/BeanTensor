@@ -574,7 +574,7 @@ namespace BeanTensor::Tensors::detail {
 }
 
 namespace BeanTensor::Tensors {
-    Tensor Tensor::matmul(const Tensor& other) const {
+    Tensor Tensor::matmul(const Tensor& other) const & {
         if (this->ndim != other.ndim) {
             throw ErrorHandling::MismatchedShapes("rank differs (" + std::to_string(this->ndim) + " vs " + std::to_string(other.ndim) + ")");
         }

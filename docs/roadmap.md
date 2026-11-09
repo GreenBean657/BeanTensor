@@ -113,3 +113,20 @@ Adam state access is the C++-only `has_adam_state` / `adam_step_count` /
   row, sync inside the timed region; sizes derive from the detected LLC at
   runtime with floors; `benchmark_smoke` fails the suite if any family stops
   producing rows.
+
+## 2026-11-09 — CSV loading scope (Task 6)
+
+- CSV is the supported standard data format; the MNIST IDX reader stays
+  demo-private. Parquet/Arrow and other formats are out of scope.
+- Contract: the label column maps to Int32 class ids in first-seen order
+  (queryable via `CsvDataset::label_names`); every other column must be
+  numeric (`CsvOptions::feature_dtype`: Float32/Float64/Int32/Int64).
+  Header presence auto-detects (first line is a header when any cell fails
+  to parse as a number) with an override; delimiter infers from comma,
+  semicolon, or tab with an override; empty numeric cells become NaN;
+  blank lines are skipped. Semantics live in `docs/architecture.md`.
+- 2026-11-09 amendment: null handling (`CsvNullPolicy`: keep NaN, error,
+  fill mean/median/constant), NaN-aware per-column stats (`column_min/max/mean`,
+  `null_count`), and per-column normalization (`CsvNormalize`: min-max,
+  standardize with population std; constant columns → zeros) added. Standard
+ dn deviation uses the population (ddof 0) definition.

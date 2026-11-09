@@ -1,55 +1,10 @@
-/**
- * @file cnn.cpp
- * @author GreenBean
- * @brief MNIST CNN demo over the spatial layer stack: Conv2d -> BatchNorm ->
- * Relu -> MaxPool2d twice, then Flatten -> Dropout -> Linear -> Relu ->
- * Linear, trained with a seeded DataLoader, Adam, and softmax
- * cross-entropy, evaluated per epoch through Metrics::evaluate. Reads the
- * same IDX files as the MLP demo (demos/Mnist.h) as NCHW images. Runs CPU
- * always and GPU when the build includes a backend. Complemented by
- * comparison/cnn_pytorch.py and recorded in docs/cnn-results.md.
- */
-#include <chrono>
-#include <cstdint>
-#include <filesystem>
-#include <iostream>
-#include <memory>
-#include <optional>
-#include <string>
-#include <vector>
-
-#include "Module/BatchNorm.h"
-#include "Module/Conv2d.h"
-#include "Module/Dropout.h"
-#include "Module/Flatten.h"
-#include "Module/Linear.h"
-#include "Module/MaxPool2d.h"
-#include "Module/Module.h"
-#include "Module/Relu.h"
-#include "Module/ModuleStream.h"
-#include "Module/Sequential.h"
-#include "Data/DataLoader.h"
-#include "Metrics/Metrics.h"
-#include "Random/Generator.h"
-#include "Tensor/Tensor.h"
+#include "BeanTensor.h"
 #include "demos/Mnist.h"
 
-using BeanTensor::Tensors::Device;
-using BeanTensor::Tensors::Tensor;
-using BeanTensor::Modules::BatchNorm;
-using BeanTensor::Modules::Conv2d;
-using BeanTensor::Modules::Dropout;
-using BeanTensor::Modules::Flatten;
-using BeanTensor::Modules::Linear;
-using BeanTensor::Modules::MaxPool2d;
-using BeanTensor::Modules::Relu;
-using BeanTensor::Modules::Sequential;
-using BeanTensor::Modules::softmax_cross_entropy;
-using BeanTensor::Data::DataLoader;
-using BeanTensor::Metrics::evaluate;
-using BeanTensor::Random::set_seed;
-using BeanTensor::float64_t;
-using DType = BeanTensor::DataTypes::DType;
+using namespace BeanTensor;
+using DType = DataTypes::DType;
+using demos::mnist::Split;
+
 
 namespace {
 
@@ -131,23 +86,23 @@ namespace {
     [[nodiscard]] bool run_training(const demos::mnist::Split& train, const demos::mnist::Split& test,
                                     const Device device, const size_t epochs) {
         std::cout << "\n" << std::string(60, '=') << "\n";
-        std::cout << "Device: " << BeanTensor::Tensors::stringify_device_source(device) << "\n";
+        std::cout << "Device: " << Tensors::stringify_device_source(device) << "\n";
         std::cout << std::string(60, '=') << "\n";
 
-        auto net = Sequential();
-        net.append("conv1", std::make_unique<Conv2d>(1, kChannels1, 3, 1, 0, kDType, device, true, std::optional<int64_t>{}));
-        net.append("bn1", std::make_unique<BatchNorm>(kChannels1, kDType, device, 0.1, 1e-5));
-        net.append("relu1", std::make_unique<Relu>());
-        net.append("pool1", std::make_unique<MaxPool2d>(2));
-        net.append("conv2", std::make_unique<Conv2d>(kChannels1, kChannels2, 3, 1, 0, kDType, device, true, std::optional<int64_t>{}));
-        net.append("bn2", std::make_unique<BatchNorm>(kChannels2, kDType, device, 0.1, 1e-5));
-        net.append("relu2", std::make_unique<Relu>());
-        net.append("pool2", std::make_unique<MaxPool2d>(2));
-        net.append("flat", std::make_unique<Flatten>());
-        net.append("drop", std::make_unique<Dropout>(kDropout));
-        net.append("fc1", std::make_unique<Linear>(kFlattened, kHidden, kDType, device));
-        net.append("relu3", std::make_unique<Relu>());
-        net.append("fc2", std::make_unique<Linear>(kHidden, kClasses, kDType, device));
+        auto net = nn::Sequential::make(
+            std::make_unique<nn::Conv2d>(1, kChannels1, 3, 1, 0, kDType, device),
+            std::make_unique<nn::BatchNorm>(kChannels1, kDType, device),
+            std::make_unique<nn::Relu>(),
+            std::make_unique<nn::MaxPool2d>(2),
+            std::make_unique<nn::Conv2d>(kChannels1, kChannels2, 3, 1, 0, kDType, device),
+            std::make_unique<nn::BatchNorm>(kChannels2, kDType, device),
+            std::make_unique<nn::Relu>(),
+            std::make_unique<nn::MaxPool2d>(2),
+            std::make_unique<nn::Flatten>(),
+            std::make_unique<nn::Dropout>(kDropout),
+            std::make_unique<nn::Linear>(kFlattened, kHidden, kDType, device),
+            std::make_unique<nn::Relu>(),
+            std::make_unique<nn::Linear>(kHidden, kClasses, kDType, device));
         std::cout << net;
 
         auto train_data = demos::mnist::upload_nchw(train, device, kDType, kHostDType);
@@ -159,7 +114,7 @@ namespace {
             return false;
         }
 
-        auto train_loader = DataLoader(
+        auto train_loader = data::DataLoader(
             train_data->images,
             train_data->labels,
             kBatch,
@@ -167,7 +122,7 @@ namespace {
             kShuffleSeed,
             true
         );
-        auto test_loader = DataLoader(
+        auto test_loader = data::DataLoader(
             test_data->images,
             test_data->labels,
             kBatch,
@@ -198,7 +153,7 @@ namespace {
 
                 net.zero_grad();
                 auto out = net.forward(batch);
-                auto loss = softmax_cross_entropy(out, labels);
+                auto loss = nn::softmax_cross_entropy(out, labels);
                 loss.backward(gDType);
                 net.adam_step(kLearningRate, kBeta1, kBeta2, kEpsilon);
 
@@ -219,7 +174,7 @@ namespace {
                 param->sync();
             }
             net.eval();
-            const auto result = evaluate(net, test_loader);
+            const auto result = metrics::evaluate(net, test_loader);
             net.train();
             const auto epoch_seconds = std::chrono::duration<float64_t>(std::chrono::steady_clock::now() - epoch_start).count();
             std::cout << "epoch " << (epoch + 1) << "/" << epochs
@@ -236,7 +191,7 @@ namespace {
 }
 
 int main(const int argc, char** argv) {
-    set_seed(kShuffleSeed);
+    rnd::set_seed(kShuffleSeed);
     const auto cfg = [&] {
         try {
             return parse_args(argc, argv);

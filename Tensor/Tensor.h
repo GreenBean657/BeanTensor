@@ -331,7 +331,18 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::MismatchedDevices Operand devices differ.
          * @throws ErrorHandling::NotImplemented Non-contiguous input.
          */
-        [[nodiscard]] Tensor matmul(const Tensor& other) const;
+        [[nodiscard]] Tensor matmul(const Tensor& other) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor matmul(const Tensor& other) && = delete;
 
         /**
          * 2-D convolution over NCHW input using im2col + the existing GEMM
@@ -355,7 +366,18 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::MismatchedDevices Operand devices differ.
          * @throws ErrorHandling::NotImplemented Non-contiguous input.
          */
-        [[nodiscard]] Tensor conv2d(const Tensor& weight, const Tensor& bias, uint32_t stride, uint32_t padding) const;
+        [[nodiscard]] Tensor conv2d(const Tensor& weight, const Tensor& bias, uint32_t stride, uint32_t padding) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor conv2d(const Tensor& weight, const Tensor& bias, uint32_t stride, uint32_t padding) && = delete;
         /**
          * Bias-less overload of conv2d. Same contract as the three-argument
          * form, but wires a 2-parent graph node (no bias gradient).
@@ -370,7 +392,18 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::MismatchedDevices Operand devices differ.
          * @throws ErrorHandling::NotImplemented Non-contiguous input.
          */
-        [[nodiscard]] Tensor conv2d(const Tensor& weight, uint32_t stride, uint32_t padding) const;
+        [[nodiscard]] Tensor conv2d(const Tensor& weight, uint32_t stride, uint32_t padding) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor conv2d(const Tensor& weight, uint32_t stride, uint32_t padding) && = delete;
 
         /**
          * Reshape this tensor into a zero-copy view with a new shape. The view
@@ -396,7 +429,18 @@ namespace BeanTensor::Tensors {
          * @return Rank-2 tensor viewing this tensor's data as {d0, numel/d0}.
          * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
          */
-        [[nodiscard]] Tensor flatten() const;
+        [[nodiscard]] Tensor flatten() const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor flatten() && = delete;
 
         /**
          * View into a per-dimension [start, end) box of this tensor. The
@@ -823,7 +867,18 @@ namespace BeanTensor::Tensors {
          * @brief Full-tensor sum reduction.
          * @return Shape-{1} tensor holding the sum.
          */
-        [[nodiscard]] Tensor sum() const;
+        [[nodiscard]] Tensor sum() const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor sum() && = delete;
 
         /**
          * Arithmetic mean of every element, reduced to a shape-{1} tensor of
@@ -847,7 +902,18 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::IndexOutOfRange Tensor is empty.
          * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
          */
-        [[nodiscard]] Tensor mean() const;
+        [[nodiscard]] Tensor mean() const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor mean() && = delete;
 
         /**
          * Batch normalization over the channel dimension (dim 1) of a rank-2
@@ -901,7 +967,18 @@ namespace BeanTensor::Tensors {
          */
         [[nodiscard]] Tensor batch_norm(const Tensor& gamma, const Tensor& beta,
                                         Tensor& running_mean, Tensor& running_var,
-                                        bool training, float64_t momentum, float64_t eps) const;
+                                        bool training, float64_t momentum, float64_t eps) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor batch_norm(const Tensor& gamma, const Tensor& beta, Tensor& running_mean, Tensor& running_var, bool training, float64_t momentum, float64_t eps) && = delete;
 
         /**
          * Smallest of every element, reduced to a shape-{1} tensor of this
@@ -1039,7 +1116,18 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::MismatchedDevices Devices differ.
          * @throws ErrorHandling::NotImplemented Non-contiguous operand.
          */
-        [[nodiscard]] Tensor bias_add(const Tensor&) const;
+        [[nodiscard]] Tensor bias_add(const Tensor&) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor bias_add(const Tensor&) && = delete;
 
         /**
          * Rectified linear unit, out of place: out[i] = this[i] < 0 ? 0 :
@@ -1057,7 +1145,18 @@ namespace BeanTensor::Tensors {
          * @return New tensor, same shape/dtype/device as this.
          * @throws ErrorHandling::NotImplemented Non-contiguous tensor.
          */
-        [[nodiscard]] Tensor relu() const;
+        [[nodiscard]] Tensor relu() const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor relu() && = delete;
 
         /**
          * 2D max pooling over the spatial dimensions of a rank-4 NCHW tensor.
@@ -1072,7 +1171,18 @@ namespace BeanTensor::Tensors {
          *         kernel == 0, or stride == 0.
          * @throws ErrorHandling::NotImplemented Non-contiguous operand.
          */
-        [[nodiscard]] Tensor max_pool2d(uint32_t kernel, uint32_t stride) const;
+        [[nodiscard]] Tensor max_pool2d(uint32_t kernel, uint32_t stride) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor max_pool2d(uint32_t kernel, uint32_t stride) && = delete;
 
         /**
          * Numerically-stable last-axis softmax over the class dimension: this
@@ -1091,7 +1201,18 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::MismatchedShapes Input is not rank-2 or is empty.
          * @throws ErrorHandling::NotImplemented Non-contiguous operand.
          */
-        [[nodiscard]] Tensor softmax() const;
+        [[nodiscard]] Tensor softmax() const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor softmax() && = delete;
 
         /**
          * Numerically-stable softmax cross-entropy over the class dimension:
@@ -1121,7 +1242,18 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::NotImplemented Non-contiguous operand.
          * @throws ErrorHandling::IndexOutOfRange A target index is out of bounds (at sync()).
          */
-        [[nodiscard]] Tensor softmax_ce(const Tensor&) const;
+        [[nodiscard]] Tensor softmax_ce(const Tensor&) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor softmax_ce(const Tensor&) && = delete;
 
         /**
          * Mean squared error loss, rank-agnostic: out = mean of (this -
@@ -1150,7 +1282,18 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::MismatchedDevices Operand devices differ.
          * @throws ErrorHandling::NotImplemented Non-contiguous operand.
          */
-        [[nodiscard]] Tensor mse(const Tensor&) const;
+        [[nodiscard]] Tensor mse(const Tensor&) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor mse(const Tensor&) && = delete;
 
         /**
          * Broadcasting semantics (identical for add/sub/mul/div/pow): the two
@@ -1213,7 +1356,18 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::MismatchedDevices Operand devices differ.
          * @throws ErrorHandling::NotImplemented Non-contiguous operand.
          */
-        [[nodiscard]] Tensor add(const Tensor&) const;
+        [[nodiscard]] Tensor add(const Tensor&) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor add(const Tensor&) && = delete;
         /**
          * Tensor-scalar add: out[i] = this[i] + scalar, scalar narrowed into
          * this tensor's dtype. Broadcasting/compute/async contracts: see the
@@ -1222,7 +1376,18 @@ namespace BeanTensor::Tensors {
          * scalar: Scalar operand (float64_t).
          * @return New tensor, same shape/dtype/device as this.
          */
-        [[nodiscard]] Tensor add(const float64_t&) const;
+        [[nodiscard]] Tensor add(const float64_t&) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor add(const float64_t&) && = delete;
         /**
          * @brief Elementwise subtract with NumPy-style broadcasting.
          * o: Right operand (the subtrahend), same dtype and device, contiguous.
@@ -1232,7 +1397,18 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::MismatchedDevices Operand devices differ.
          * @throws ErrorHandling::NotImplemented Non-contiguous operand.
          */
-        [[nodiscard]] Tensor sub(const Tensor&) const;
+        [[nodiscard]] Tensor sub(const Tensor&) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor sub(const Tensor&) && = delete;
         /**
          * Tensor-scalar subtract: out[i] = this[i] - scalar, scalar narrowed
          * into this tensor's dtype. Contracts: see the tensor-tensor add doc
@@ -1241,7 +1417,18 @@ namespace BeanTensor::Tensors {
          * scalar: Scalar operand (float64_t).
          * @return New tensor, same shape/dtype/device as this.
          */
-        [[nodiscard]] Tensor sub(const float64_t&) const;
+        [[nodiscard]] Tensor sub(const float64_t&) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor sub(const float64_t&) && = delete;
         /**
          * @brief Elementwise multiply with NumPy-style broadcasting.
          * o: Right operand, same dtype and device, contiguous.
@@ -1251,7 +1438,18 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::MismatchedDevices Operand devices differ.
          * @throws ErrorHandling::NotImplemented Non-contiguous operand.
          */
-        [[nodiscard]] Tensor mul(const Tensor&) const;
+        [[nodiscard]] Tensor mul(const Tensor&) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor mul(const Tensor&) && = delete;
         /**
          * Tensor-scalar multiply: out[i] = this[i] * scalar, scalar narrowed
          * into this tensor's dtype. Contracts: see the tensor-tensor add doc
@@ -1260,7 +1458,18 @@ namespace BeanTensor::Tensors {
          * scalar: Scalar operand (float64_t).
          * @return New tensor, same shape/dtype/device as this.
          */
-        [[nodiscard]] Tensor mul(const float64_t&) const;
+        [[nodiscard]] Tensor mul(const float64_t&) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor mul(const float64_t&) && = delete;
         /**
          * Division edge semantics: float div is IEEE (x/0 -> +/-inf, 0/0 ->
          * NaN); integer div truncates toward zero, division by zero yields 0,
@@ -1273,7 +1482,18 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::MismatchedDevices Operand devices differ.
          * @throws ErrorHandling::NotImplemented Non-contiguous operand.
          */
-        [[nodiscard]] Tensor div(const Tensor&) const;
+        [[nodiscard]] Tensor div(const Tensor&) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor div(const Tensor&) && = delete;
         /**
          * Tensor-scalar divide: out[i] = this[i] / scalar, scalar narrowed
          * into this tensor's dtype. Division edge semantics: see the
@@ -1282,7 +1502,18 @@ namespace BeanTensor::Tensors {
          * scalar: Scalar operand (float64_t).
          * @return New tensor, same shape/dtype/device as this.
          */
-        [[nodiscard]] Tensor div(const float64_t&) const;
+        [[nodiscard]] Tensor div(const float64_t&) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor div(const float64_t&) && = delete;
         /**
          * pow requires a float-kind dtype (Float16/BFloat16/Float16x2/
          * BFloat16x2/Float32/Float64); integer pow throws
@@ -1298,7 +1529,18 @@ namespace BeanTensor::Tensors {
          * @throws ErrorHandling::MismatchedDevices Operand devices differ.
          * @throws ErrorHandling::NotImplemented Non-contiguous operand, or integer dtype.
          */
-        [[nodiscard]] Tensor pow(const Tensor&) const;
+        [[nodiscard]] Tensor pow(const Tensor&) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor pow(const Tensor&) && = delete;
         /**
          * Tensor-scalar power: out[i] = this[i]^scalar, scalar narrowed into
          * this tensor's dtype; integer dtypes are rejected (same contract as
@@ -1308,7 +1550,18 @@ namespace BeanTensor::Tensors {
          * @return New tensor, same shape/dtype/device as this.
          * @throws ErrorHandling::NotImplemented Integer dtype.
          */
-        [[nodiscard]] Tensor pow(const float64_t&) const;
+        [[nodiscard]] Tensor pow(const float64_t&) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor pow(const float64_t&) && = delete;
         /**
          * Float kinds only — integer exp throws ErrorHandling::NotImplemented.
          * fp16/bf16 (and packed lanes) widen to fp32, std::exp, narrow RNE;
@@ -1317,7 +1570,18 @@ namespace BeanTensor::Tensors {
          * @return New tensor, same shape/dtype/device as this.
          * @throws ErrorHandling::NotImplemented Non-contiguous tensor, or integer dtype.
          */
-        [[nodiscard]] Tensor exp() const;
+        [[nodiscard]] Tensor exp() const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor exp() && = delete;
         /**
          * Float kinds only — integer log throws ErrorHandling::NotImplemented.
          * fp16/bf16 (and packed lanes) widen to fp32, std::log, narrow RNE;
@@ -1327,7 +1591,18 @@ namespace BeanTensor::Tensors {
          * @return New tensor, same shape/dtype/device as this.
          * @throws ErrorHandling::NotImplemented Non-contiguous tensor, or integer dtype.
          */
-        [[nodiscard]] Tensor log() const;
+        [[nodiscard]] Tensor log() const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor log() && = delete;
         /**
          * Float kinds only — integer sigmoid throws ErrorHandling::NotImplemented.
          * fp16/bf16 (and packed lanes) widen to fp32, 1/(1+exp(-x)), narrow RNE;
@@ -1337,7 +1612,18 @@ namespace BeanTensor::Tensors {
          * @return New tensor, same shape/dtype/device as this.
          * @throws ErrorHandling::NotImplemented Non-contiguous tensor, or integer dtype.
          */
-        [[nodiscard]] Tensor sigmoid() const;
+        [[nodiscard]] Tensor sigmoid() const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor sigmoid() && = delete;
         /**
          * Float kinds only — integer tanh throws ErrorHandling::NotImplemented.
          * fp16/bf16 (and packed lanes) widen to fp32, 1 - 2/(exp(2x)+1), narrow RNE;
@@ -1347,7 +1633,18 @@ namespace BeanTensor::Tensors {
          * @return New tensor, same shape/dtype/device as this.
          * @throws ErrorHandling::NotImplemented Non-contiguous tensor, or integer dtype.
          */
-        [[nodiscard]] Tensor tanh() const;
+        [[nodiscard]] Tensor tanh() const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor tanh() && = delete;
 
         /**
          * Bounds-checked strided element access. T must be a type with a

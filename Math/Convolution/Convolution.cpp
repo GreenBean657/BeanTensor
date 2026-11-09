@@ -13,7 +13,7 @@
 
 namespace BeanTensor::Tensors {
 
-    Tensor Tensor::conv2d(const Tensor& weight, const Tensor& bias, const uint32_t stride, const uint32_t padding) const {
+    Tensor Tensor::conv2d(const Tensor& weight, const Tensor& bias, const uint32_t stride, const uint32_t padding) const & {
         if (this->ndim != 4) {
             throw ErrorHandling::MismatchedShapes("conv2d input must be rank-4 NCHW, got rank " + std::to_string(this->ndim));
         }
@@ -74,7 +74,7 @@ namespace BeanTensor::Tensors {
         return out;
     }
 
-    Tensor Tensor::conv2d(const Tensor& weight, const uint32_t stride, const uint32_t padding) const {
+    Tensor Tensor::conv2d(const Tensor& weight, const uint32_t stride, const uint32_t padding) const & {
         if (this->ndim != 4) {
             throw ErrorHandling::MismatchedShapes("conv2d input must be rank-4 NCHW, got rank " + std::to_string(this->ndim));
         }

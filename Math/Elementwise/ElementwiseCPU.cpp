@@ -1526,18 +1526,18 @@ namespace BeanTensor::Tensors {
         return out;
     }
 
-    Tensor Tensor::add(const Tensor& o) const { return elementwise_binary(o, ElementwiseOp::Add); }
-    Tensor Tensor::add(const float64_t& scalar) const { return elementwise_scalar(scalar, ElementwiseOp::Add); }
-    Tensor Tensor::sub(const Tensor& o) const { return elementwise_binary(o, ElementwiseOp::Sub); }
-    Tensor Tensor::sub(const float64_t& scalar) const { return elementwise_scalar(scalar, ElementwiseOp::Sub); }
-    Tensor Tensor::mul(const Tensor& o) const { return elementwise_binary(o, ElementwiseOp::Mul); }
-    Tensor Tensor::mul(const float64_t& scalar) const { return elementwise_scalar(scalar, ElementwiseOp::Mul); }
-    Tensor Tensor::div(const Tensor& o) const { return elementwise_binary(o, ElementwiseOp::Div); }
-    Tensor Tensor::div(const float64_t& scalar) const { return elementwise_scalar(scalar, ElementwiseOp::Div); }
-    Tensor Tensor::pow(const Tensor& o) const { return elementwise_binary(o, ElementwiseOp::Pow); }
-    Tensor Tensor::pow(const float64_t& scalar) const { return elementwise_scalar(scalar, ElementwiseOp::Pow); }
-    Tensor Tensor::exp() const { return elementwise_unary(ElementwiseUnaryOp::Exp); }
-    Tensor Tensor::log() const { return elementwise_unary(ElementwiseUnaryOp::Log); }
-    Tensor Tensor::sigmoid() const { return elementwise_unary(ElementwiseUnaryOp::Sigmoid); }
-    Tensor Tensor::tanh() const { return elementwise_unary(ElementwiseUnaryOp::Tanh); }
+    Tensor Tensor::add(const Tensor& o) const & { return elementwise_binary(o, ElementwiseOp::Add); }
+    Tensor Tensor::add(const float64_t& scalar) const & { return elementwise_scalar(scalar, ElementwiseOp::Add); }
+    Tensor Tensor::sub(const Tensor& o) const & { return elementwise_binary(o, ElementwiseOp::Sub); }
+    Tensor Tensor::sub(const float64_t& scalar) const & { return elementwise_scalar(scalar, ElementwiseOp::Sub); }
+    Tensor Tensor::mul(const Tensor& o) const & { return elementwise_binary(o, ElementwiseOp::Mul); }
+    Tensor Tensor::mul(const float64_t& scalar) const & { return elementwise_scalar(scalar, ElementwiseOp::Mul); }
+    Tensor Tensor::div(const Tensor& o) const & { return elementwise_binary(o, ElementwiseOp::Div); }
+    Tensor Tensor::div(const float64_t& scalar) const & { return elementwise_scalar(scalar, ElementwiseOp::Div); }
+    Tensor Tensor::pow(const Tensor& o) const & { return elementwise_binary(o, ElementwiseOp::Pow); }
+    Tensor Tensor::pow(const float64_t& scalar) const & { return elementwise_scalar(scalar, ElementwiseOp::Pow); }
+    Tensor Tensor::exp() const & { return elementwise_unary(ElementwiseUnaryOp::Exp); }
+    Tensor Tensor::log() const & { return elementwise_unary(ElementwiseUnaryOp::Log); }
+    Tensor Tensor::sigmoid() const & { return elementwise_unary(ElementwiseUnaryOp::Sigmoid); }
+    Tensor Tensor::tanh() const & { return elementwise_unary(ElementwiseUnaryOp::Tanh); }
 }

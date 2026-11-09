@@ -338,7 +338,7 @@ namespace BeanTensor::Tensors {
      * @brief Elementwise rectified linear unit.
      * @return New tensor shaped like this.
      */
-    Tensor Tensor::relu() const {
+    Tensor Tensor::relu() const & {
         if (!this->is_contiguous) {
             throw ErrorHandling::NotImplemented();
         }

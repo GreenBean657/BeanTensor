@@ -832,7 +832,7 @@ namespace BeanTensor::Tensors {
      *         kernel == 0, or stride == 0.
      * @throws ErrorHandling::NotImplemented Non-contiguous operand.
      */
-    Tensor Tensor::max_pool2d(const uint32_t kernel, const uint32_t stride) const {
+    Tensor Tensor::max_pool2d(const uint32_t kernel, const uint32_t stride) const & {
         if (this->ndim != 4) {
             throw ErrorHandling::MismatchedShapes("max_pool2d requires rank-4 input (NCHW)");
         }

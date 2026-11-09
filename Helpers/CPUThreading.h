@@ -346,6 +346,7 @@ namespace BeanTensor::Threading {
                 }
                 const auto idx = detail::worker_index < this->deques.size() ? detail::worker_index : size_t{0};
                 auto& tele = this->telemetry[idx];
+                auto last_progress_ms = detail::now_steady_ms();
                 while (true) {
                     if (
                         const auto status = f.wait_for(std::chrono::duration<int>::zero());
@@ -359,6 +360,7 @@ namespace BeanTensor::Threading {
                     if (auto task = this->pop_own(idx)) {
                         tele.futures_awaited.store(0, std::memory_order_relaxed);
                         this->execute_task(std::move(*task), TaskProvenance::Helped);
+                        last_progress_ms = detail::now_steady_ms();
                         continue;
                     }
                     if (
@@ -367,7 +369,18 @@ namespace BeanTensor::Threading {
                         ) {
                         tele.futures_awaited.store(0, std::memory_order_relaxed);
                         this->execute_task(std::move(*stolen), TaskProvenance::Helped);
+                        last_progress_ms = detail::now_steady_ms();
                         continue;
+                    }
+                    // Stall watchdog: a helping wait that has executed nothing
+                    // and seen no readiness for a long stretch is deadlocked
+                    // (the tasks it needs are unclaimable). Hangs must be loud.
+                    if (
+                        const auto now_ms = detail::now_steady_ms();
+                        now_ms - last_progress_ms > uint64_t{60000}
+                    ) {
+                        tele.status.store(WorkerStatus::Idle, std::memory_order_relaxed);
+                        throw ErrorHandling::ThreadPoolStuck("no pool progress for 60s while awaiting a future");
                     }
                     static_cast<void>(f.wait_for(std::chrono::microseconds(100)));
                 }
@@ -394,6 +407,7 @@ namespace BeanTensor::Threading {
                 }
                 const auto idx = detail::worker_index < this->deques.size() ? detail::worker_index : size_t{0};
                 auto& tele = this->telemetry[idx];
+                auto last_progress_ms = detail::now_steady_ms();
                 while (true) {
                     auto not_ready = uint32_t{0};
                     const std::shared_future<void>* pending = nullptr;
@@ -417,6 +431,7 @@ namespace BeanTensor::Threading {
                     if (auto task = this->pop_own(idx)) {
                         tele.futures_awaited.store(0, std::memory_order_relaxed);
                         this->execute_task(std::move(*task), TaskProvenance::Helped);
+                        last_progress_ms = detail::now_steady_ms();
                         continue;
                     }
                     if (
@@ -425,7 +440,18 @@ namespace BeanTensor::Threading {
                         ) {
                         tele.futures_awaited.store(0, std::memory_order_relaxed);
                         this->execute_task(std::move(*stolen), TaskProvenance::Helped);
+                        last_progress_ms = detail::now_steady_ms();
                         continue;
+                    }
+                    // Stall watchdog: a helping wait that has executed nothing
+                    // and seen no readiness for a long stretch is deadlocked
+                    // (the tasks it needs are unclaimable). Hangs must be loud.
+                    if (
+                        const auto now_ms = detail::now_steady_ms();
+                        now_ms - last_progress_ms > uint64_t{60000}
+                    ) {
+                        tele.status.store(WorkerStatus::Idle, std::memory_order_relaxed);
+                        throw ErrorHandling::ThreadPoolStuck("no pool progress for 60s while awaiting futures");
                     }
                     static_cast<void>(pending->wait_for(std::chrono::microseconds(100)));
                 }

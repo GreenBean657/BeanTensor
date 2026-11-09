@@ -911,8 +911,10 @@ static void test_midtrain_checkpoint_full() {
     CHECK(optimizer_state_equal(original, *loaded));
 
     // One more identical forward must produce the same loss.
-    auto l1 = original.forward(x).softmax_ce(labels);
-    auto l2 = loaded->forward(x).softmax_ce(labels);
+    auto o1 = original.forward(x);
+    auto o2 = loaded->forward(x);
+    auto l1 = o1.softmax_ce(labels);
+    auto l2 = o2.softmax_ce(labels);
     l1.sync();
     l2.sync();
     CHECK(bit_exact(l1, l2));

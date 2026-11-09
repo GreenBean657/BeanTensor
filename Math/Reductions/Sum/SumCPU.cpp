@@ -283,7 +283,7 @@ namespace BeanTensor::Tensors {
      * @brief Sum of every element.
      * @return Single element tensor of the same dtype and device.
      */
-    Tensor Tensor::sum() const {
+    Tensor Tensor::sum() const & {
         sync();
         auto out = Tensor(std::vector<size_t>{1}, this->dtype, this->device, false);
         if (this->device == Device::CPU) {

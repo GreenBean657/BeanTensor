@@ -342,7 +342,7 @@ namespace BeanTensor::Tensors {
      */
     Tensor Tensor::batch_norm(const Tensor& gamma, const Tensor& beta,
                               Tensor& running_mean, Tensor& running_var,
-                              const bool training, const float64_t momentum, const float64_t eps) const {
+                              const bool training, const float64_t momentum, const float64_t eps) const & {
         sync();
         if (this->ndim != 2 && this->ndim != 4) {
             throw ErrorHandling::MismatchedShapes(

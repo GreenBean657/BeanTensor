@@ -183,6 +183,18 @@ namespace BeanTensor::ErrorHandling {
         explicit ThreadPoolStopped(const std::string& detail) : std::runtime_error("ThreadPoolStopped: " + detail) { }
     };
 
+    class ThreadPoolStuck final : public std::runtime_error {
+    public:
+        ThreadPoolStuck() = delete;
+        /**
+         * @brief Exception thrown when a helping wait observes no progress for an
+         *        extended period: futures neither ready nor any pool task executed.
+         *        Converts a would-be scheduler deadlock into a loud, catchable error.
+         * @param detail What was being awaited.
+         */
+        explicit ThreadPoolStuck(const std::string& detail) : std::runtime_error("Thread pool stuck: " + detail) { }
+    };
+
     class ThreadingUnsupported final : public std::runtime_error {
     public:
         ThreadingUnsupported() = delete;
@@ -329,6 +341,47 @@ namespace BeanTensor::ErrorHandling {
          * @param detail The unknown type name.
          */
         explicit UnknownModuleType(const std::string& detail) : SerializationError("unknown module type: " + detail) { }
+    };
+
+    class EmptyFile : public std::runtime_error {
+    public:
+        EmptyFile() = delete;
+        /**
+         * @brief Exception thrown when a dataset file parses to zero data rows.
+         * @param detail Which file or stage was empty.
+         */
+        explicit EmptyFile(const std::string& detail) : std::runtime_error("Empty file: " + detail) { }
+    };
+
+    class RaggedCsv : public std::runtime_error {
+    public:
+        RaggedCsv() = delete;
+        /**
+         * @brief Exception thrown when a CSV row has a different cell count than the established columns.
+         * @param detail The row and the expected/actual cell counts.
+         */
+        explicit RaggedCsv(const std::string& detail) : std::runtime_error("Ragged CSV row: " + detail) { }
+    };
+
+    class NullValue : public std::runtime_error {
+    public:
+        NullValue() = delete;
+        /**
+         * @brief Exception thrown when a dataset holds null cells but the null policy is Error.
+         * @param detail How many nulls were found and where.
+         */
+        explicit NullValue(const std::string& detail) : std::runtime_error("Null value: " + detail) { }
+    };
+
+    class NonNumericValue : public std::runtime_error {
+    public:
+        NonNumericValue() = delete;
+        /**
+         * @brief Exception thrown when a numeric-column cell cannot be parsed as a number,
+         *        an integer-dtype column holds a fractional value, or a categorical cell is empty.
+         * @param detail The cell value and its location.
+         */
+        explicit NonNumericValue(const std::string& detail) : std::runtime_error("Non-numeric value: " + detail) { }
     };
 
     class NotSerializable : public std::logic_error {

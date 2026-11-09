@@ -225,7 +225,8 @@ static void test_train_grad(const Device dev) {
         auto loss = BeanTensor::Modules::mse_loss(y, target);
         loss.backward(DType::Float32);
         loss.sync();
-        auto dy_tensor = y.mul(float64_t{2.0}).div(static_cast<float64_t>(y.element_count()));
+        auto dy_scaled = y.mul(float64_t{2.0});
+        auto dy_tensor = dy_scaled.div(static_cast<float64_t>(y.element_count()));
         auto expected_dx = dy_tensor.mul(mask);
         expected_dx.sync();
         for (auto i = size_t{0}; i < 8; ++i) {

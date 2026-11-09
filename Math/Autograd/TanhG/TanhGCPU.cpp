@@ -39,7 +39,12 @@ namespace BeanTensor::Tensors::detail {
             dyw = &*dy_cast;
         }
         auto t = xw.tanh();
-        auto dx = dyw->mul(t.mul(t).mul(float64_t{-1.0}).add(float64_t{1.0}));
+        // Named intermediates: graph ops on rvalues are deleted (the node
+        // parents must outlive backward()).
+        auto t2 = t.mul(t);
+        auto neg = t2.mul(float64_t{-1.0});
+        // tanh' = 1 - t^2: no extra factor of t.
+        auto dx = dyw->mul(neg.add(float64_t{1.0}));
         ew_deliver_delta(std::move(dx), x, work, grad_dtype);
     }
 }

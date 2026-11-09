@@ -1,47 +1,10 @@
-/**
- * @file main.cpp
- * @author GreenBean
- * @brief MNIST demo over the Module layer stack: reads the uncompressed IDX
- * files from datasets/mnist/, prints live thread-pool telemetry (snapshot + format) on the first
- * batch of each epoch, trains a Sequential MLP (Linear -> Relu -> Linear) with
- * a seeded DataLoader, Adam, and softmax cross-entropy, and
- * reports test accuracy after every epoch. Every tensor access is gated on
- * sync() or an explicit dtype check. Data loading lives in demos/Mnist.h,
- * shared with the CNN demo (cnn.cpp).
- */
-#include <chrono>
-#include <cstdint>
-#include <filesystem>
-#include <iostream>
-#include <memory>
-#include <optional>
-#include <string>
-#include <vector>
-
-#include "Module/Linear.h"
-#include "Module/Module.h"
-#include "Module/Relu.h"
-#include "Module/ModuleStream.h"
-#include "Module/Sequential.h"
-#include "Data/DataLoader.h"
-#include "Metrics/Metrics.h"
-#include "Random/Generator.h"
-#include "Tensor/Tensor.h"
+#include "BeanTensor.h"
 #include "demos/Mnist.h"
 
-using BeanTensor::Tensors::Device;
-using BeanTensor::Tensors::Tensor;
-using BeanTensor::Modules::Linear;
-using BeanTensor::Modules::Relu;
-using BeanTensor::Modules::Sequential;
-using BeanTensor::Modules::softmax_cross_entropy;
-using BeanTensor::Data::DataLoader;
-using BeanTensor::Metrics::EvalResult;
-using BeanTensor::Metrics::evaluate;
-using BeanTensor::Random::set_seed;
-using BeanTensor::float32_t;
-using BeanTensor::float64_t;
-using DType = BeanTensor::DataTypes::DType;
+using namespace BeanTensor;
+using DType = DataTypes::DType;
+using demos::mnist::Split;
+using EvalResult = metrics::EvalResult;
 
 namespace {
 
@@ -72,13 +35,13 @@ namespace {
     // the device.
     [[nodiscard]] bool run_training(const demos::mnist::Split& train, const demos::mnist::Split& test, const Device device) {
         std::cout << "\n" << std::string(60, '=') << "\n";
-        std::cout << "Device: " << BeanTensor::Tensors::stringify_device_source(device) << "\n";
+        std::cout << "Device: " << Tensors::stringify_device_source(device) << "\n";
         std::cout << std::string(60, '=') << "\n";
 
-        auto net = Sequential();
-        net.append("fc1", std::make_unique<Linear>(kInputs, kHidden, kDType, device));
-        net.append("relu", std::make_unique<Relu>());
-        net.append("fc2", std::make_unique<Linear>(kHidden, kClasses, kDType, device));
+        auto net = nn::Sequential::make(
+            std::make_unique<nn::Linear>(kInputs, kHidden, kDType, device),
+            std::make_unique<nn::Relu>(),
+            std::make_unique<nn::Linear>(kHidden, kClasses, kDType, device));
         std::cout << net;
 
         auto train_data = demos::mnist::upload_flat(train, device, kDType, kHostDType);
@@ -90,7 +53,7 @@ namespace {
             return false;
         }
 
-        auto train_loader = DataLoader(
+        auto train_loader = data::DataLoader(
             train_data->images,
             train_data->labels,
             kBatch,
@@ -98,7 +61,7 @@ namespace {
             kShuffleSeed,
             true
         );
-        auto test_loader = DataLoader(
+        auto test_loader = data::DataLoader(
             test_data->images,
             test_data->labels,
             kBatch,
@@ -129,7 +92,7 @@ namespace {
 
                 net.zero_grad();
                 auto out = net.forward(batch);
-                auto loss = softmax_cross_entropy(out, labels);
+                auto loss = nn::softmax_cross_entropy(out, labels);
                 loss.backward(gDType);
                 constexpr auto epsilon = (kDType == DType::Float16 || kDType == DType::Float16x2) ? kEpsilonHalf : kEpsilon;
                 net.adam_step(kLearningRate, kBeta1, kBeta2, epsilon);
@@ -150,7 +113,7 @@ namespace {
                 param->sync();
             }
             net.eval();
-            const auto result = evaluate(net, test_loader);
+            const auto result = metrics::evaluate(net, test_loader);
             net.train();
             const auto epoch_seconds = std::chrono::duration<float64_t>(std::chrono::steady_clock::now() - epoch_start).count();
             std::cout << "epoch " << (epoch + 1) << "/" << kEpochs
@@ -167,7 +130,7 @@ namespace {
 }
 
 int main() {
-    set_seed(kShuffleSeed);
+    rnd::set_seed(kShuffleSeed);
 
     const auto dir = std::filesystem::path(demos::mnist::kDir);
     auto train = demos::mnist::Split{};

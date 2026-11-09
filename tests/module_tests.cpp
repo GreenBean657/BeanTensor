@@ -907,6 +907,24 @@ static void test_linear_he_gpu_parity() {
 }
 #endif
 
+static void test_sequential_make() {
+    // Sequential::make assembles layers in argument order with auto names.
+    auto net = BeanTensor::Modules::Sequential::make(
+        std::make_unique<BeanTensor::Modules::Linear>(3, 4, DType::Float32, Device::CPU, true, 5),
+        std::make_unique<BeanTensor::Modules::Relu>(),
+        std::make_unique<BeanTensor::Modules::Linear>(4, 2, DType::Float32, Device::CPU, true, 6));
+    auto params = net.named_parameters();
+    CHECK(params.size() == 4);
+    CHECK(params[0].first == "0.weight");
+    CHECK(params[2].first == "2.weight");
+    Tensor x(std::vector<size_t>{2, 3}, DType::Float32, Device::CPU, false);
+    x.random(-1.0, 1.0, 21);
+    auto out = net.forward(x);
+    out.sync();
+    CHECK(out.is_same_shape(Tensor(std::vector<size_t>{2, 2}, DType::Float32, Device::CPU, false)));
+    std::cout << "sequential::make ok\n";
+}
+
 int main() {
     test_linear_forward(Device::CPU);
     test_linear_no_bias(Device::CPU);

@@ -20,7 +20,7 @@ namespace BeanTensor::Tensors {
      * @return Rank-2 tensor viewing this tensor's data.
      * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
      */
-    Tensor Tensor::flatten() const {
+    Tensor Tensor::flatten() const & {
         if (!this->is_contiguous) {
             throw ErrorHandling::NotImplemented();
         }

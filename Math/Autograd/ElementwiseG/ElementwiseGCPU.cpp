@@ -186,13 +186,21 @@ namespace BeanTensor::Tensors::detail {
                     if (left) {
                         return dy.div(bg);
                     }
-                    return dy.mul(ag).div(bg.mul(bg)).mul(-1.0);
+                    // Named intermediates: graph ops on rvalues are deleted.
+                    auto dy_ag = dy.mul(ag);
+                    auto bg_sq = bg.mul(bg);
+                    auto quo = dy_ag.div(bg_sq);
+                    return quo.mul(-1.0);
                 }
                 case ElementwiseOp::Pow: {
                     if (left) {
-                        return dy.mul(bg).mul(ag.pow(bg.sub(1.0)));
+                        auto pw = ag.pow(bg.sub(1.0));
+                    auto dy_bg = dy.mul(bg);
+                    return dy_bg.mul(pw);
                     }
-                    return dy.mul(ag.pow(bg)).mul(ag.log());
+                    auto pw = ag.pow(bg);
+                    auto dy_pw = dy.mul(pw);
+                    return dy_pw.mul(ag.log());
                 }
                 [[unlikely]] default: {
                     throw ErrorHandling::UnReachableCode();
@@ -226,7 +234,9 @@ namespace BeanTensor::Tensors::detail {
                     return dy.div(s);
                 }
                 case ElementwiseOp::Pow: {
-                    return dy.mul(ag.pow(s - 1.0)).mul(s);
+                    auto pw = ag.pow(s - 1.0);
+                    auto dy_pw = dy.mul(pw);
+                    return dy_pw.mul(s);
                 }
                 [[unlikely]] default: {
                     throw ErrorHandling::UnReachableCode();

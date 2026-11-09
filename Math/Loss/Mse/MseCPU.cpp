@@ -290,7 +290,7 @@ namespace BeanTensor::Tensors {
      * @throws ErrorHandling::MismatchedDevices Operand devices differ.
      * @throws ErrorHandling::NotImplemented Non-contiguous operand.
      */
-    Tensor Tensor::mse(const Tensor& target) const {
+    Tensor Tensor::mse(const Tensor& target) const & {
         if (!this->is_same_shape(target)) {
             throw ErrorHandling::MismatchedShapes("mse requires identical shapes");
         }

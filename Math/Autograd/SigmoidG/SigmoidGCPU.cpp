@@ -39,7 +39,12 @@ namespace BeanTensor::Tensors::detail {
             dyw = &*dy_cast;
         }
         auto s = xw.sigmoid();
-        auto dx = dyw->mul(s).mul(s.mul(float64_t{-1.0}).add(float64_t{1.0}));
+        // Named intermediates: graph ops on rvalues are deleted (the node
+        // parents must outlive backward()).
+        auto neg = s.mul(float64_t{-1.0});
+        auto inv = neg.add(float64_t{1.0});
+        auto dy_s = dyw->mul(s);
+        auto dx = dy_s.mul(inv);
         ew_deliver_delta(std::move(dx), x, work, grad_dtype);
     }
 }

@@ -165,7 +165,7 @@ namespace BeanTensor::Tensors {
      * @throws ErrorHandling::MismatchedShapes Input is not rank-2 or is empty.
      * @throws ErrorHandling::NotImplemented Non-contiguous operand.
      */
-    Tensor Tensor::softmax() const {
+    Tensor Tensor::softmax() const & {
         if (this->ndim != 2) {
             throw ErrorHandling::MismatchedShapes("softmax requires rank-2 input (rows x classes)");
         }

@@ -37,6 +37,21 @@ namespace BeanTensor::Modules {
         ~Sequential() override = default;
 
         /**
+         * Builds a Sequential from a list of layers, in order. Registry
+         * names auto-number ("0", "1", ...) exactly like Sequential::append
+         * with an empty name. The C++-ergonomic way to write a model.
+         * @brief Construct a Sequential from a layer list.
+         * @param layers The layers, in forward order (moved in).
+         * @return The assembled container.
+         */
+        template <typename... Layers>
+        [[nodiscard]] static Sequential make(std::unique_ptr<Layers>... layers) {
+            auto out = Sequential();
+            (out.append("", std::move(layers)), ...);
+            return out;
+        }
+
+        /**
          * Feed x through every child in registry order. An empty Sequential
          * has no layers to forward through and throws
          * ErrorHandling::EmptyModule.

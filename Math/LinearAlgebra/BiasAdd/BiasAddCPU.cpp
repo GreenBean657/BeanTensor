@@ -334,7 +334,7 @@ namespace BeanTensor::Tensors {
      * @param bias Rank-1 tensor matching the last dimension, same dtype and device.
      * @return New tensor shaped like this.
      */
-    Tensor Tensor::bias_add(const Tensor& bias) const {
+    Tensor Tensor::bias_add(const Tensor& bias) const & {
         if (bias.ndim != 1 || bias.shape[0] != this->shape[this->ndim - 1]) {
             throw ErrorHandling::MismatchedShapes("bias_add requires a rank-1 bias matching the last dimension");
         }

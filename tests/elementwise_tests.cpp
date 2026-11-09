@@ -398,7 +398,9 @@ static void test_broadcast_errors() {
     // Non-broadcastable rank-1 pair.
     threw = false;
     try {
-        auto r = Tensor({2}, DType::Float32, Device::CPU).add(Tensor({3}, DType::Float32, Device::CPU));
+        auto lhs = Tensor({2}, DType::Float32, Device::CPU);
+        auto rhs = Tensor({3}, DType::Float32, Device::CPU);
+        auto r = lhs.add(rhs);
         static_cast<void>(r);
     } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) {
         threw = true;
@@ -407,7 +409,9 @@ static void test_broadcast_errors() {
     // Rank-3 against an incompatible rank-2.
     threw = false;
     try {
-        auto r = Tensor({2, 2, 3}, DType::Float32, Device::CPU).add(Tensor({3, 3}, DType::Float32, Device::CPU));
+        auto lhs = Tensor({2, 2, 3}, DType::Float32, Device::CPU);
+        auto rhs = Tensor({3, 3}, DType::Float32, Device::CPU);
+        auto r = lhs.add(rhs);
         static_cast<void>(r);
     } catch (const BeanTensor::ErrorHandling::MismatchedShapes&) {
         threw = true;

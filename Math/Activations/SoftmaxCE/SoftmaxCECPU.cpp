@@ -439,7 +439,7 @@ namespace BeanTensor::Tensors {
      * @param targets Rank-1 integer class indices, one per row, same device.
      * @return Single-element tensor in the logits dtype.
      */
-    Tensor Tensor::softmax_ce(const Tensor& targets) const {
+    Tensor Tensor::softmax_ce(const Tensor& targets) const & {
         if (this->ndim != 2) {
             throw ErrorHandling::MismatchedShapes("softmax_ce requires rank-2 logits (rows x classes)");
         }

@@ -310,7 +310,7 @@ namespace BeanTensor::Tensors {
      * @brief Mean of every element.
      * @return Single element tensor of the same dtype and device.
      */
-    Tensor Tensor::mean() const {
+    Tensor Tensor::mean() const & {
         sync();
         if (this->numel == 0) {
             throw ErrorHandling::IndexOutOfRange();

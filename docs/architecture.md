@@ -76,6 +76,32 @@ set: their scanner findings are namespace-scope `detail` internals (autograd
 trampolines, dispatcher hooks) — not binding surface — plus the explicit
 byte-I/O exception above. See `docs/roadmap.md`.
 
+## CSV datasets
+
+`Data::load_csv(path, options)` turns a CSV file into the tensor pair
+`DataLoader` consumes directly: features `{N, F}` in `CsvOptions::feature_dtype`
+(Float32/Float64/Int32/Int64; integer kinds reject fractional values) and
+labels `{N}` Int32 class ids. The label column (last, or `CsvOptions::label_column`)
+is categorical: ids follow first-seen order and `CsvDataset::label_names`
+maps an id back to its original string. Every other column must be numeric —
+a stringy feature column raises `ErrorHandling::NonNumericValue`. Header
+presence is automatic (the first line is a header when any cell fails to parse
+as a number) or forced via `CsvOptions::has_header`; the delimiter is inferred
+from comma/semicolon/tab or forced via `CsvOptions::delimiter`. Empty cells in
+numeric columns become NaN by default (`CsvNullPolicy::KeepNaN`); the policy
+can instead raise (`Error` → `NullValue`), or fill with the column's
+NaN-skipped mean, median, or a constant (`CsvOptions::fill_value`). Each load
+reports `CsvDataset::null_count` and the NaN-skipped per-column
+`column_min`/`column_max`/`column_mean` of the parsed values. Features can be
+scaled per column after filling and before dtype conversion:
+`CsvNormalize::MinMax` maps to [0, 1] (constant columns become all zeros) and
+`Standardize` z-scores with the population standard deviation (constant
+columns become all zeros); the label column is never scaled. Empty label
+cells, ragged rows (`RaggedCsv`), a file with no data rows (`EmptyFile`), and
+an unopenable path (`SerializationError`) all raise. Blank lines are skipped. Errors raise
+synchronously at the call; loading is host-side and not part of the async
+tensor-op model.
+
 ## Model export (.bt)
 
 `Serialization::save(module, path)` / `Serialization::load(path, device)`
