@@ -14,20 +14,24 @@
  *     auto net = nn::make_sequential(std::make_unique<nn::Linear>(784, 128),
  *                                    std::make_unique<nn::Relu>(),
  *                                    std::make_unique<nn::Linear>(128, 10));
- * @version 0.1
- * @date 2026-11-09
+ * @version 0.2
+ * @date 2026-11-10
  */
 #pragma once
 
 #include "Tensor/DTypes.h"
 #include "Tensor/Tensor.h"
 
+#include "Math/Loss/Loss.h"
+
 #include "Module/BatchNorm.h"
 #include "Module/Conv2d.h"
 #include "Module/Dropout.h"
 #include "Module/Flatten.h"
+#include "Module/Gelu.h"
 #include "Module/Linear.h"
 #include "Module/MaxPool2d.h"
+#include "Module/AvgPool2d.h"
 #include "Module/Module.h"
 #include "Module/ModuleStream.h"
 #include "Module/Relu.h"

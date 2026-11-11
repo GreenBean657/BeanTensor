@@ -9,8 +9,8 @@
  * including integer-kind rejection of fractional values, and a full
  * CSV -> DataLoader -> Linear -> optimizer-step composition proving the
  * loaded pair plugs straight into the training stack.
- * @version 0.1
- * @date 2026-11-09
+ * @version 0.2
+ * @date 2026-11-10
  */
 #include <cmath>
 #include <cstdint>
@@ -233,12 +233,23 @@ static void test_end_to_end_training() {
     opts.feature_dtype = DType::Float32;
     auto ds = load_csv(path, opts);
 
-    auto loader = BeanTensor::Data::DataLoader(ds.features, ds.labels, 2, true, 5);
+    // Seeded init: an unseeded Linear draws from the process-wide Generator
+    // (random_device-seeded), which made this test's outcome vary per run.
     auto net = BeanTensor::Modules::Sequential();
-    net.append("fc", std::make_unique<BeanTensor::Modules::Linear>(2, 2, DType::Float32, Device::CPU));
+    net.append("fc", std::make_unique<BeanTensor::Modules::Linear>(2, 2, DType::Float32, Device::CPU, true, 42));
 
-    auto first = float64_t{0};
-    auto last = float64_t{0};
+    // Progress is measured on the full dataset before vs after training.
+    // Comparing two arbitrary shuffled batches compares batch difficulty,
+    // not learning — a well-trained net can score worse on a harder batch.
+    const auto eval_loss = [&net, &ds]() {
+        auto logits = net.forward(ds.features);
+        auto loss = logits.softmax_ce(ds.labels);
+        loss.sync();
+        return static_cast<float64_t>(loss.at<float32_t>({0}));
+    };
+    const auto before = eval_loss();
+
+    auto loader = BeanTensor::Data::DataLoader(ds.features, ds.labels, 2, true, 5);
     for (auto step = int32_t{0}; step < 12; ++step) {
         auto batch = loader.next_batch();
         if (!batch.has_value()) {
@@ -250,15 +261,10 @@ static void test_end_to_end_training() {
         auto loss = logits.softmax_ce(batch->second);
         loss.backward(DType::Float32);
         net.adam_step(1e-2, 0.9, 0.999, 1e-8);
-        loss.sync();
-        const auto v = static_cast<float64_t>(loss.at<float32_t>({0}));
-        if (step == 0) {
-            first = v;
-        }
-        last = v;
     }
-    CHECK(last < first);
-    std::cout << "csv end-to-end training ok (" << first << " -> " << last << ")\n";
+    const auto after = eval_loss();
+    CHECK(after < before);
+    std::cout << "csv end-to-end training ok (" << before << " -> " << after << ")\n";
 }
 
 

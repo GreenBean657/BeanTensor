@@ -209,6 +209,18 @@ set(CORE_SOURCES
         Math/Loss/MseG/MseG.h
         Math/Loss/MseG/MseG.hpp
         Math/Loss/MseG/MseGCPU.cpp
+        Math/Loss/Bce/Bce.h
+        Math/Loss/Bce/Bce.hpp
+        Math/Loss/Bce/BceCPU.cpp
+        Math/Loss/BceG/BceG.h
+        Math/Loss/BceG/BceG.hpp
+        Math/Loss/BceG/BceGCPU.cpp
+        Math/Loss/BceWithLogits/BceWithLogits.h
+        Math/Loss/BceWithLogits/BceWithLogits.hpp
+        Math/Loss/BceWithLogits/BceWithLogitsCPU.cpp
+        Math/Loss/BceWithLogitsG/BceWithLogitsG.h
+        Math/Loss/BceWithLogitsG/BceWithLogitsG.hpp
+        Math/Loss/BceWithLogitsG/BceWithLogitsGCPU.cpp
         Math/Reductions/Sum/Sum.h
         Math/Reductions/Sum/Sum.hpp
         Math/Reductions/Sum/SumKernels.h
@@ -245,6 +257,14 @@ set(CORE_SOURCES
         Math/Spatial/MaxPool2d/MaxPool2dCPU.cpp
         Math/Spatial/MaxPool2d/MaxPool2dAVX2.cpp
         Math/Spatial/MaxPool2d/MaxPool2dAVX512.cpp
+        Math/Spatial/AvgPool2d/AvgPool2d.h
+        Math/Spatial/AvgPool2d/AvgPool2d.hpp
+        Math/Spatial/AvgPool2d/AvgPool2dKernels.h
+        Math/Spatial/AvgPool2d/AvgPool2dCPU.cpp
+        Math/Spatial/AvgPool2d/AvgPool2dAVX2.cpp
+        Math/Spatial/AvgPool2d/AvgPool2dAVX512.cpp
+        Math/Autograd/AvgPool2dG/AvgPool2dG.h
+        Math/Autograd/AvgPool2dG/AvgPool2dGCPU.cpp
         Math/Shape/Indexing/Indexing.h
         Math/Shape/Indexing/Indexing.hpp
         Math/Shape/Indexing/IndexingShared.h
@@ -270,6 +290,12 @@ set(CORE_SOURCES
         Math/Activations/Relu/ReluCPU.cpp
         Math/Activations/Relu/ReluAVX2.cpp
         Math/Activations/Relu/ReluAVX512.cpp
+        Math/Activations/Gelu/Gelu.h
+        Math/Activations/Gelu/Gelu.hpp
+        Math/Activations/Gelu/GeluKernels.h
+        Math/Activations/Gelu/GeluCPU.cpp
+        Math/Activations/Gelu/GeluAVX2.cpp
+        Math/Activations/Gelu/GeluAVX512.cpp
         Math/Activations/SoftmaxCE/SoftmaxCE.h
         Math/Activations/SoftmaxCE/SoftmaxCE.hpp
         Math/Activations/SoftmaxCE/SoftmaxCECPU.cpp
@@ -301,6 +327,12 @@ set(CORE_SOURCES
         Math/Autograd/ReluG/ReluGCPU.cpp
         Math/Autograd/ReluG/ReluGAVX2.cpp
         Math/Autograd/ReluG/ReluGAVX512.cpp
+        Math/Autograd/GeluG/GeluG.h
+        Math/Autograd/GeluG/GeluG.hpp
+        Math/Autograd/GeluG/GeluGKernels.h
+        Math/Autograd/GeluG/GeluGCPU.cpp
+        Math/Autograd/GeluG/GeluGAVX2.cpp
+        Math/Autograd/GeluG/GeluGAVX512.cpp
         Math/Autograd/SigmoidG/SigmoidG.h
         Math/Autograd/SigmoidG/SigmoidGCPU.cpp
         Math/Autograd/TanhG/TanhG.h
@@ -373,10 +405,14 @@ set(CORE_SOURCES
         Module/Sigmoid.cpp
         Module/Tanh.h
         Module/Tanh.cpp
+        Module/Gelu.h
+        Module/Gelu.cpp
         Module/Softmax.h
         Module/Softmax.cpp
         Module/MaxPool2d.h
         Module/MaxPool2d.cpp
+        Module/AvgPool2d.h
+        Module/AvgPool2d.cpp
         Module/Flatten.h
         Module/Flatten.cpp
         Module/Sequential.h
@@ -429,6 +465,10 @@ if (USE_CUDA)
             Math/Optimization/Adam/AdamCUDA.cu
             Math/Loss/Mse/MseCUDA.cu
             Math/Loss/MseG/MseGCUDA.cu
+            Math/Loss/Bce/BceCUDA.cu
+            Math/Loss/BceG/BceGCUDA.cu
+            Math/Loss/BceWithLogits/BceWithLogitsCUDA.cu
+            Math/Loss/BceWithLogitsG/BceWithLogitsGCUDA.cu
             Math/Dropout/DropoutCUDA.cu
             Math/Reductions/Sum/SumCUDA.cu
             Math/Reductions/Mean/MeanCUDA.cu
@@ -439,12 +479,15 @@ if (USE_CUDA)
             Math/Compare/Equal/EqualCUDA.cu
             Math/LinearAlgebra/BiasAdd/BiasAddCUDA.cu
             Math/Activations/Relu/ReluCUDA.cu
+            Math/Activations/Gelu/GeluCUDA.cu
             Math/Activations/SoftmaxCE/SoftmaxCECUDA.cu
             Math/Activations/Softmax/SoftmaxCUDA.cu
             Math/Spatial/MaxPool2d/MaxPool2dCUDA.cu
+            Math/Spatial/AvgPool2d/AvgPool2dCUDA.cu
             Math/Spatial/SpatialCudaShared.h
             Math/Autograd/GradAcc/GradAccCUDA.cu
             Math/Autograd/ReluG/ReluGCUDA.cu
+            Math/Autograd/GeluG/GeluGCUDA.cu
             Math/Autograd/BiasAddG/BiasAddGCUDA.cu
             Math/Autograd/SoftmaxCEG/SoftmaxCEGCUDA.cu
             Math/Autograd/SoftmaxG/SoftmaxGCUDA.cu
@@ -466,6 +509,10 @@ elseif (USE_HIP)
             Math/Optimization/Adam/AdamHIP.cpp
             Math/Loss/Mse/MseHIP.cpp
             Math/Loss/MseG/MseGHIP.cpp
+            Math/Loss/Bce/BceHIP.cpp
+            Math/Loss/BceG/BceGHIP.cpp
+            Math/Loss/BceWithLogits/BceWithLogitsHIP.cpp
+            Math/Loss/BceWithLogitsG/BceWithLogitsGHIP.cpp
             Math/Dropout/DropoutHIP.cpp
             Math/Reductions/Sum/SumHIP.cpp
             Math/Reductions/Argmax/ArgmaxHIP.cpp
@@ -475,12 +522,15 @@ elseif (USE_HIP)
             Math/Compare/Equal/EqualHIP.cpp
             Math/LinearAlgebra/BiasAdd/BiasAddHIP.cpp
             Math/Activations/Relu/ReluHIP.cpp
+            Math/Activations/Gelu/GeluHIP.cpp
             Math/Activations/SoftmaxCE/SoftmaxCEHIP.cpp
             Math/Activations/Softmax/SoftmaxHIP.cpp
             Math/Spatial/MaxPool2d/MaxPool2dHIP.cpp
+            Math/Spatial/AvgPool2d/AvgPool2dHIP.cpp
             Math/Spatial/SpatialHipShared.h
             Math/Autograd/GradAcc/GradAccHIP.cpp
             Math/Autograd/ReluG/ReluGHIP.cpp
+            Math/Autograd/GeluG/GeluGHIP.cpp
             Math/Autograd/BiasAddG/BiasAddGHIP.cpp
             Math/Autograd/SoftmaxCEG/SoftmaxCEGHIP.cpp
             Math/Autograd/SoftmaxG/SoftmaxGHIP.cpp
@@ -532,6 +582,14 @@ if(USE_HIP)
             Math/Loss/Mse/MseHIP.cpp
             Math/Loss/MseG/MseGCPU.cpp
             Math/Loss/MseG/MseGHIP.cpp
+            Math/Loss/Bce/BceCPU.cpp
+            Math/Loss/Bce/BceHIP.cpp
+            Math/Loss/BceG/BceGCPU.cpp
+            Math/Loss/BceG/BceGHIP.cpp
+            Math/Loss/BceWithLogits/BceWithLogitsCPU.cpp
+            Math/Loss/BceWithLogits/BceWithLogitsHIP.cpp
+            Math/Loss/BceWithLogitsG/BceWithLogitsGCPU.cpp
+            Math/Loss/BceWithLogitsG/BceWithLogitsGHIP.cpp
             Math/Reductions/Sum/SumCPU.cpp
             Math/Reductions/Sum/SumHIP.cpp
             Math/Reductions/Argmax/ArgmaxCPU.cpp
@@ -553,6 +611,8 @@ if(USE_HIP)
             Math/LinearAlgebra/BiasAdd/BiasAddHIP.cpp
             Math/Activations/Relu/ReluCPU.cpp
             Math/Activations/Relu/ReluHIP.cpp
+            Math/Activations/Gelu/GeluCPU.cpp
+            Math/Activations/Gelu/GeluHIP.cpp
             Math/Activations/SoftmaxCE/SoftmaxCECPU.cpp
             Math/Activations/SoftmaxCE/SoftmaxCEHIP.cpp
             Math/Activations/Softmax/SoftmaxCPU.cpp
@@ -561,10 +621,14 @@ if(USE_HIP)
             Math/LinearAlgebra/BiasAdd/BiasAddAVX512.cpp
             Math/Activations/Relu/ReluAVX2.cpp
             Math/Activations/Relu/ReluAVX512.cpp
+            Math/Activations/Gelu/GeluAVX2.cpp
+            Math/Activations/Gelu/GeluAVX512.cpp
             Math/Autograd/GradAcc/GradAccCPU.cpp
             Math/Autograd/GradAcc/GradAccHIP.cpp
             Math/Autograd/ReluG/ReluGCPU.cpp
             Math/Autograd/ReluG/ReluGHIP.cpp
+            Math/Autograd/GeluG/GeluGCPU.cpp
+            Math/Autograd/GeluG/GeluGHIP.cpp
             Math/Autograd/SigmoidG/SigmoidGCPU.cpp
             Math/Autograd/TanhG/TanhGCPU.cpp
             Math/Autograd/BiasAddG/BiasAddGCPU.cpp
@@ -601,6 +665,7 @@ if(USE_HIP)
             Module/Linear.cpp
             Module/BatchNorm.cpp
             Module/Relu.cpp
+            Module/Gelu.cpp
             Module/Sigmoid.cpp
             Module/Tanh.cpp
             Module/Softmax.cpp
@@ -621,6 +686,10 @@ if(USE_HIP)
             Math/Loss/Loss.cpp
             Math/Loss/Mse/MseCPU.cpp
             Math/Loss/MseG/MseGCPU.cpp
+            Math/Loss/Bce/BceCPU.cpp
+            Math/Loss/BceG/BceGCPU.cpp
+            Math/Loss/BceWithLogits/BceWithLogitsCPU.cpp
+            Math/Loss/BceWithLogitsG/BceWithLogitsGCPU.cpp
             Math/Reductions/Sum/SumCPU.cpp
             Math/Reductions/Sum/SumHIP.cpp
             Math/Reductions/Argmax/ArgmaxCPU.cpp
@@ -638,6 +707,8 @@ if(USE_HIP)
             Math/LinearAlgebra/BiasAdd/BiasAddHIP.cpp
             Math/Activations/Relu/ReluCPU.cpp
             Math/Activations/Relu/ReluHIP.cpp
+            Math/Activations/Gelu/GeluCPU.cpp
+            Math/Activations/Gelu/GeluHIP.cpp
             Math/Activations/SoftmaxCE/SoftmaxCECPU.cpp
             Math/Activations/SoftmaxCE/SoftmaxCEHIP.cpp
             Math/Activations/Softmax/SoftmaxCPU.cpp
@@ -646,6 +717,8 @@ if(USE_HIP)
             Math/Autograd/GradAcc/GradAccHIP.cpp
             Math/Autograd/ReluG/ReluGCPU.cpp
             Math/Autograd/ReluG/ReluGHIP.cpp
+            Math/Autograd/GeluG/GeluGCPU.cpp
+            Math/Autograd/GeluG/GeluGHIP.cpp
             Math/Autograd/SigmoidG/SigmoidGCPU.cpp
             Math/Autograd/TanhG/TanhGCPU.cpp
             Math/Autograd/BiasAddG/BiasAddGCPU.cpp
@@ -671,6 +744,7 @@ if(USE_HIP)
             Module/Linear.cpp
             Module/BatchNorm.cpp
             Module/Relu.cpp
+            Module/Gelu.cpp
             Module/Sigmoid.cpp
             Module/Tanh.cpp
             Module/Softmax.cpp
@@ -730,6 +804,7 @@ if(USE_HIP)
             Math/Reductions/Sum/SumAVX512.cpp
             Math/LinearAlgebra/BiasAdd/BiasAddAVX512.cpp
             Math/Activations/Relu/ReluAVX512.cpp
+            Math/Activations/Gelu/GeluAVX512.cpp
             Math/Activations/Softmax/SoftmaxAVX512.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512dq;-mf16c"
     )
@@ -739,6 +814,7 @@ if(USE_HIP)
             Math/Reductions/Sum/SumAVX2.cpp
             Math/LinearAlgebra/BiasAdd/BiasAddAVX2.cpp
             Math/Activations/Relu/ReluAVX2.cpp
+            Math/Activations/Gelu/GeluAVX2.cpp
             Math/Activations/Softmax/SoftmaxAVX2.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx2;-mfma;-mf16c"
     )
@@ -746,22 +822,26 @@ if(USE_HIP)
     set_source_files_properties(
             Math/Autograd/GradAcc/GradAccAVX512.cpp
             Math/Autograd/ReluG/ReluGAVX512.cpp
+            Math/Autograd/GeluG/GeluGAVX512.cpp
             Math/Autograd/BiasAddG/BiasAddGAVX512.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512dq;-mf16c"
     )
     set_source_files_properties(
             Math/Autograd/GradAcc/GradAccAVX2.cpp
             Math/Autograd/ReluG/ReluGAVX2.cpp
+            Math/Autograd/GeluG/GeluGAVX2.cpp
             Math/Autograd/BiasAddG/BiasAddGAVX2.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx2;-mfma;-mf16c"
     )
     # MaxPool2d AVX kernels: scalar window loops compiled with AVX2/AVX512 flags.
     set_source_files_properties(
             Math/Spatial/MaxPool2d/MaxPool2dAVX512.cpp
+            Math/Spatial/AvgPool2d/AvgPool2dAVX512.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx512f;-mavx512dq;-mf16c"
     )
     set_source_files_properties(
             Math/Spatial/MaxPool2d/MaxPool2dAVX2.cpp
+            Math/Spatial/AvgPool2d/AvgPool2dAVX2.cpp
             PROPERTIES COMPILE_OPTIONS "--offload-arch=native;-mavx2;-mfma;-mf16c"
     )
 else()
@@ -808,6 +888,7 @@ else()
             Math/Reductions/Sum/SumAVX512.cpp
             Math/LinearAlgebra/BiasAdd/BiasAddAVX512.cpp
             Math/Activations/Relu/ReluAVX512.cpp
+            Math/Activations/Gelu/GeluAVX512.cpp
             Math/Activations/Softmax/SoftmaxAVX512.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mf16c"
     )
@@ -816,6 +897,7 @@ else()
             Math/Reductions/Sum/SumAVX2.cpp
             Math/LinearAlgebra/BiasAdd/BiasAddAVX2.cpp
             Math/Activations/Relu/ReluAVX2.cpp
+            Math/Activations/Gelu/GeluAVX2.cpp
             Math/Activations/Softmax/SoftmaxAVX2.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c"
     )
@@ -823,22 +905,26 @@ else()
     set_source_files_properties(
             Math/Autograd/GradAcc/GradAccAVX512.cpp
             Math/Autograd/ReluG/ReluGAVX512.cpp
+            Math/Autograd/GeluG/GeluGAVX512.cpp
             Math/Autograd/BiasAddG/BiasAddGAVX512.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mf16c"
     )
     set_source_files_properties(
             Math/Autograd/GradAcc/GradAccAVX2.cpp
             Math/Autograd/ReluG/ReluGAVX2.cpp
+            Math/Autograd/GeluG/GeluGAVX2.cpp
             Math/Autograd/BiasAddG/BiasAddGAVX2.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c"
     )
     # MaxPool2d AVX kernels: scalar window loops compiled with AVX2/AVX512 flags.
     set_source_files_properties(
             Math/Spatial/MaxPool2d/MaxPool2dAVX512.cpp
+            Math/Spatial/AvgPool2d/AvgPool2dAVX512.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mf16c"
     )
     set_source_files_properties(
             Math/Spatial/MaxPool2d/MaxPool2dAVX2.cpp
+            Math/Spatial/AvgPool2d/AvgPool2dAVX2.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c"
     )
 endif()
@@ -851,6 +937,10 @@ if (USE_CUDA)
             Math/Optimization/Adam/AdamCUDA.cu
             Math/Loss/Mse/MseCUDA.cu
             Math/Loss/MseG/MseGCUDA.cu
+            Math/Loss/Bce/BceCUDA.cu
+            Math/Loss/BceG/BceGCUDA.cu
+            Math/Loss/BceWithLogits/BceWithLogitsCUDA.cu
+            Math/Loss/BceWithLogitsG/BceWithLogitsGCUDA.cu
             Math/Dropout/DropoutCUDA.cu
             Math/Reductions/Sum/SumCUDA.cu
             Math/Reductions/Mean/MeanCUDA.cu
@@ -861,11 +951,14 @@ if (USE_CUDA)
             Math/Compare/Equal/EqualCUDA.cu
             Math/LinearAlgebra/BiasAdd/BiasAddCUDA.cu
             Math/Activations/Relu/ReluCUDA.cu
+            Math/Activations/Gelu/GeluCUDA.cu
             Math/Activations/SoftmaxCE/SoftmaxCECUDA.cu
             Math/Activations/Softmax/SoftmaxCUDA.cu
             Math/Spatial/MaxPool2d/MaxPool2dCUDA.cu
+            Math/Spatial/AvgPool2d/AvgPool2dCUDA.cu
             Math/Autograd/GradAcc/GradAccCUDA.cu
             Math/Autograd/ReluG/ReluGCUDA.cu
+            Math/Autograd/GeluG/GeluGCUDA.cu
             Math/Autograd/BiasAddG/BiasAddGCUDA.cu
             Math/Autograd/SoftmaxCEG/SoftmaxCEGCUDA.cu
             Math/Autograd/SoftmaxG/SoftmaxGCUDA.cu
@@ -1116,6 +1209,24 @@ if(BUILD_TESTING)
     )
     add_test(NAME BeanTensorV5ActivationTests COMMAND BeanTensorV5ActivationTests)
 
+    add_executable(BeanTensorV5GeluTests tests/gelu_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5GeluTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5GeluTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5GeluTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5GeluTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5GeluTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5GeluTests COMMAND BeanTensorV5GeluTests)
+
     add_executable(BeanTensorV5LossAdamTests tests/mse_adam_tests.cpp)
     if(USE_HIP)
         target_compile_definitions(BeanTensorV5LossAdamTests PRIVATE USE_HIP)
@@ -1133,6 +1244,24 @@ if(BUILD_TESTING)
             -mf16c
     )
     add_test(NAME BeanTensorV5LossAdamTests COMMAND BeanTensorV5LossAdamTests)
+
+    add_executable(BeanTensorV5BceTests tests/bce_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5BceTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5BceTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5BceTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5BceTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5BceTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5BceTests COMMAND BeanTensorV5BceTests)
 
     add_executable(BeanTensorV5ModuleTests tests/module_tests.cpp)
     if(USE_HIP)
@@ -1356,6 +1485,24 @@ if(BUILD_TESTING)
             -mf16c
     )
     add_test(NAME BeanTensorV5MaxPool2dTests COMMAND BeanTensorV5MaxPool2dTests)
+
+    add_executable(BeanTensorV5AvgPool2dTests tests/avg_pool2d_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5AvgPool2dTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5AvgPool2dTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5AvgPool2dTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5AvgPool2dTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5AvgPool2dTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5AvgPool2dTests COMMAND BeanTensorV5AvgPool2dTests)
 
     add_executable(BeanTensorV5SerializationTests tests/serialization_tests.cpp)
     if(USE_HIP)

@@ -2,8 +2,8 @@
  * @file Tensor.h
  * @author GreenBean
  * @brief Tensor class declaration: dtype, shape, device and buffer ownership.
- * @version 0.4.15
- * @date 2026-11-06
+ * @version 0.4.18
+ * @date 2026-11-10
  */
 #pragma once
 #define BT_TENSOR_MAX_DIMS 4
@@ -57,6 +57,9 @@ namespace BeanTensor::Tensors::detail {
     void conv2d_g_node_gpu(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
     void batch_norm_cpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&, Tensor&, Tensor&, bool, float64_t, float64_t);
     void batch_norm_gpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&, Tensor&, Tensor&, bool, float64_t, float64_t);
+    void gelu_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+    void gelu_g_cpu(const Tensor&, const Tensor&, const Tensor&);
+    void gelu_g_gpu(const Tensor&, const Tensor&, const Tensor&);
 }
 namespace BeanTensor::Tensors {
 
@@ -1185,6 +1188,63 @@ namespace BeanTensor::Tensors {
         [[nodiscard]] Tensor max_pool2d(uint32_t kernel, uint32_t stride) && = delete;
 
         /**
+         * 2D average pooling over the spatial dimensions of a rank-4 NCHW tensor.
+         * Output shape is {N, C, Hout, Wout} with Hout = floor((H - kernel) / stride) + 1
+         * and Wout = floor((W - kernel) / stride) + 1; no padding. Each output element
+         * is the arithmetic mean of the kernel×kernel input window.
+         * @brief 2D average pooling (square kernel, stride = kernel).
+         * @param kernel Window height and width.
+         * @return New rank-4 tensor of the same dtype/device as this.
+         * @throws ErrorHandling::MismatchedShapes Input is not rank-4, kernel > H/W,
+         *         or kernel == 0.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand, or a half-
+         *         precision GPU operand (the GPU path does not support half dtypes);
+         *         calling backward() with a half gradient dtype on a float32/float64
+         *         GPU result also throws NotImplemented.
+         */
+        [[nodiscard]] Tensor avg_pool2d(uint32_t kernel) const &;
+
+        /**
+         * 2D average pooling over the spatial dimensions of a rank-4 NCHW tensor.
+         * Output shape is {N, C, Hout, Wout} with Hout = floor((H - kernel) / stride) + 1
+         * and Wout = floor((W - kernel) / stride) + 1; no padding. Each output element
+         * is the arithmetic mean of the kernel×kernel input window.
+         * @brief 2D average pooling (square kernel, explicit stride).
+         * @param kernel Window height and width.
+         * @param stride Step between adjacent windows.
+         * @return New rank-4 tensor of the same dtype/device as this.
+         * @throws ErrorHandling::MismatchedShapes Input is not rank-4, kernel > H/W,
+         *         kernel == 0, or stride == 0.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand, or a half-
+         *         precision GPU operand (the GPU path does not support half dtypes);
+         *         calling backward() with a half gradient dtype on a float32/float64
+         *         GPU result also throws NotImplemented.
+         */
+        [[nodiscard]] Tensor avg_pool2d(uint32_t kernel, uint32_t stride) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor avg_pool2d(uint32_t kernel) && = delete;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor avg_pool2d(uint32_t kernel, uint32_t stride) && = delete;
+
+        /**
          * Numerically-stable last-axis softmax over the class dimension: this
          * must be rank-2 (rows x classes). Returns a tensor of the same
          * shape/dtype/device where each row sums to 1. Computed as
@@ -1294,6 +1354,72 @@ namespace BeanTensor::Tensors {
          * `auto h = x.conv2d(w); auto y = h.relu();`
          */
         [[nodiscard]] Tensor mse(const Tensor&) && = delete;
+
+        /**
+         * Binary cross-entropy loss (probability form), rank-agnostic: out =
+         * mean of -y*log(p̂) - (1-y)*log(1-p̂) over ALL elements, where p̂ =
+         * clamp(p, eps, 1-eps). For fp32-compute dtypes (fp32 and the widened
+         * fp16/bf16/packed paths) eps = 1e-7; for fp64 eps = 1e-15. The same
+         * clamped p̂ is used in backward, so the two contracts agree by
+         * construction. this and target must have identical shapes and dtypes,
+         * share a device, and be contiguous (a loss does not broadcast). Target
+         * values must be finite and in [0, 1]; integer storage is rejected.
+         * Blocks before returning. When this tensor has requires_grad=true the
+         * output joins the computation graph (bce_g backward); targets never
+         * receive a gradient. A callable free-function form lives at
+         * BeanTensor::Loss::bce (Math/Loss/Loss.h).
+         * @brief Binary cross-entropy (probability form).
+         * @throws ErrorHandling::MismatchedShapes Shapes differ, or a tensor is empty.
+         * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
+         * @throws ErrorHandling::MismatchedDevices Operand devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand or integer storage.
+         * @throws ErrorHandling::InvalidProbability Target is non-finite or outside [0, 1].
+         */
+        [[nodiscard]] Tensor bce(const Tensor&) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor bce(const Tensor&) && = delete;
+
+        /**
+         * Binary cross-entropy with logits (numerically stable logit form),
+         * rank-agnostic: out = mean of max(x, 0) - x*y + log1p(exp(-|x|))
+         * over ALL elements. This is NOT implemented as sigmoid followed by
+         * probability-BCE; the stable form avoids overflow. At infinite logits
+         * the formula produces NaN in the (x=+Inf, y=1) and (x=-Inf, y=0)
+         * cases, matching PyTorch. this and target must have identical shapes
+         * and dtypes, share a device, and be contiguous. Target values must be
+         * finite and in [0, 1]; integer storage is rejected. Blocks before
+         * returning. When this tensor has requires_grad=true the output joins
+         * the computation graph (bce_with_logits_g backward); targets never
+         * receive a gradient. A callable free-function form lives at
+         * BeanTensor::Loss::bce_with_logits (Math/Loss/Loss.h).
+         * @brief Binary cross-entropy with logits (stable form).
+         * @throws ErrorHandling::MismatchedShapes Shapes differ, or a tensor is empty.
+         * @throws ErrorHandling::MismatchedDTypes Operand dtypes differ.
+         * @throws ErrorHandling::MismatchedDevices Operand devices differ.
+         * @throws ErrorHandling::NotImplemented Non-contiguous operand or integer storage.
+         * @throws ErrorHandling::InvalidProbability Target is non-finite or outside [0, 1].
+         */
+        [[nodiscard]] Tensor bce_with_logits(const Tensor&) const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor bce_with_logits(const Tensor&) && = delete;
 
         /**
          * Broadcasting semantics (identical for add/sub/mul/div/pow): the two
@@ -1645,6 +1771,29 @@ namespace BeanTensor::Tensors {
          * `auto h = x.conv2d(w); auto y = h.relu();`
          */
         [[nodiscard]] Tensor tanh() && = delete;
+
+        /**
+         * Float kinds only — integer GELU throws ErrorHandling::NotImplemented.
+         * fp16/bf16 (and packed lanes) widen to fp32, compute
+         * 0.5*x*(1+erf(x/sqrt(2))), narrow RNE; fp32/fp64 compute in their
+         * storage width.  Large positive inputs saturate to x, large negative
+         * inputs saturate to 0; gelu(-Inf) == 0 and gelu(+Inf) == +Inf.
+         * @brief Elementwise Gaussian error linear unit.
+         * @return New tensor, same shape/dtype/device as this.
+         * @throws ErrorHandling::NotImplemented Non-contiguous tensor, or integer dtype.
+         */
+        [[nodiscard]] Tensor gelu() const &;
+
+        /**
+         * Deleted rvalue overload: graph-building ops must be called on
+         * NAMED tensors, because the output's autograd node holds raw
+         * pointers to its inputs, which must outlive backward(). Chaining
+         * on a temporary (`x.conv2d(w).relu()`) would dangle the moment
+         * the full expression ends — a compile error beats silent
+         * corruption. Name the intermediate instead:
+         * `auto h = x.conv2d(w); auto y = h.relu();`
+         */
+        [[nodiscard]] Tensor gelu() && = delete;
 
         /**
          * Bounds-checked strided element access. T must be a type with a
@@ -2129,12 +2278,20 @@ namespace BeanTensor::Tensors {
         friend void detail::bias_add_gpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::relu_cpu(const Tensor&, const Tensor&);
         friend void detail::relu_gpu(const Tensor&, const Tensor&);
+        friend void detail::gelu_cpu(const Tensor&, const Tensor&);
+        friend void detail::gelu_gpu(const Tensor&, const Tensor&);
         friend void detail::max_pool2d_cpu(const Tensor&, Tensor&, uint32_t, uint32_t);
         friend void detail::max_pool2d_gpu(const Tensor&, Tensor&, uint32_t, uint32_t);
         friend void detail::max_pool2d_g_cpu(const Tensor&, const Tensor&, Tensor&, uint32_t, uint32_t);
         friend void detail::max_pool2d_g_gpu(const Tensor&, const Tensor&, Tensor&, uint32_t, uint32_t);
         friend void detail::max_pool2d_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::max_pool2d_g_bridge(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::avg_pool2d_cpu(const Tensor&, Tensor&, uint32_t, uint32_t);
+        friend void detail::avg_pool2d_gpu(const Tensor&, Tensor&, uint32_t, uint32_t);
+        friend void detail::avg_pool2d_g_cpu(const Tensor&, Tensor&, uint32_t, uint32_t);
+        friend void detail::avg_pool2d_g_gpu(const Tensor&, Tensor&, uint32_t, uint32_t);
+        friend void detail::avg_pool2d_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::avg_pool2d_g_bridge(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::softmax_cpu(const Tensor&, Tensor&);
         friend void detail::softmax_gpu(const Tensor&, const Tensor&);
         friend void detail::softmax_g_cpu(const Tensor&, const Tensor&, Tensor&);
@@ -2143,11 +2300,16 @@ namespace BeanTensor::Tensors {
         friend void detail::softmax_ce_gpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::mse_cpu(const Tensor&, const Tensor&, Tensor&);
         friend void detail::mse_gpu(const Tensor&, const Tensor&, const Tensor&);
+        friend void detail::bce_cpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::bce_gpu(const Tensor&, const Tensor&, const Tensor&);
+        friend void detail::bce_with_logits_cpu(const Tensor&, const Tensor&, Tensor&);
+        friend void detail::bce_with_logits_gpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::gemm_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::bias_add_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::sum_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::mean_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::relu_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::gelu_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::sigmoid_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::tanh_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::softmax_g_node(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
@@ -2155,6 +2317,8 @@ namespace BeanTensor::Tensors {
         friend void detail::flatten_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::softmax_ce_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::mse_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::bce_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::bce_with_logits_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::ew_binary_g_node_impl(Node*, Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseOp);
         friend void detail::ew_scalar_g_node_impl(Node*, Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseOp);
         friend void detail::ew_unary_g_node_impl(Node*, Tensor*, Tensor**, size_t, DataTypes::DType, ElementwiseUnaryOp);
@@ -2168,6 +2332,8 @@ namespace BeanTensor::Tensors {
         friend void detail::transpose_last2_gpu(const Tensor&, const Tensor&);
         friend void detail::relu_g_cpu(const Tensor&, const Tensor&, const Tensor&);
         friend void detail::relu_g_gpu(const Tensor&, const Tensor&, const Tensor&);
+        friend void detail::gelu_g_cpu(const Tensor&, const Tensor&, const Tensor&);
+        friend void detail::gelu_g_gpu(const Tensor&, const Tensor&, const Tensor&);
 
         friend void detail::bias_add_g_cpu(const Tensor&, Tensor&);
         friend void detail::bias_add_g_gpu(const Tensor&, const Tensor&);
@@ -2175,6 +2341,10 @@ namespace BeanTensor::Tensors {
         friend void detail::softmax_ce_g_gpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&);
         friend void detail::mse_g_cpu(const Tensor&, const Tensor&, const Tensor&, Tensor&);
         friend void detail::mse_g_gpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&);
+        friend void detail::bce_g_cpu(const Tensor&, const Tensor&, const Tensor&, Tensor&);
+        friend void detail::bce_g_gpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&);
+        friend void detail::bce_with_logits_g_cpu(const Tensor&, const Tensor&, const Tensor&, Tensor&);
+        friend void detail::bce_with_logits_g_gpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&);
         friend void detail::index_select_cpu(const Tensor&, const Tensor&, const Tensor&, size_t);
         friend void detail::index_select_gpu(const Tensor&, const Tensor&, const Tensor&, size_t);
         friend void detail::gather_cpu(const Tensor&, const Tensor&, const Tensor&, size_t);

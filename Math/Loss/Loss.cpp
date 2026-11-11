@@ -5,7 +5,7 @@
  * own TU (like the Tensor method definitions live in the per-op CPU backends)
  * so Math/Loss/Loss.h only needs a forward declaration of Tensor and stays
  * includable from Tensor.h.
- * @version 0.1
+ * @version 0.2
  * @date 2026-10-23
  */
 #include "Math/Loss/Loss.h"
@@ -24,4 +24,27 @@ namespace BeanTensor::Loss {
      */
     Tensors::Tensor mse(const Tensors::Tensor& pred, const Tensors::Tensor& target) {
         return pred.mse(target);
-    }}
+    }
+
+    /**
+     * Thin forwarder to the Tensor method; the whole contract lives there.
+     * @brief Binary cross-entropy (probability form, free function).
+     * @param pred Predictions; the only operand that can receive a gradient.
+     * @param target Targets; never receive a gradient.
+     * @return Shape-{1} tensor holding the mean loss, in pred's dtype/device.
+     */
+    Tensors::Tensor bce(const Tensors::Tensor& pred, const Tensors::Tensor& target) {
+        return pred.bce(target);
+    }
+
+    /**
+     * Thin forwarder to the Tensor method; the whole contract lives there.
+     * @brief Binary cross-entropy with logits (free function).
+     * @param logits Logits; the only operand that can receive a gradient.
+     * @param target Targets; never receive a gradient.
+     * @return Shape-{1} tensor holding the mean loss, in logits's dtype/device.
+     */
+    Tensors::Tensor bce_with_logits(const Tensors::Tensor& logits, const Tensors::Tensor& target) {
+        return logits.bce_with_logits(target);
+    }
+}

@@ -135,7 +135,7 @@ errors on the destination.
 ## Autograd
 
 `matmul`, `bias_add`, `relu`, `softmax_ce`, and the elementwise
-add/sub/mul/div/pow, exp/log, `sum`, `mean`, and `mse` ops attach a graph node
+add/sub/mul/div/pow, exp/log, `sum`, `mean`, `mse`, `bce`, and `bce_with_logits` ops attach a graph node
 to their output whenever any input has `requires_grad=true`. You run
 backpropagation by calling `backward(grad_dtype)` on a scalar or shape-{1} loss
 tensor.
@@ -152,6 +152,16 @@ start of each call.
 Graph parents are stored as raw pointers. You must keep every tensor that
 participates in the graph alive until `backward()` returns. Destroying a parent
 early leaves dangling pointers and undefined behavior.
+
+## Binary cross-entropy
+
+`Tensor::bce(target)` is the probability-form BCE: `mean(-y*log(p̂) - (1-y)*log(1-p̂))`, where `p̂ = clamp(p, eps, 1-eps)`. `Tensor::bce_with_logits(target)` is the numerically stable logit form: `mean(max(x, 0) - x*y + log1p(exp(-|x|)))`. Both return a shape-{1} tensor in the prediction/logit dtype and block before returning. Both forms attach a graph node when the prediction/logit tensor has `requires_grad=true`; targets never receive a gradient.
+
+Validation contract: operands must share shape, dtype, and device; both must be contiguous; integer storage is rejected (`NotImplemented`). Targets must be finite and lie in `[0, 1]`; otherwise `ErrorHandling::InvalidProbability` is thrown. Empty tensors and non-broadcastable shape mismatches raise `MismatchedShapes`.
+
+Clamp contract: for fp32-compute dtypes (fp32, and the widened fp16/bf16/packed paths) `eps = 1e-7`; for fp64 `eps = 1e-15`. Forward and backward use the same clamped `p̂`, so the gradient denominators match the forward loss exactly. The logit form is implemented directly in log-space; it is never `sigmoid` followed by probability-BCE, so overflow cannot reappear.
+
+Non-finite logit behavior: the stable formula is evaluated exactly as written. At `x = +Inf` with `y = 1` it evaluates `Inf - Inf = NaN`; at `x = -Inf` with `y = 0` the product `-Inf * 0` is also `NaN`, so the loss is `NaN`. At `x = +Inf` with `y = 0` the product `Inf * 0` is `NaN`, so the loss is `NaN`. At `x = -Inf` with `y = 1` the `-x*y` term yields `+Inf` and the loss is `+Inf`. This is formula-exact and matches PyTorch. Callers must ensure logits are finite if a finite loss is required.
 
 ## Modules
 
@@ -195,6 +205,42 @@ nodes during the forward pass, though no `backward()` is called. The repository'
 `main.cpp` uses DataLoader for both training and test splits and calls
 `Metrics::evaluate` after each training epoch to report test accuracy and loss.
 
+## GELU activation
+
+`Tensor::gelu()` computes the Gaussian Error Linear Unit exactly as
+`0.5 * x * (1 + erf(x / sqrt(2)))`. The scalar CPU path and the CUDA/HIP
+kernels evaluate `erf` through the standard library or device math library
+respectively.
+
+The AVX2 and AVX-512 paths are width-dependent:
+
+- `float32_t` SIMD uses the Abramowitz & Stegun 7.1.26 polynomial approximation
+  of `erf` with a lane-wise `exp` inside vector load/store loops. Forward and
+  backward results match the scalar `std::erf` reference to within the
+  polynomial's absolute-error bound (`~1.5e-7`); the regression suite asserts
+  `5e-7`.
+- `float64_t` SIMD falls back to scalar `std::erf` per lane inside the vector
+  loop, so forward and backward are bit-exact against the scalar reference on
+  AVX2 and AVX-512.
+
+For large magnitudes every tier clamps to the asymptotic value (`x` for
+positive inputs, `0` for negative inputs). Cutoffs are `5.7f` for `float32_t`
+and `9.0` for `float64_t`. The non-finite contract is `NaN -> NaN`,
+`+Inf -> +Inf`, `-Inf -> 0`; the backward contract is `deriv(+Inf) = 1`,
+`deriv(-Inf) = 0`, `deriv(NaN) = NaN`.
+
+`gelu` is defined for floating-point dtypes (`Float16`, `Float16x2`,
+`BFloat16`, `BFloat16x2`, `Float32`, and `Float64`); reduced-precision lanes
+are compared against the `std::erf` reference at `5e-3`. Integer inputs raise
+`ErrorHandling::NotImplemented`. Non-contiguous inputs also raise
+`NotImplemented` because the activation is implemented as a single 1-D parallel
+loop over contiguous elements.
+
+The matching autograd node computes
+`dx = dy * (0.5 * (1 + erf(x / sqrt(2))) + x * exp(-0.5 * x^2) / sqrt(2*pi))`,
+using the same piecewise branches as forward so gradient and forward stay
+consistent on every backend.
+
 ## Scope
 
 Decisions binding the MVP, recorded 2026-10-27, updated 2026-10-28 for the
@@ -214,9 +260,33 @@ landed layer set:
 - The Task 6 acceptance model is a single MLP — 784 → hidden → 10 for MNIST.
   Convolutions are available for non-MLP models but are not part of that
   acceptance run.
-- The layer set shipped for the MVP now includes `Linear`, `ReLU`, `Sigmoid`,
-  `Tanh`, `Softmax`, `Flatten`, `Dropout`, `Conv2d`, and `MaxPool2d`, each with
-  CPU (scalar + AVX2 + AVX-512), CUDA, and HIP paths where applicable, plus
-  matching autograd nodes. `Conv2d` is implemented as im2col + GEMM with a
+- The layer set shipped for the MVP now includes `Linear`, `ReLU`, `GELU`,
+  `Sigmoid`, `Tanh`, `Softmax`, `Flatten`, `Dropout`, `Conv2d`, `MaxPool2d`, and
+  `AvgPool2d`, each with CPU (scalar + AVX2 + AVX-512), CUDA, and HIP paths where applicable,
+  plus matching autograd nodes. `Conv2d` is implemented as im2col + GEMM with a
   scatter epilogue writing NCHW directly, an owner-pinned `Conv2dG` backward,
   He fan-in initialization, and CPU/CUDA/HIP backends.
+
+## AvgPool2d
+
+`Tensor::avg_pool2d(kernel)` and `Tensor::avg_pool2d(kernel, stride)` perform 2D
+average pooling on rank-4 NCHW tensors. The output spatial size is
+`floor((H - kernel) / stride) + 1` with no padding; the one-argument overload sets
+`stride = kernel`. Each output element is the arithmetic mean of the
+`kernel × kernel` input window.
+
+Dtype and accumulation policy mirrors `Tensor::mean`. Floating-point dtypes sum in
+their storage width and divide by `kernel²` in that width. `Float16`/`BFloat16`
+and the packed `Float16x2`/`BFloat16x2` dtypes widen each lane to `Float32`, sum,
+divide, and narrow RNE back to storage. Integer dtypes sum in `Float64`, then
+truncate toward zero and clamp to the dtype range (NaN stores 0). `Int4x2` sums
+per nibble in `Float32` and clamps to the signed nibble range `[-8, 7]`.
+
+Backward scatters `dy / (kernel²)` to every element of the source window;
+overlapping windows accumulate all contributions. CPU backward serializes to a
+single-threaded read-modify-write loop when `stride < kernel` so the accumulation
+order is deterministic, and supports all floating dtypes including `Float16` and
+`BFloat16`. GPU backward uses atomic adds in output-major order and is currently
+implemented only for `Float32` and `Float64`; calling `backward()` with a half
+gradient dtype on a float32/float64 GPU result also throws `ErrorHandling::NotImplemented`
+(the GPU forward path does not support half dtypes at all).

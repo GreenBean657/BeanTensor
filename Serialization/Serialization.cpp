@@ -5,8 +5,8 @@
  * little-endian field I/O, the recursive spec record, the CRC32 checksum, the
  * dtype tag table, the registry-ordered tensor stream, and the layer factory
  * table used at load time.
- * @version 0.1
- * @date 2026-11-05
+ * @version 0.2
+ * @date 2026-11-10
  */
 #include "Serialization/Serialization.h"
 
@@ -20,10 +20,12 @@
 #include <vector>
 
 #include "Helpers/Errors.h"
+#include "Module/AvgPool2d.h"
 #include "Module/BatchNorm.h"
 #include "Module/Conv2d.h"
 #include "Module/Dropout.h"
 #include "Module/Flatten.h"
+#include "Module/Gelu.h"
 #include "Module/Linear.h"
 #include "Module/MaxPool2d.h"
 #include "Module/Relu.h"
@@ -389,6 +391,9 @@ namespace BeanTensor::Serialization {
                 t.emplace("MaxPool2d", [](const Modules::ModuleSpec& s, const DataTypes::DType, const Tensors::Device) {
                     return Modules::MaxPool2d::construct(s, DataTypes::DType::Float32, Tensors::Device::CPU);
                 });
+                t.emplace("AvgPool2d", [](const Modules::ModuleSpec& s, const DataTypes::DType, const Tensors::Device) {
+                    return Modules::AvgPool2d::construct(s, DataTypes::DType::Float32, Tensors::Device::CPU);
+                });
                 t.emplace("Dropout", [](const Modules::ModuleSpec& s, const DataTypes::DType, const Tensors::Device) {
                     return Modules::Dropout::construct(s, DataTypes::DType::Float32, Tensors::Device::CPU);
                 });
@@ -400,6 +405,9 @@ namespace BeanTensor::Serialization {
                 });
                 t.emplace("Tanh", [](const Modules::ModuleSpec&, const DataTypes::DType, const Tensors::Device) {
                     return std::make_unique<Modules::Tanh>();
+                });
+                t.emplace("Gelu", [](const Modules::ModuleSpec&, const DataTypes::DType, const Tensors::Device) {
+                    return std::make_unique<Modules::Gelu>();
                 });
                 t.emplace("Softmax", [](const Modules::ModuleSpec&, const DataTypes::DType, const Tensors::Device) {
                     return std::make_unique<Modules::Softmax>();

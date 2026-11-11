@@ -94,8 +94,10 @@ namespace BeanTensor::Serialization {
         size_t i = 0;
         bool ended = false;
         while (i < n && !ended) {
-            const auto token = src[i++];
-            if (token == 0x00) {
+            if (
+                const auto token = src[i++];
+                token == 0x00
+                ) {
                 if (i >= n) {
                     throw ErrorHandling::CorruptFile("lz stream: truncated literal run");
                 }
