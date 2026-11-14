@@ -13,6 +13,7 @@
  * @date 2026-11-14
  */
 #include <atomic>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -21,6 +22,8 @@
 #include <vector>
 
 #include "Helpers/OOMPolicy.h"
+#include "Module/Linear.h"
+#include "Serialization/Serialization.h"
 #include "Tensor/Tensor.h"
 
 namespace eh = BeanTensor::ErrorHandling;
@@ -33,6 +36,8 @@ using BeanTensor::Tensors::Device;
 using BeanTensor::Tensors::Tensor;
 using BeanTensor::Tensors::detail::classify_transfer_failure;
 using BeanTensor::float32_t;
+using BeanTensor::Modules::Linear;
+namespace ser = BeanTensor::Serialization;
 
 static int32_t failures = 0;
 #define CHECK(...) do { \
@@ -285,6 +290,147 @@ static void test_log_concurrent_storm() {
     CHECK(launched.load() == k_threads);
 }
 
+static bool bit_same32(const float32_t a, const float32_t b) {
+    auto ua = uint32_t{0};
+    auto ub = uint32_t{0};
+    std::memcpy(&ua, &a, sizeof ua);
+    std::memcpy(&ub, &b, sizeof ub);
+    return ua == ub;
+}
+
+static bool params_bit_equal(BeanTensor::Modules::Module& a, BeanTensor::Modules::Module& b) {
+    const auto pa = a.named_parameters();
+    const auto pb = b.named_parameters();
+    if (pa.size() != pb.size()) {
+        return false;
+    }
+    for (auto k = size_t{0}; k < pa.size(); ++k) {
+        if (pa[k].first != pb[k].first) {
+            return false;
+        }
+        auto* x = pa[k].second;
+        auto* y = pb[k].second;
+        if (x->rank() != y->rank() || x->get_device() != y->get_device()) {
+            return false;
+        }
+        for (auto d = size_t{0}; d < x->rank(); ++d) {
+            if (x->dim(d) != y->dim(d)) {
+                return false;
+            }
+        }
+        if (x->rank() == 2) {
+            for (auto i = size_t{0}; i < x->dim(0); ++i) {
+                for (auto j = size_t{0}; j < x->dim(1); ++j) {
+                    if (!bit_same32(x->at<float32_t>({i, j}), y->at<float32_t>({i, j}))) {
+                        return false;
+                    }
+                }
+            }
+        } else {
+            for (auto i = size_t{0}; i < x->element_count(); ++i) {
+                if (!bit_same32(x->at<float32_t>({i}), y->at<float32_t>({i}))) {
+                    return false;
+                }
+            }
+        }
+        const auto ca = x->adam_step_count();
+        const auto cb = y->adam_step_count();
+        if (ca.has_value() != cb.has_value()) {
+            return false;
+        }
+        if (ca.has_value() && ca.value() != cb.value()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static float32_t train_step(BeanTensor::Modules::Module& model, const Tensor& xs, const Tensor& ys) {
+    model.zero_grad();
+    auto logits = model.forward(xs);
+    auto loss = logits.mse(ys);
+    loss.backward(DType::Float32);
+    const auto loss_value = loss.at<float32_t>({0});
+    model.adam_step(0.05, 0.9, 0.999, 1e-8);
+    return loss_value;
+}
+
+static void test_checkpoint_mode_full_checkpoint_resumes_bit_reproducibly() {
+    reset_policy();
+
+    auto model = Linear(size_t{4}, size_t{3}, DType::Float32, Device::CPU);
+    model.train();
+    auto init_idx = size_t{0};
+    for (auto& entry : model.named_parameters()) {
+        auto* p = entry.second;
+        if (p->rank() == 2) {
+            for (auto i = size_t{0}; i < p->dim(0); ++i) {
+                for (auto j = size_t{0}; j < p->dim(1); ++j) {
+                    p->set<float32_t>({i, j}, 0.05f * static_cast<float32_t>(init_idx) - 0.3f);
+                    ++init_idx;
+                }
+            }
+        } else {
+            for (auto i = size_t{0}; i < p->element_count(); ++i) {
+                p->set<float32_t>({i}, 0.05f * static_cast<float32_t>(init_idx) - 0.3f);
+                ++init_idx;
+            }
+        }
+    }
+
+    auto xs = Tensor({1, 4}, DType::Float32, Device::CPU, false);
+    auto ys = Tensor({1, 3}, DType::Float32, Device::CPU, false);
+    for (auto j = size_t{0}; j < 4; ++j) {
+        xs.set<float32_t>({0, j}, 0.25f * static_cast<float32_t>(j) - 0.2f);
+    }
+    for (auto j = size_t{0}; j < 3; ++j) {
+        ys.set<float32_t>({0, j}, 0.4f * static_cast<float32_t>(j) - 0.3f);
+    }
+
+    // Two real training steps so parameters, gradients, Adam moments, and the
+    // step counter are all non-trivial in the checkpoint.
+    train_step(model, xs, ys);
+    train_step(model, xs, ys);
+
+    // A decoy stands in for the last usable recovery file: the hook must
+    // replace it via temp-file + rename, never write in place.
+    const auto dest = scratch_path("oom_full_checkpoint.bt");
+    const auto tmp = scratch_path("oom_full_checkpoint.bt.tmp");
+    {
+        auto decoy = std::ofstream(dest.string());
+        decoy << "stale";
+    }
+    auto hook_called = false;
+    auto config = OOMPolicyConfig{};
+    config.mode = OOMPolicyMode::CheckpointAndThrow;
+    config.checkpoint_destination = dest.string();
+    config.checkpoint_hook = [&](const std::exception&) {
+        ser::save(model, tmp.string(), true, ser::CheckpointLevel::Full);
+        std::filesystem::rename(tmp, dest);
+        hook_called = true;
+    };
+    OOMPolicy::instance().configure(config);
+
+    const auto classification = classify_transfer_failure(Device::CPU, Device::GPU, false);
+    const auto x = Tensor({4}, DType::Float32, Device::CPU);
+    const eh::OutOfMemory oom;
+    const auto action = OOMPolicy::instance().handle_transfer_failure(classification, oom, x, Device::GPU);
+    CHECK(action == OOMPolicyAction::Rethrow);
+    CHECK(hook_called);
+    CHECK(!std::filesystem::exists(tmp));
+    CHECK(std::filesystem::exists(dest));
+
+    auto loaded = ser::load(dest.string(), Device::CPU);
+    CHECK(params_bit_equal(model, *loaded));
+
+    // Both models take the same next step: losses and resulting parameters
+    // must agree bitwise, proving the Full checkpoint resumes bit-reproducibly.
+    const auto loss_orig = train_step(model, xs, ys);
+    const auto loss_resumed = train_step(*loaded, xs, ys);
+    CHECK(bit_same32(loss_orig, loss_resumed));
+    CHECK(params_bit_equal(model, *loaded));
+}
+
 #if defined(USE_CUDA) || defined(USE_HIP)
 static void test_h2d_alloc_failure_fallback_to_cpu() {
     reset_policy();
@@ -387,6 +533,7 @@ int main() {
     test_h2d_fallback_swallows_eligible();
     test_fallback_meaningless_rethrows();
     test_checkpoint_mode_calls_hook_and_rethrows();
+    test_checkpoint_mode_full_checkpoint_resumes_bit_reproducibly();
     test_compute_fallback_fake_boundary();
     test_logging_failure_does_not_mask();
     test_log_appends_multiple_failures();
