@@ -2,7 +2,7 @@
  * @file Tensor.cpp
  * @author GreenBean
  * @brief Tensor definitions: allocation, fills (incl. pool-chunked set_zero), dtype guards, conversion, transfer, printing and cloning.
- * @version 0.5
+ * @version 0.6
  * @date 2026-10-25
  */
 #include "Tensor.h"
@@ -13,10 +13,15 @@
 #include <sstream>
 #include <unordered_map>
 
+#if defined(BEANTENSOR_TEST_FAULT_INJECTION)
+#include <atomic>
+#endif
+
 #include "Helpers/Alloc.h"
 #include "Helpers/CPUThreading.h"
 #include "Helpers/Errors.h"
 #include "Helpers/Hardware.h"
+#include "Helpers/OOMPolicy.h"
 #include "Intrinsics/Dispatcher.h"
 #include "Intrinsics/Native/DTypeConversions.h"
 #include "Random/Generator.h"
@@ -277,6 +282,64 @@ namespace BeanTensor::Tensors::detail {
 }
 
 namespace BeanTensor::Tensors {
+    namespace detail {
+        TransferFailureClassification classify_transfer_failure(const Device source, const Device target, const bool temp_allocated) {
+            auto classification = TransferFailureClassification{};
+            classification.alloc_failed_pre_change = !temp_allocated;
+            classification.copy_failed_with_temp = temp_allocated;
+            if (source == Device::CPU && target == Device::GPU) {
+                classification.h2d_fallback_eligible = true;
+            } else if (source == Device::GPU && target == Device::CPU) {
+                classification.fallback_meaningless = true;
+            }
+            return classification;
+        }
+
+#if defined(BEANTENSOR_TEST_FAULT_INJECTION)
+        std::atomic<int64_t> TransferFaultInjection::alloc_fail_after_n{0};
+        std::atomic<int64_t> TransferFaultInjection::copy_fail_after_n{0};
+        std::atomic<bool> TransferFaultInjection::force_alloc_fail{false};
+        std::atomic<bool> TransferFaultInjection::force_copy_fail{false};
+
+        void TransferFaultInjection::reset() noexcept {
+            alloc_fail_after_n.store(0);
+            copy_fail_after_n.store(0);
+            force_alloc_fail.store(false);
+            force_copy_fail.store(false);
+        }
+
+        void TransferFaultInjection::maybe_trigger_alloc_failure() {
+            if (force_alloc_fail.exchange(false)) {
+                throw ErrorHandling::OutOfMemory();
+            }
+            auto n = alloc_fail_after_n.load(std::memory_order_relaxed);
+            while (n > 0) {
+                if (alloc_fail_after_n.compare_exchange_weak(n, n - 1, std::memory_order_relaxed)) {
+                    if (n == 1) {
+                        throw ErrorHandling::OutOfMemory();
+                    }
+                    return;
+                }
+            }
+        }
+
+        void TransferFaultInjection::maybe_trigger_copy_failure() {
+            if (force_copy_fail.exchange(false)) {
+                throw ErrorHandling::GPUError("injected transfer copy failure");
+            }
+            auto n = copy_fail_after_n.load(std::memory_order_relaxed);
+            while (n > 0) {
+                if (copy_fail_after_n.compare_exchange_weak(n, n - 1, std::memory_order_relaxed)) {
+                    if (n == 1) {
+                        throw ErrorHandling::GPUError("injected transfer copy failure");
+                    }
+                    return;
+                }
+            }
+        }
+#endif
+    }
+
     /**
      * Clone this tensor. Autograd state is NOT copied: the clone keeps
      * requires_grad but gets no grad, node, or parents (it is a fresh leaf).
@@ -329,28 +392,189 @@ namespace BeanTensor::Tensors {
     /**
      * Move this tensor (and its accumulated gradient, if any) to new_device.
      * Blocking: returns only once the copy has landed and the device flag
-     * has flipped. The move workers rewrite data/device and capture this
-     * tensor by reference, so an op validating devices (or a move of this
-     * tensor) right after an async to() would race them.
+     * has flipped. The transfer is failure-atomic: validate, hand off views,
+     * allocate the destination, copy, and commit. The source data pointer,
+     * offset, and device are untouched until allocation and copy both succeed,
+     * so an OOM or copy error leaves the source fully usable and retryable.
      * @param new_device Destination device.
+     * @throws ErrorHandling::OutOfMemory CPU-side destination allocation failed.
+     * @throws ErrorHandling::GPUOutOfMemory GPU-side destination allocation failed
+     *         (a GPUError subclass).
+     * @throws ErrorHandling::GPUError A GPU copy or device operation failed.
      * @throws ErrorHandling::NotImplemented Unsupported device pair.
+     * @throws ErrorHandling::GPUTaskOnCPUBuild GPU requested on a CPU-only build.
      */
     void Tensor::to(const Device& new_device) {
-        if (this->device == new_device) return;
         sync();
-        if (this->device == Device::CPU && new_device == Device::GPU) {
-            detail::move_to_gpu(*this);
-        } else if (this->device == Device::GPU && new_device == Device::CPU) {
-            detail::move_to_cpu(*this);
-        } else [[unlikely]] {
-            throw ErrorHandling::NotImplemented();
-        }
-        sync(); // surfaces move errors here, not at an unrelated later sync()
+        atomic_transfer_to(new_device);
+        sync(); // surfaces any async transfer error before returning
         // The accumulated gradient rides along — a grad stranded on the old
-        // device would break the next backward()'s device checks.
+        // device would break the next backward()'s device checks. This is
+        // recursive even when the data buffer is already on new_device, so a
+        // retry after a partial failure (data moved, grad not) completes the
+        // gradient move.
         if (this->grad != nullptr) {
             this->grad->to(new_device);
         }
+    }
+
+    /**
+     * Failure-atomic implementation of Tensor::to. Performs validate →
+     * allocate destination → copy → hand-off views → commit. The source
+     * data pointer, offset, and device are unchanged until the copy
+     * succeeds; a failure therefore leaves the source tensor usable and
+     * retryable. Views become owned contiguous copies on the destination.
+     * @param new_device Destination device.
+     * @throws ErrorHandling::OutOfMemory CPU-side destination allocation failed.
+     * @throws ErrorHandling::GPUOutOfMemory GPU-side destination allocation failed
+     *         (a GPUError subclass).
+     * @throws ErrorHandling::GPUError A GPU copy or device operation failed.
+     * @throws ErrorHandling::GPUTaskOnCPUBuild GPU requested on a CPU-only build.
+     */
+    void Tensor::atomic_transfer_to(const Device new_device) {
+        if (this->device == new_device) {
+            return;
+        }
+        if (new_device != Device::CPU && new_device != Device::GPU) [[unlikely]] {
+            throw ErrorHandling::NotImplemented();
+        }
+        sync();
+
+        // Non-contiguous views would require a strided materialization before
+        // the transfer; reject them loudly before any topology or buffer
+        // mutation so the source view remains fully usable.
+        if (!this->owns_data && !this->is_contiguous) [[unlikely]] {
+            throw ErrorHandling::NotImplemented();
+        }
+
+        // Drop the scratch buffer only. The data pointer and view links stay
+        // intact until the destination allocation and copy have succeeded.
+        kill_buffer();
+
+#if defined(USE_CUDA) || defined(USE_HIP)
+        const auto elem_bytes = DataTypes::dtype_bytes(this->dtype);
+        const auto src_offset_bytes = this->offset * elem_bytes;
+        const auto* const src = static_cast<const uint8_t*>(this->data) + src_offset_bytes;
+        void* dst = nullptr;
+#endif
+
+        if (this->device == Device::CPU && new_device == Device::GPU) {
+#if !defined(USE_CUDA) && !defined(USE_HIP)
+            throw ErrorHandling::GPUTaskOnCPUBuild();
+#else
+            bool temp_allocated = false;
+            try {
+                if (this->nbytes != 0) {
+#if defined(BEANTENSOR_TEST_FAULT_INJECTION)
+                    detail::TransferFaultInjection::maybe_trigger_alloc_failure();
+#endif
+#if defined(USE_CUDA)
+                    CUDA_CHECK_ERROR(cudaSetDevice(0));
+                    CUDA_CHECK_ERROR(cudaMalloc(&dst, this->nbytes));
+#elif defined(USE_HIP)
+                    HIP_CHECK_ERROR(hipSetDevice(0));
+                    HIP_CHECK_ERROR(hipMalloc(&dst, this->nbytes));
+#endif
+                    temp_allocated = true;
+                    try {
+#if defined(BEANTENSOR_TEST_FAULT_INJECTION)
+                        detail::TransferFaultInjection::maybe_trigger_copy_failure();
+#endif
+#if defined(USE_CUDA)
+                        CUDA_CHECK_ERROR(cudaMemcpy(dst, src, this->nbytes, cudaMemcpyHostToDevice));
+#elif defined(USE_HIP)
+                        HIP_CHECK_ERROR(hipMemcpy(dst, src, this->nbytes, hipMemcpyHostToDevice));
+#endif
+                    } catch (...) {
+                        if (dst != nullptr) {
+#if defined(USE_CUDA)
+                            (void)cudaFree(dst);
+#elif defined(USE_HIP)
+                            (void)hipFree(dst);
+#endif
+                        }
+                        throw;
+                    }
+                }
+            } catch (const std::exception& e) {
+                const auto classification = detail::classify_transfer_failure(Device::CPU, Device::GPU, temp_allocated);
+                if (Helpers::OOMPolicy::instance().handle_transfer_failure(classification, e, *this, Device::GPU) == Helpers::OOMPolicyAction::Swallow) {
+                    return;
+                }
+                throw;
+            }
+            // Commit: topology is mutated only after the copy has landed. The
+            // old CPU buffer is freed, then the new GPU pointer, offset, device,
+            // and strides are installed.
+            hand_off_children();
+            if (!this->owns_data) {
+                detach_from_parents();
+            }
+            if (this->owns_data) {
+                kill_cpu_data();
+            } else {
+                this->owns_data = true;
+            }
+            this->data = dst;
+#endif
+        } else if (this->device == Device::GPU && new_device == Device::CPU) {
+#if !defined(USE_CUDA) && !defined(USE_HIP)
+            throw ErrorHandling::GPUTaskOnCPUBuild();
+#else
+            bool temp_allocated = false;
+            try {
+                if (this->nbytes != 0) {
+#if defined(BEANTENSOR_TEST_FAULT_INJECTION)
+                    detail::TransferFaultInjection::maybe_trigger_alloc_failure();
+#endif
+                    dst = bt_aligned_alloc(this->nbytes);
+                    if (dst == nullptr) {
+                        throw ErrorHandling::OutOfMemory();
+                    }
+                    temp_allocated = true;
+                    try {
+#if defined(BEANTENSOR_TEST_FAULT_INJECTION)
+                        detail::TransferFaultInjection::maybe_trigger_copy_failure();
+#endif
+#if defined(USE_CUDA)
+                        CUDA_CHECK_ERROR(cudaMemcpy(dst, src, this->nbytes, cudaMemcpyDeviceToHost));
+#elif defined(USE_HIP)
+                        HIP_CHECK_ERROR(hipMemcpy(dst, src, this->nbytes, hipMemcpyDeviceToHost));
+#endif
+                    } catch (...) {
+                        if (dst != nullptr) {
+                            std::free(dst);
+                        }
+                        throw;
+                    }
+                }
+            } catch (const std::exception& e) {
+                const auto classification = detail::classify_transfer_failure(Device::GPU, Device::CPU, temp_allocated);
+                if (Helpers::OOMPolicy::instance().handle_transfer_failure(classification, e, *this, Device::CPU) == Helpers::OOMPolicyAction::Swallow) {
+                    return;
+                }
+                throw;
+            }
+            hand_off_children();
+            if (!this->owns_data) {
+                detach_from_parents();
+            }
+            if (this->owns_data) {
+                kill_gpu_data();
+            } else {
+                this->owns_data = true;
+            }
+            this->data = dst;
+#endif
+        } else [[unlikely]] {
+            throw ErrorHandling::NotImplemented();
+        }
+
+        this->offset = 0;
+        this->device = new_device;
+        this->stream = nullptr;
+        this->is_contiguous = true;
+        compute_strides();
     }
 
     /**
@@ -566,12 +790,15 @@ namespace BeanTensor::Tensors {
      * @param parent
      */
     void Tensor::notify_child(Tensor* parent) {
+        const auto elem_bytes = DataTypes::dtype_bytes(this->dtype);
+        const auto src_offset_bytes = this->offset * elem_bytes;
+        const auto* const src = static_cast<const uint8_t*>(parent->data) + src_offset_bytes;
         if (this->device == Device::CPU) {
             this->sync();
             this->kill_cpu_data();
             this->kill_buffer();
             this->data = bt_aligned_alloc(this->nbytes);
-            memcpy(this->data, parent->data, this->nbytes);
+            memcpy(this->data, src, this->nbytes);
         } else if (this->device == Device::GPU) {
             this->sync();
             this->kill_gpu_data();
@@ -579,12 +806,12 @@ namespace BeanTensor::Tensors {
 #if defined(USE_HIP)
             void* new_data = nullptr;
             HIP_CHECK_ERROR(hipMalloc(&new_data, this->nbytes));
-            HIP_CHECK_ERROR(hipMemcpy(new_data, parent->data, this->nbytes, hipMemcpyDeviceToDevice));
+            HIP_CHECK_ERROR(hipMemcpy(new_data, src, this->nbytes, hipMemcpyDeviceToDevice));
             this->data = new_data;
 #elif defined(USE_CUDA)
             void* new_data = nullptr;
             CUDA_CHECK_ERROR(cudaMalloc(&new_data, this->nbytes));
-            CUDA_CHECK_ERROR(cudaMemcpy(new_data, parent->data, this->nbytes, cudaMemcpyDeviceToDevice));
+            CUDA_CHECK_ERROR(cudaMemcpy(new_data, src, this->nbytes, cudaMemcpyDeviceToDevice));
             this->data = new_data;
 #else
             throw ErrorHandling::GPUTaskOnCPUBuild();
@@ -593,6 +820,9 @@ namespace BeanTensor::Tensors {
         // The fresh buffer is ours now — without this the destructor never
         // frees it and every parent death leaks a full clone.
         this->owns_data = true;
+        this->offset = 0;
+        this->is_contiguous = true;
+        compute_strides();
         std::erase(this->view_parents, parent);
         // This view's own children aliased the dying parent's buffer too;
         // re-point them onto the fresh copy so the chain stays valid.

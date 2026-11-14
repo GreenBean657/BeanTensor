@@ -12,8 +12,8 @@
  * declares mse_loss, the module-facing entry point to the MSE loss
  * (Math/Loss/Loss.h), and softmax_cross_entropy, the module-facing entry
  * point to Tensor::softmax_ce, for forward/backward training loops.
- * @version 0.8
- * @date 2026-11-05
+ * @version 0.9
+ * @date 2026-11-14
  */
 #pragma once
 
@@ -273,6 +273,16 @@ namespace BeanTensor::Modules {
          * @param epsilon Denominator epsilon.
          */
         void adam_step(float64_t lr, float64_t beta1, float64_t beta2, float64_t epsilon) const;
+
+        /**
+         * One SGD step over the whole subtree: Tensor::sgd_step(lr) on every
+         * parameter that currently holds an accumulated gradient; parameters
+         * without one are skipped. Added for symmetry with adam_step and for
+         * use with GradScaler::step(module, lr).
+         * @brief SGD update of every parameter with an accumulated gradient.
+         * @param lr Learning rate.
+         */
+        void sgd_step(float64_t lr) const;
 
         /**
          * Human-readable tree dump, one line per parameter/child, children

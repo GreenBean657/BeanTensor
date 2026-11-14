@@ -1,9 +1,11 @@
 /**
  * @file Reshape.cpp
  * @author GreenBean
- * @brief Metadata-only reshape: Tensor::reshape builds a same-buffer view.
- * @version 0.1
- * @date 2026-10-20
+ * @brief Metadata-only reshape: Tensor::reshape builds a same-buffer view and
+ * wires the FlattenG node (dx = reshape(dy, x.shape())) when the source
+ * requires grad.
+ * @version 0.2
+ * @date 2026-11-14
  */
 #include <string>
 #include <vector>
@@ -42,6 +44,7 @@ namespace BeanTensor::Tensors {
         view.data = this->data;
         this->children.emplace_back(&view);
         view.view_parents.emplace_back(this);
+        view.wire_node(detail::flatten_g_bridge, *this);
         return view;
     }
 }

@@ -17,7 +17,7 @@ A build targets exactly one GPU backend, or none at all. Pass both flags
 explicitly so the CMake default never chooses for you:
 `-DUSE_CUDA=ON -DUSE_HIP=OFF`, `-DUSE_HIP=ON -DUSE_CUDA=OFF`, or both off for
 a CPU-only build. GPU tensors live on `Device::GPU`; CPU tensors live on
-`Device::CPU`. `Tensor::to()` moves a tensor between CPU and GPU.
+`Device::CPU`. `Tensor::to()` moves a tensor between CPU and GPU. See [Device transfers and failure atomicity](#device-transfers-and-failure-atomicity) below for the exact state machine.
 
 CPU kernels compile scalar, AVX2, and AVX-512 variants in the same binary and
 select one at runtime through `IncludedCPUFeatures()`. Do not perform your own
@@ -132,13 +132,95 @@ Copying a `Tensor` is disabled; use `clone(true)` for a deep copy and
 `clone(false)` for a view. Moving is `noexcept` and preserves any pending-task
 errors on the destination.
 
+## Device transfers and failure atomicity
+
+`Tensor::to(Device)` moves a tensor between CPU and GPU. The implementation
+follows a strict validate → allocate destination → copy → hand-off views →
+commit state machine:
+
+1. **Validate** the source device and target device pair. Non-contiguous views
+   are rejected here, before anything is mutated.
+2. **Allocate** the destination buffer on the target device.
+3. **Copy** the source bytes into the destination buffer.
+4. **Hand off child views**, after the copy has landed: an owner clones each
+   child out of the old buffer before it is freed; a view re-homes its children
+   onto the view's parents.
+5. **Commit** only after the allocation and copy both succeed: free the old
+   buffer, flip `device`/`data`/`offset`/`is_contiguous`, and recompute strides.
+
+Because the source `data` pointer, `offset`, and `device` are not touched until
+step 5, an allocation failure (OOM) or a copy failure leaves the source tensor
+fully usable. The failure is non-sticky: calling `to()` again on the same tensor
+retries the transfer from the intact source. Contiguous views become owned,
+contiguous copies on the destination device; non-contiguous views raise
+`ErrorHandling::NotImplemented` rather than silently copying the wrong bytes.
+
+The accumulated gradient (`Tensor::grad`) rides along recursively after the data
+buffer moves, so a parameter and its gradient always share a device.
+
+A classification hook, `BeanTensor::Tensors::detail::classify_transfer_failure`,
+produces a `TransferFailureClassification` with four flags:
+`alloc_failed_pre_change`, `copy_failed_with_temp`, `h2d_fallback_eligible`, and
+`fallback_meaningless`. The OOM policy consumes this hook to decide whether to
+propagate the error or fall back to CPU compute. See [OOM policy](#oom-policy)
+below.
+
+Test builds compile in a fault-injection seam
+(`BeanTensor::Tensors::detail::TransferFaultInjection`) that can arm alloc or
+copy failures deterministically. It is compiled out of production builds.
+
+## OOM policy
+
+`BeanTensor::Helpers::OOMPolicy` is a process-wide singleton configured once at
+startup via `OOMPolicy::configure(OOMPolicyConfig)`. The policy is consulted by
+`Tensor::atomic_transfer_to()` on allocation or copy failure and by compute-
+dispatcher boundaries on OOM. It supports three exclusive modes:
+
+1. **`PreserveLogThrow`** (default): log a diagnostic line and rethrow the
+   original exception. The source tensor remains untouched because the transfer
+   is failure-atomic.
+2. **`H2DFallback`**: when a CPU→GPU transfer fails with
+   `h2d_fallback_eligible == true`, swallow the error and leave the tensor on
+   CPU so execution can continue there. Compute-dispatcher boundaries can also
+   fall back to CPU when the dispatcher marks the op as fallback-eligible.
+3. **`CheckpointAndThrow`**: call the application-supplied checkpoint hook,
+   log a diagnostic line, and rethrow. The hook is expected to save the model
+   via `Serialization::save(..., CheckpointLevel::Full)` using an atomic
+   temp-file + rename; the policy does not itself perform I/O beyond logging.
+
+Configuration is explicit C++ API only (no environment variables). `configure()`
+validates the config and throws `ErrorHandling::InvalidOOMPolicy` if checkpoint
+mode is selected without both a `checkpoint_hook` and a non-empty
+`checkpoint_destination`. The diagnostic log is append-only, line-oriented, and
+mutex-serialized; a logging failure is swallowed so it can never mask the
+original OOM.
+
+The compute-dispatcher fallback eligibility is normally derived from op/device
+metadata by the dispatcher. A test-only seam
+(`OOMPolicy::set_compute_fallback_eligible_for_test`) lets the unit tests
+exercise the compute-fallback path without a real dispatcher integration.
+
 ## Autograd
 
 `matmul`, `bias_add`, `relu`, `softmax_ce`, and the elementwise
 add/sub/mul/div/pow, exp/log, `sum`, `mean`, `mse`, `bce`, and `bce_with_logits` ops attach a graph node
-to their output whenever any input has `requires_grad=true`. You run
+to their output whenever any input has `requires_grad=true`. The
+indexing/view ops do the same: `index_select`, `gather`, `cat`, `slice`,
+`split` (each chunk wires the slice node), and `reshape` (which shares
+flatten's backward). You run
 backpropagation by calling `backward(grad_dtype)` on a scalar or shape-{1} loss
 tensor.
+
+Indexing/view nodes carry their per-op state in an owned `NodeMeta` payload
+hung off the node (the axis, the slice ranges and source shape, and — for
+`cat` with more than three inputs — the overflow graph-parent pointers);
+the node deletes it when the output tensor dies or is re-wired. Index tensors
+are not copied into the metadata: they ride in the node's saved-tensor slots
+as borrowed graph constants and, exactly like input parents, must outlive
+`backward()`. Duplicate-index backward (`index_select`, `gather`)
+scatter-adds into a zeroed gradient in ascending pick order per destination
+element on every backend, so the accumulation is deterministic and
+bit-identical between CPU and GPU.
 
 The gradient dtype is a per-call decision. The seed and every node-to-node
 delta are computed in the `grad_dtype` you pass; boundary casts use the single
@@ -205,6 +287,20 @@ nodes during the forward pass, though no `backward()` is called. The repository'
 `main.cpp` uses DataLoader for both training and test splits and calls
 `Metrics::evaluate` after each training epoch to report test accuracy and loss.
 
+`BeanTensor::Optimization::GradScaler` is a mixed-precision training-loop
+utility, not an engine precision mode. It scales the loss (`scaler.scale(loss)`),
+then after `backward()` unscales parameter gradients in place and checks them for
+finite values (`scaler.unscale_and_check(module)`). When every gradient is
+finite it applies dynamic growth/backoff through `scaler.update(finite)`; on a
+non-finite step it backs off the scale and the caller simply does not invoke the
+optimizer. Convenience wrappers `scaler.step(module, lr, ...)` for Adam and
+`scaler.step(module, lr)` for SGD perform unscale-check-update-step in one call.
+Because a skipped step does not call `Module::adam_step` or `Module::sgd_step`,
+Adam's per-parameter step counter and first/second moment buffers are untouched
+and SGD leaves parameters unchanged. Static mode disables dynamic growth/backoff
+while still applying the fixed scale. The finite scan uses existing device ops
+(`sub`, `equal`, `min`) and performs no host fp16 arithmetic.
+
 ## GELU activation
 
 `Tensor::gelu()` computes the Gaussian Error Linear Unit exactly as
@@ -266,6 +362,26 @@ landed layer set:
   plus matching autograd nodes. `Conv2d` is implemented as im2col + GEMM with a
   scatter epilogue writing NCHW directly, an owner-pinned `Conv2dG` backward,
   He fan-in initialization, and CPU/CUDA/HIP backends.
+
+## PyTorch gradient parity harness
+
+The project ships a C++/PyTorch parity harness under `comparison/` whose goal is
+to catch autograd drift early. The C++ driver (`comparison/gradient_parity.cpp`)
+builds each parity case from deterministic raw tensors, runs `backward()`, and
+writes the inputs and every gradient to `comparison/generated-data/` plus a text
+manifest. The Python driver (`comparison/gradient_parity.py`) parses that
+manifest, reconstructs the identical graph in PyTorch, and compares every
+gradient with NaN/Inf checks followed by an abs-or-rel tolerance. It exits
+nonzero on the first mismatch and prints the worst element.
+
+The harness includes loud negative controls (`--perturb <gradient>` and
+`--corrupt-manifest`) and a shell runner (`comparison/run_gradient_parity.sh`)
+that routes GPU C++ data generation through `gpu-test.sh` so it respects the
+shared GPU lock. A performance extension (`benchmark/gradient_parity_perf.cpp`,
+`comparison/gradient_parity_perf.py`, and
+`comparison/run_gradient_parity_perf.sh`) reuses the forward op benchmark's
+shape plan to time one forward + one backward pass per family and publishes a
+side-by-side BeanTensor vs PyTorch table in `docs/gradient-parity.md`.
 
 ## AvgPool2d
 

@@ -265,6 +265,12 @@ set(CORE_SOURCES
         Math/Spatial/AvgPool2d/AvgPool2dAVX512.cpp
         Math/Autograd/AvgPool2dG/AvgPool2dG.h
         Math/Autograd/AvgPool2dG/AvgPool2dGCPU.cpp
+        Math/Autograd/IndexingG/IndexingG.h
+        Math/Autograd/IndexingG/IndexingG.hpp
+        Math/Autograd/IndexingG/IndexingGShared.h
+        Math/Autograd/IndexingG/IndexingGCPU.cpp
+        Math/Autograd/IndexingG/IndexingGCUDA.cu
+        Math/Autograd/IndexingG/IndexingGHIP.cpp
         Math/Shape/Indexing/Indexing.h
         Math/Shape/Indexing/Indexing.hpp
         Math/Shape/Indexing/IndexingShared.h
@@ -276,6 +282,8 @@ set(CORE_SOURCES
         Math/Optimization/OptimizationShared.h
         Math/Optimization/OptimizationCudaShared.h
         Math/Optimization/OptimizationHipShared.h
+        Math/Optimization/GradScaler/GradScaler.h
+        Math/Optimization/GradScaler/GradScaler.cpp
         Math/LinearAlgebra/LinearAlgebra.h
         Math/Activations/Activations.h
         Math/LinearAlgebra/BiasAdd/BiasAdd.h
@@ -424,6 +432,8 @@ set(CORE_SOURCES
         Helpers/Bits.h
         Helpers/KernelTune.h
         Helpers/KernelTune.cpp
+        Helpers/OOMPolicy.h
+        Helpers/OOMPolicy.cpp
         Metrics/Metrics.h
         Metrics/Metrics.cpp
         Module/ModuleSpec.h
@@ -463,6 +473,7 @@ if (USE_CUDA)
             Math/LinearAlgebra/MatMul/MatmulCUDA.cu
             Math/Optimization/SgdUpdate/SgdUpdateCUDA.cu
             Math/Optimization/Adam/AdamCUDA.cu
+            Math/Optimization/GradScaler/GradScalerCUDA.cu
             Math/Loss/Mse/MseCUDA.cu
             Math/Loss/MseG/MseGCUDA.cu
             Math/Loss/Bce/BceCUDA.cu
@@ -494,6 +505,7 @@ if (USE_CUDA)
             Math/Autograd/TransposeLast2/TransposeLast2CUDA.cu
             Math/Autograd/ElementwiseG/ElementwiseGCUDA.cu
             Math/Autograd/BatchNormG/BatchNormGCUDA.cu
+            Math/Autograd/IndexingG/IndexingGCUDA.cu
             Math/Shape/Indexing/IndexingCUDA.cu
             Math/Convolution/Im2Col/OpCUDA.cu
             Math/Convolution/Col2Im/OpCUDA.cu
@@ -507,6 +519,7 @@ elseif (USE_HIP)
             Math/LinearAlgebra/MatMul/MatmulHIP.cpp
             Math/Optimization/SgdUpdate/SgdUpdateHIP.cpp
             Math/Optimization/Adam/AdamHIP.cpp
+            Math/Optimization/GradScaler/GradScalerHIP.cpp
             Math/Loss/Mse/MseHIP.cpp
             Math/Loss/MseG/MseGHIP.cpp
             Math/Loss/Bce/BceHIP.cpp
@@ -536,6 +549,7 @@ elseif (USE_HIP)
             Math/Autograd/SoftmaxG/SoftmaxGHIP.cpp
             Math/Autograd/TransposeLast2/TransposeLast2HIP.cpp
             Math/Autograd/ElementwiseG/ElementwiseGHIP.cpp
+            Math/Autograd/IndexingG/IndexingGHIP.cpp
             Math/Shape/Indexing/IndexingHIP.cpp
             Math/Convolution/Im2Col/OpHIP.cpp
             Math/Convolution/Col2Im/OpHIP.cpp
@@ -577,6 +591,7 @@ if(USE_HIP)
             Math/Optimization/SgdUpdate/SgdUpdateHIP.cpp
             Math/Optimization/Adam/AdamCPU.cpp
             Math/Optimization/Adam/AdamHIP.cpp
+            Math/Optimization/GradScaler/GradScalerHIP.cpp
             Math/Loss/Loss.cpp
             Math/Loss/Mse/MseCPU.cpp
             Math/Loss/Mse/MseHIP.cpp
@@ -661,6 +676,8 @@ if(USE_HIP)
             Math/Elementwise/ElementwiseCPU.cpp
             Math/Autograd/ElementwiseG/ElementwiseGCPU.cpp
             Math/Autograd/ElementwiseG/ElementwiseGHIP.cpp
+            Math/Autograd/IndexingG/IndexingGCPU.cpp
+            Math/Autograd/IndexingG/IndexingGHIP.cpp
             Module/Module.cpp
             Module/Linear.cpp
             Module/BatchNorm.cpp
@@ -683,6 +700,7 @@ if(USE_HIP)
             Math/Optimization/SgdUpdate/SgdUpdateCPU.cpp
             Math/Optimization/SgdUpdate/SgdUpdateHIP.cpp
             Math/Optimization/Adam/AdamCPU.cpp
+            Math/Optimization/GradScaler/GradScalerHIP.cpp
             Math/Loss/Loss.cpp
             Math/Loss/Mse/MseCPU.cpp
             Math/Loss/MseG/MseGCPU.cpp
@@ -740,6 +758,8 @@ if(USE_HIP)
             Math/Elementwise/ElementwiseCPU.cpp
             Math/Autograd/ElementwiseG/ElementwiseGCPU.cpp
             Math/Autograd/ElementwiseG/ElementwiseGHIP.cpp
+            Math/Autograd/IndexingG/IndexingGCPU.cpp
+            Math/Autograd/IndexingG/IndexingGHIP.cpp
             Module/Module.cpp
             Module/Linear.cpp
             Module/BatchNorm.cpp
@@ -935,6 +955,7 @@ if (USE_CUDA)
             Math/LinearAlgebra/MatMul/MatmulCUDA.cu
             Math/Optimization/SgdUpdate/SgdUpdateCUDA.cu
             Math/Optimization/Adam/AdamCUDA.cu
+            Math/Optimization/GradScaler/GradScalerCUDA.cu
             Math/Loss/Mse/MseCUDA.cu
             Math/Loss/MseG/MseGCUDA.cu
             Math/Loss/Bce/BceCUDA.cu
@@ -1005,8 +1026,43 @@ add_executable(BeanTensorV5Accelerated main.cpp)
 target_link_libraries(BeanTensorV5Accelerated PRIVATE BeanTensorV5Core)
 target_compile_options(BeanTensorV5Accelerated PRIVATE -O3)
 
+add_executable(BeanTensorV5GradientParity comparison/gradient_parity.cpp)
+target_link_libraries(BeanTensorV5GradientParity PRIVATE BeanTensorV5Core)
+if(USE_HIP)
+    target_compile_definitions(BeanTensorV5GradientParity PRIVATE USE_HIP)
+elseif(USE_CUDA)
+    target_compile_definitions(BeanTensorV5GradientParity PRIVATE USE_CUDA)
+endif()
+if(USE_STRIX_HALO)
+    target_compile_definitions(BeanTensorV5GradientParity PRIVATE USE_STRIX_HALO)
+endif()
+target_compile_options(BeanTensorV5GradientParity PRIVATE
+        -O2
+        -mavx2
+        -mf16c
+)
+
+add_executable(BeanTensorV5GradientParityPerf benchmark/gradient_parity_perf.cpp)
+target_link_libraries(BeanTensorV5GradientParityPerf PRIVATE BeanTensorV5Core)
+if(USE_HIP)
+    target_compile_definitions(BeanTensorV5GradientParityPerf PRIVATE USE_HIP)
+elseif(USE_CUDA)
+    target_compile_definitions(BeanTensorV5GradientParityPerf PRIVATE USE_CUDA)
+endif()
+if(USE_STRIX_HALO)
+    target_compile_definitions(BeanTensorV5GradientParityPerf PRIVATE USE_STRIX_HALO)
+endif()
+target_compile_options(BeanTensorV5GradientParityPerf PRIVATE
+        -O2
+        -mavx2
+        -mf16c
+)
+
 if(BUILD_TESTING)
     enable_testing()
+    # Fault-injection seams for transfer tests are compiled into the library in
+    # test builds only; they have no effect unless a test arms them explicitly.
+    target_compile_definitions(BeanTensorV5Core PUBLIC BEANTENSOR_TEST_FAULT_INJECTION=1)
     set_source_files_properties(
             tests/tensor_tests.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx2;-mf16c"
@@ -1245,6 +1301,24 @@ if(BUILD_TESTING)
     )
     add_test(NAME BeanTensorV5LossAdamTests COMMAND BeanTensorV5LossAdamTests)
 
+    add_executable(BeanTensorV5GradScalerTests tests/grad_scaler_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5GradScalerTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5GradScalerTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5GradScalerTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5GradScalerTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5GradScalerTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5GradScalerTests COMMAND BeanTensorV5GradScalerTests)
+
     add_executable(BeanTensorV5BceTests tests/bce_tests.cpp)
     if(USE_HIP)
         target_compile_definitions(BeanTensorV5BceTests PRIVATE USE_HIP)
@@ -1389,6 +1463,24 @@ if(BUILD_TESTING)
     )
     add_test(NAME BeanTensorV5FlattenTests COMMAND BeanTensorV5FlattenTests)
 
+    add_executable(BeanTensorV5IndexingAutogradTests tests/indexing_autograd_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5IndexingAutogradTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5IndexingAutogradTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5IndexingAutogradTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5IndexingAutogradTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5IndexingAutogradTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5IndexingAutogradTests COMMAND BeanTensorV5IndexingAutogradTests)
+
     # Dispatch-gate invariant (Verifications/illegal_dispatch_gates.sh): this TU
     # calls IncludedCPUFeatures().has_feature(), so it must carry per-file flags
     # covering the features it gates on (AVX2/F16C) - its gate copy is blind otherwise.
@@ -1522,6 +1614,42 @@ if(BUILD_TESTING)
     )
     add_test(NAME BeanTensorV5SerializationTests COMMAND BeanTensorV5SerializationTests)
 
+    add_executable(BeanTensorV5TransferAtomicTests tests/transfer_atomic_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5TransferAtomicTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5TransferAtomicTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5TransferAtomicTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5TransferAtomicTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5TransferAtomicTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5TransferAtomicTests COMMAND BeanTensorV5TransferAtomicTests)
+
+    add_executable(BeanTensorV5OOMPolicyTests tests/oom_policy_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5OOMPolicyTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5OOMPolicyTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5OOMPolicyTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5OOMPolicyTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5OOMPolicyTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5OOMPolicyTests COMMAND BeanTensorV5OOMPolicyTests)
+
     add_executable(BeanTensorV5CNNTests tests/cnn_tests.cpp)
     if(USE_HIP)
         target_compile_definitions(BeanTensorV5CNNTests PRIVATE USE_HIP)
@@ -1582,6 +1710,19 @@ if(BUILD_TESTING)
             -mf16c
     )
     add_test(NAME benchmark_smoke COMMAND BeanTensorV5Benchmarks --smoke)
+
+    add_test(NAME gradient_parity_smoke COMMAND BeanTensorV5GradientParity --smoke)
+    set_tests_properties(gradient_parity_smoke PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    add_test(NAME gradient_parity
+             COMMAND bash comparison/run_gradient_parity.sh --build-dir ${CMAKE_BINARY_DIR})
+    set_tests_properties(gradient_parity PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    if (USE_CUDA OR USE_HIP)
+        add_test(NAME gradient_parity_gpu
+                 COMMAND bash comparison/run_gradient_parity.sh --build-dir ${CMAKE_BINARY_DIR} --device gpu --skip-gpu-lock)
+        set_tests_properties(gradient_parity_gpu PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    endif()
 endif()
 
 if(USE_HIP)
@@ -1590,12 +1731,14 @@ if(USE_HIP)
     target_compile_definitions(BeanTensorV5CNN PRIVATE USE_HIP)
     target_compile_definitions(BeanTensorV5CSVDemo PRIVATE USE_HIP)
     target_compile_definitions(BeanTensorV5Accelerated PRIVATE USE_HIP)
+    target_compile_definitions(BeanTensorV5GradientParity PRIVATE USE_HIP)
 elseif(USE_CUDA)
     # target_compile_definitions(BeanTensorV5Core PRIVATE USE_CUDA)
     target_compile_definitions(BeanTensorV5 PRIVATE USE_CUDA)
     target_compile_definitions(BeanTensorV5CNN PRIVATE USE_CUDA)
     target_compile_definitions(BeanTensorV5CSVDemo PRIVATE USE_CUDA)
     target_compile_definitions(BeanTensorV5Accelerated PRIVATE USE_CUDA)
+    target_compile_definitions(BeanTensorV5GradientParity PRIVATE USE_CUDA)
 endif()
 if(USE_STRIX_HALO)
     target_compile_definitions(BeanTensorV5Core PRIVATE USE_STRIX_HALO)

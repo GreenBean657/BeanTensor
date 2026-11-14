@@ -7,8 +7,8 @@
  * mse_loss forwarder to BeanTensor::Loss::mse, the softmax_cross_entropy
  * forwarder to Tensor::softmax_ce, and the subtree-wide gradient-dtype
  * setter (validate-all-then-apply) with its per-parameter getter.
- * @version 0.6
- * @date 2026-11-05
+ * @version 0.7
+ * @date 2026-11-14
  */
 #include "Module/Module.h"
 
@@ -167,6 +167,17 @@ namespace BeanTensor::Modules {
         }
         for (const auto&[name, module] : this->modules) {
             module->adam_step(lr, beta1, beta2, epsilon);
+        }
+    }
+
+    void Module::sgd_step(const float64_t lr) const {
+        for (const auto&[name, tensor] : this->parameters) {
+            if (tensor->has_grad()) {
+                tensor->sgd_step(lr);
+            }
+        }
+        for (const auto&[name, module] : this->modules) {
+            module->sgd_step(lr);
         }
     }
 

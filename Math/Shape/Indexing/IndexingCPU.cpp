@@ -3,10 +3,13 @@
  * @author GreenBean
  * @brief CPU backend for the indexing ops (index_select, gather, cat). Hosts
  * the Tensor::index_select / Tensor::gather / Tensor::cat method definitions
- * (mirrors how Tensor::sum lives in SumCPU.cpp). All three are pure byte
- * movement: dtype-agnostic slab/element copies, so no per-dtype kernels exist.
- * @version 0.2
- * @date 2026-10-22
+ * (mirrors how Tensor::sum lives in SumCPU.cpp). All three forwards are pure
+ * byte movement: dtype-agnostic slab/element copies, so no per-dtype kernels
+ * exist. The autograd wiring lives here too: when an input requires grad the
+ * output gets an IndexingG node whose per-op state rides in the node's owned
+ * NodeMeta (index tensors ride in Node::_saved as borrowed graph constants).
+ * @version 0.3
+ * @date 2026-11-14
  */
 #include <cstdint>
 #include <cstring>
@@ -154,9 +157,9 @@ namespace BeanTensor::Tensors {
 
     /**
      * Validates axis, rank, dtype, device and contiguity eagerly, syncs both
-     * operands, then routes to the backend. The output never joins the
-     * autograd graph (no backward node exists for indexing yet), so it is
-     * built with requires_grad=false.
+     * operands, then routes to the backend. When this tensor requires grad the
+     * output joins the graph: the node records the axis in its owned NodeMeta
+     * and borrows the index tensor in _saved (it must outlive backward()).
      * @brief Select slabs along an axis by index.
      * @param axis Axis to select along.
      * @param indices Rank-1 integer index tensor on the same device.
@@ -189,6 +192,15 @@ namespace BeanTensor::Tensors {
             detail::index_select_gpu(*this, indices, out, axis);
         } else [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
+        }
+        out.wire_node(detail::index_select_g_bridge, *this);
+        if (out.node != nullptr) {
+            auto* meta = new NodeMeta{};
+            meta->tag = NodeMetaTag::IndexSelect;
+            meta->axis = axis;
+            out.node->_meta = meta;
+            out.node->_saved[0] = const_cast<Tensor*>(&indices);
+            out.node->_n_saved = 1;
         }
         return out;
     }
@@ -230,6 +242,15 @@ namespace BeanTensor::Tensors {
             detail::gather_gpu(*this, indices, out, axis);
         } else [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
+        }
+        out.wire_node(detail::gather_g_bridge, *this);
+        if (out.node != nullptr) {
+            auto* meta = new NodeMeta{};
+            meta->tag = NodeMetaTag::Gather;
+            meta->axis = axis;
+            out.node->_meta = meta;
+            out.node->_saved[0] = const_cast<Tensor*>(&indices);
+            out.node->_n_saved = 1;
         }
         return out;
     }
@@ -281,6 +302,15 @@ namespace BeanTensor::Tensors {
         } else [[unlikely]] {
             throw ErrorHandling::UnReachableCode();
         }
+        std::vector<const Tensor*> inputs;
+        inputs.reserve(tensors.size());
+        for (const auto& t : tensors) {
+            inputs.push_back(&t);
+        }
+        auto* meta = new NodeMeta{};
+        meta->tag = NodeMetaTag::Cat;
+        meta->axis = axis;
+        out.wire_node_meta(detail::cat_g_bridge, inputs, meta);
         return out;
     }
 }

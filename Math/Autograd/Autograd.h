@@ -4,13 +4,14 @@
  * @brief Entry point for the autograd backward ops (cpu vs gpu): gemm_g,
  * bias_add_g, relu_g, softmax_ce_g, sum_g, mean_g, batch_norm_g, the
  * elementwise add/sub/mul/div/pow (tensor-tensor and tensor-scalar) and
- * exp/log backward nodes,
+ * exp/log backward nodes, and the indexing/view backward nodes
+ * (index_select, gather, cat, slice — reshape reuses FlattenG),
  * plus the shared gradient plumbing (grad accumulation, last-two-dims
  * transpose for GEMM backward, broadcast gradient reduction for elementwise
  * backward). The *_g_node functions match Node::_backward_fn's signature and
  * are what the forward ops store when they wire the computation graph.
- * @version 0.7
- * @date 2026-10-30
+ * @version 0.8
+ * @date 2026-11-14
  */
 #pragma once
 
@@ -28,3 +29,4 @@
 #include "Math/Autograd/MeanG/MeanG.h"
 #include "Math/Autograd/BatchNormG/BatchNormG.h"
 #include "Math/Autograd/ElementwiseG/ElementwiseG.h"
+#include "Math/Autograd/IndexingG/IndexingG.h"

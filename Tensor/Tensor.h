@@ -2,8 +2,8 @@
  * @file Tensor.h
  * @author GreenBean
  * @brief Tensor class declaration: dtype, shape, device and buffer ownership.
- * @version 0.4.18
- * @date 2026-11-10
+ * @version 0.5.0
+ * @date 2026-11-14
  */
 #pragma once
 #define BT_TENSOR_MAX_DIMS 4
@@ -15,6 +15,10 @@
 #include <optional>
 #include <utility>
 #include <vector>
+
+#if defined(BEANTENSOR_TEST_FAULT_INJECTION)
+#include <atomic>
+#endif
 
 #include "DTypes.h"
 #include "Helpers/CPUThreading.h"
@@ -52,6 +56,13 @@ namespace BeanTensor::Math::Dropout {
     Tensors::Tensor train_mask_cpu(const Tensors::Tensor& x, float64_t p, int64_t seed);
     Tensors::Tensor train_mask_gpu(const Tensors::Tensor& x, float64_t p, int64_t seed);
 }
+namespace BeanTensor::Optimization {
+    class GradScaler;
+}
+namespace BeanTensor::Optimization::detail {
+    void gradscaler_div_scalar_inplace_cpu(Tensors::Tensor& grad, float64_t scale);
+    void gradscaler_div_scalar_inplace_gpu(Tensors::Tensor& grad, float64_t scale);
+}
 namespace BeanTensor::Tensors::detail {
     struct BcastReducePlan;
     void conv2d_g_node_gpu(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
@@ -68,6 +79,64 @@ namespace BeanTensor::Tensors {
         GPU
     };
 
+    namespace detail {
+        /**
+         * Classification flags produced for a failed device transfer. The
+         * source tensor is never modified before the failure point, so a
+         * caller can use these flags to decide whether to retry, fall back
+         * to CPU compute, or simply propagate the error.
+         * @brief Flags describing a transfer failure.
+         */
+        struct TransferFailureClassification {
+            bool alloc_failed_pre_change = false; /**< Destination allocation failed before any source mutation. */
+            bool copy_failed_with_temp = false;   /**< Copy failed after a destination buffer was allocated. */
+            bool h2d_fallback_eligible = false;   /**< The failure was on a CPU->GPU transfer, so CPU fallback is viable. */
+            bool fallback_meaningless = false;    /**< The failure was on a GPU->CPU transfer; CPU fallback cannot help. */
+        };
+
+        /**
+         * Classify a transfer failure from the source/target devices and
+         * whether a temporary destination buffer had been allocated.
+         * @brief Classify a transfer failure.
+         * @return Populated classification flags.
+         */
+        [[nodiscard]] TransferFailureClassification classify_transfer_failure(Device source, Device target, bool temp_allocated);
+
+#if defined(BEANTENSOR_TEST_FAULT_INJECTION)
+        /**
+         * Test-only fault-injection seam for device transfers. Compiled only
+         * when BEANTENSOR_TEST_FAULT_INJECTION is defined.
+         * @brief Inject deterministic transfer failures.
+         */
+        struct TransferFaultInjection {
+            static std::atomic<int64_t> alloc_fail_after_n;
+            static std::atomic<int64_t> copy_fail_after_n;
+            static std::atomic<bool> force_alloc_fail;
+            static std::atomic<bool> force_copy_fail;
+
+            /**
+             * Reset every counter/flag to the disabled state.
+             * @brief Disable all injected faults.
+             */
+            static void reset() noexcept;
+
+            /**
+             * Throw ErrorHandling::OutOfMemory when an alloc fault is armed.
+             * @brief Trigger an allocation failure if armed.
+             * @throws ErrorHandling::OutOfMemory When an alloc fault is armed.
+             */
+            static void maybe_trigger_alloc_failure();
+
+            /**
+             * Throw ErrorHandling::GPUError when a copy fault is armed.
+             * @brief Trigger a copy failure if armed.
+             * @throws ErrorHandling::GPUError When a copy fault is armed.
+             */
+            static void maybe_trigger_copy_failure();
+        };
+#endif
+    }
+
     /**
      * Convert device enum to text - when a device is unexplored, default to Unknown.
      * @brief Convert Enum Device to a string representation.
@@ -82,11 +151,52 @@ namespace BeanTensor::Tensors {
         }
     }
 
+    /**
+     * Which indexing/view op a Node's metadata describes.
+     * @brief Tag of a NodeMeta payload.
+     */
+    enum class NodeMetaTag : uint8_t {
+        None,
+        IndexSelect,
+        Gather,
+        Cat,
+        Slice
+    };
+
+    /**
+     * Owned per-node metadata for the indexing/view backward nodes — the data
+     * the fixed Node payload cannot hold. Heap-allocated and owned by its Node
+     * (deleted with it: Tensor's destructor, move assignment and node re-wiring
+     * all delete the Node, which deletes this). Index TENSORS never live here —
+     * they ride in Node::_saved per the existing ownership pattern (borrowed,
+     * must outlive backward()). extra_parents extends the graph-parent list
+     * past BT_TENSOR_MAX_PARENTS for cat (its input count is unbounded); those
+     * pointers are borrowed exactly like Node::_inputs.
+     * @brief Tagged owned metadata payload for indexing/view autograd nodes.
+     */
+    struct NodeMeta {
+        NodeMetaTag tag = NodeMetaTag::None;
+        size_t axis = 0; // index_select/gather/cat: the axis the forward op worked along.
+        size_t src_shape[BT_TENSOR_MAX_DIMS]{}; // Slice: the forward input's shape (backward's dx shape).
+        size_t src_ndim = 0; // Slice: rank of the forward input.
+        size_t ranges[BT_TENSOR_MAX_DIMS][2]{}; // Slice: [start, end) box per dimension.
+        Tensor** extra_parents = nullptr; // Owned array (delete[]); cat parents beyond _inputs' capacity.
+        size_t n_extra_parents = 0;
+        NodeMeta() = default;
+        ~NodeMeta() {
+            delete[] extra_parents;
+        }
+        NodeMeta(const NodeMeta&) = delete;
+        NodeMeta& operator=(const NodeMeta&) = delete;
+        NodeMeta(NodeMeta&&) = delete;
+        NodeMeta& operator=(NodeMeta&&) = delete;
+    };
+
     // Defined ahead of Tensor: Tensor's inline destructor and move assignment
     // delete their owned Node, which requires the complete type.
     struct alignas(8) Node {
         // Trampolines receive the owning Node so they can read per-op state
-        // (_scalar, _saved) without a bit-cast channel through _inputs.
+        // (_scalar, _saved, _meta) without a bit-cast channel through _inputs.
         void (*_backward_fn)(Node*, Tensor*, Tensor**, size_t, DataTypes::DType);
         float64_t _scalar; // Tensor-scalar operand of the op; zero when the op has none.
         Tensor* _inputs[BT_TENSOR_MAX_PARENTS];
@@ -94,6 +204,13 @@ namespace BeanTensor::Tensors {
         uint8_t _n_inputs;
         uint8_t _n_saved;
         uint8_t _n_outputs_pending;
+        // Owned indexing/view metadata; null for every op that needs none.
+        // Deleted with the node, so Tensor's destructor/move-assign/rewire
+        // (all plain `delete node`) release it too.
+        NodeMeta* _meta = nullptr;
+        ~Node() {
+            delete _meta;
+        }
     };
     class alignas(8) Tensor final {
         public:
@@ -283,7 +400,19 @@ namespace BeanTensor::Tensors {
 
         /**
          * Move this tensor between devices (single-GPU; CPU <-> GPU only).
+         * Failure-atomic: the source tensor is not modified until the
+         * destination buffer is allocated and the copy succeeds, so an OOM or
+         * copy failure leaves the source fully usable. Views become owned
+         * contiguous copies on the destination device. The accumulated gradient
+         * rides along recursively.
+         * @brief Move this tensor between devices.
          * @param new_device Device to move to.
+         * @throws ErrorHandling::OutOfMemory CPU-side destination allocation failed.
+         * @throws ErrorHandling::GPUOutOfMemory GPU-side destination allocation failed
+         *         (a GPUError subclass).
+         * @throws ErrorHandling::GPUError A GPU copy or device operation failed.
+         * @throws ErrorHandling::GPUTaskOnCPUBuild GPU requested on a CPU-only build.
+         * @version 0.4.20
          */
         void to(const Device& new_device);
 
@@ -414,6 +543,9 @@ namespace BeanTensor::Tensors {
          * visible in both; if this tensor dies first, the view takes its own
          * copy via notify_child). Works identically on CPU and GPU — no data
          * moves. The compute is metadata-only, so the call is synchronous.
+         * When this tensor has requires_grad=true the output joins the
+         * computation graph (FlattenG backward: dx = reshape(dy, x.shape()) —
+         * the same node flatten wires).
          * @brief Reshape into a view with the same element count.
          * @param new_shape New shape; numel must be unchanged, rank within
          * 1..BT_TENSOR_MAX_DIMS.
@@ -455,7 +587,12 @@ namespace BeanTensor::Tensors {
          * its own shape) yields a contiguous view; slicing an inner dimension
          * yields a non-contiguous one, which ops requiring contiguous operands
          * reject with NotImplemented. Works identically on CPU and GPU — no
-         * data moves, so the call is synchronous.
+         * data moves, so the call is synchronous. When this tensor has
+         * requires_grad=true the output joins the computation graph
+         * (slice_g backward: the dy box is embedded at the recorded [start, end)
+         * ranges into a zeroed dx of this tensor's shape — the ranges ride in
+         * the node's owned NodeMeta, so non-contiguous views backward through
+         * view metadata, never raw data pointers).
          * @brief Strided view over per-dimension [start, end) ranges.
          * ranges: One [start, end) pair per dimension; rank must match
          * exactly. Empty ranges (start == end) yield a zero-extent dimension.
@@ -470,7 +607,10 @@ namespace BeanTensor::Tensors {
          * view (leading-axis chunks are contiguous; inner-axis chunks are
          * not, so they are rejected by cat and every other op requiring
          * contiguous operands — only a leading-axis split feeds straight
-         * back into cat). Synchronous and metadata-only, like slice.
+         * back into cat). Synchronous and metadata-only, like slice. Each
+         * chunk carries slice's autograd wiring: when this tensor has
+         * requires_grad=true every chunk joins the graph with its own slice_g
+         * node, and backward() accumulates the chunk deltas into one grad.
          * @brief Split into equal slice views along an axis.
          * axis: Axis to split along.
          * sections: Number of chunks; must be nonzero and divide shape[axis].
@@ -486,8 +626,13 @@ namespace BeanTensor::Tensors {
          * integer dtype (Int8..UInt64), contiguous, and on the same device;
          * this tensor must be contiguous. The output is a fresh contiguous
          * tensor with shape[axis] replaced by indices.numel (duplicate and
-         * out-of-order indices are allowed; the output never joins the
-         * autograd graph). CPU: the copy runs on the caller thread and index
+         * out-of-order indices are allowed). When this tensor has
+         * requires_grad=true the output joins the computation graph
+         * (index_select_g backward: scatter-add of the dy slabs into a zeroed
+         * dx, duplicates accumulated in ascending pick order — deterministic
+         * on every backend; the index tensor rides in Node::_saved as a
+         * borrowed graph constant and must outlive backward(), exactly like
+         * the input parents). CPU: the copy runs on the caller thread and index
          * bounds errors throw directly. GPU: the copy queues onto the thread
          * pool; the returned tensor is moved out, and the move drains pending
          * work, so index_select effectively blocks before returning, with
@@ -511,9 +656,14 @@ namespace BeanTensor::Tensors {
          * by indices[m]]. indices must share this tensor's rank, be of a plain
          * integer dtype, contiguous, on the same device, and its extents must
          * not exceed this tensor's on the non-axis dimensions (PyTorch rule);
-         * the output takes the indices' shape and this tensor's dtype. The
-         * output never joins the autograd graph. Blocking contract matches
-         * index_select (CPU: direct throw; GPU: at the result's sync()).
+         * the output takes the indices' shape and this tensor's dtype. When
+         * this tensor has requires_grad=true the output joins the computation
+         * graph (gather_g backward: scatter-add of the dy elements into a
+         * zeroed dx, duplicates accumulated in ascending index order —
+         * deterministic on every backend; the index tensor rides in
+         * Node::_saved as a borrowed graph constant and must outlive
+         * backward()). Blocking contract matches index_select (CPU: direct
+         * throw; GPU: at the result's sync()).
          * @brief Gather elements along an axis by an index tensor.
          * axis: Axis to gather along.
          * indices: Integer index tensor, same rank as this tensor.
@@ -533,7 +683,12 @@ namespace BeanTensor::Tensors {
          * tensor (the materializing inverse of split). Every input must share
          * rank, dtype and device, have equal shapes except along the axis, and
          * be contiguous; the output extent along the axis is the sum of the
-         * inputs'. The output never joins the autograd graph. Blocking
+         * inputs'. When any input has requires_grad=true the output joins the
+         * computation graph (cat_g backward: the dy slab of each input's axis
+         * range is copied out and accumulated into that input's grad; inputs
+         * past the third ride in the node's owned NodeMeta::extra_parents).
+         * Every input tensor must outlive backward(), exactly like any other
+         * graph parent. Blocking
          * contract matches index_select (CPU: caller thread; GPU: queued, then
          * drained by the move out, failures surfacing at the result's sync()).
          * @brief Concatenate tensors along an axis.
@@ -619,7 +774,11 @@ namespace BeanTensor::Tensors {
          * graph. matmul/bias_add/relu/softmax_ce and the elementwise
          * add/sub/mul/div/pow (tensor-tensor and tensor-scalar) and exp/log
          * ops attach a Node to their output
-         * whenever an input has requires_grad=true; backward() seeds this
+         * whenever an input has requires_grad=true; the indexing/view ops
+         * index_select/gather/cat/slice/split/reshape do the same (their
+         * per-op state — axis, slice ranges, cat overflow parents — rides in
+         * the node's owned NodeMeta; index tensors ride in Node::_saved);
+         * backward() seeds this
          * tensor's gradient with ones IN grad_dtype and fires every reachable
          * node in reverse-topological order (Kahn's algorithm over
          * Node::_n_outputs_pending), each node's _backward_fn accumulating the
@@ -1938,6 +2097,22 @@ namespace BeanTensor::Tensors {
         void compute_strides();
 
         /**
+         * Failure-atomic implementation of Tensor::to. Performs validate →
+         * allocate destination → copy → hand-off views → commit. The source
+         * data pointer, offset, and device are unchanged until the copy
+         * succeeds; a failure therefore leaves the source tensor usable and
+         * retryable.
+         * @brief Move this tensor to a different device atomically.
+         * @param new_device Destination device.
+         * @throws ErrorHandling::OutOfMemory CPU-side destination allocation failed.
+         * @throws ErrorHandling::GPUOutOfMemory GPU-side destination allocation failed
+         *         (a GPUError subclass).
+         * @throws ErrorHandling::GPUError A GPU copy or device operation failed.
+         * @throws ErrorHandling::GPUTaskOnCPUBuild GPU requested on a CPU-only build.
+         */
+        void atomic_transfer_to(Device new_device);
+
+        /**
          * this is the out-shaped delta of a broadcast elementwise op; op is
          * the operand the delta is being reduced into. See
          * Math/Autograd/ElementwiseG/ElementwiseGShared.h for how the plan's
@@ -2231,6 +2406,23 @@ namespace BeanTensor::Tensors {
          */
         void wire_node(void (*backward_fn)(Node*, Tensor*, Tensor**, size_t, DataTypes::DType), const Tensor& a, const Tensor& b, const Tensor& c);
 
+        /**
+         * Variadic variant of wire_node for ops with an unbounded input count
+         * (cat): takes the full input list plus an OWNED NodeMeta payload the
+         * op already filled in (tag/axis/...); the meta's extra_parents array
+         * is allocated here to hold every input past the first
+         * BT_TENSOR_MAX_PARENTS, which ride in Node::_inputs as usual.
+         * backward() walks _inputs and extra_parents alike, so the overflow
+         * parents join graph discovery, consumer counting and firing exactly
+         * like direct ones. No-op when no input requires gradients — the meta
+         * is deleted in that case (ownership always passes in).
+         * @brief Attach an N-input autograd node with owned metadata.
+         * @param backward_fn Backward trampoline invoked as (owning node, output grad, inputs, input count, grad dtype).
+         * @param inputs Every forward input tensor (borrowed; must outlive backward()).
+         * @param meta Owned metadata payload; adopted by the node, or deleted on no-op.
+         */
+        void wire_node_meta(void (*backward_fn)(Node*, Tensor*, Tensor**, size_t, DataTypes::DType), const std::vector<const Tensor*>& inputs, NodeMeta* meta);
+
         friend void detail::set_amount_gpu(Tensor& t, int64_t amount);
         friend void detail::set_amount_gpu(Tensor& t, uint64_t amount);
         friend void detail::set_amount_gpu(Tensor& t, float64_t amount);
@@ -2256,6 +2448,9 @@ namespace BeanTensor::Tensors {
         friend void detail::sgd_update_gpu(const Tensor&, const Tensor&, float64_t);
         friend void detail::adam_update_cpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&, float64_t, float64_t, float64_t, float64_t, float64_t, float64_t);
         friend void detail::adam_update_gpu(const Tensor&, const Tensor&, const Tensor&, const Tensor&, float64_t, float64_t, float64_t, float64_t, float64_t, float64_t);
+        friend void BeanTensor::Optimization::detail::gradscaler_div_scalar_inplace_cpu(Tensors::Tensor&, float64_t);
+        friend void BeanTensor::Optimization::detail::gradscaler_div_scalar_inplace_gpu(Tensors::Tensor&, float64_t);
+        friend class BeanTensor::Optimization::GradScaler;
         friend void detail::sum_cpu(const Tensor&, const Tensor&);
         friend void detail::sum_gpu(const Tensor&, const Tensor&);
         friend void detail::argmax_cpu(const Tensor&, uint64_t&);
@@ -2351,6 +2546,18 @@ namespace BeanTensor::Tensors {
         friend void detail::gather_gpu(const Tensor&, const Tensor&, const Tensor&, size_t);
         friend void detail::cat_cpu(const std::vector<Tensor>&, const Tensor&, size_t);
         friend void detail::cat_gpu(const std::vector<Tensor>&, const Tensor&, size_t);
+        friend void detail::index_select_g_cpu(const Tensor&, const Tensor&, const Tensor&, size_t);
+        friend void detail::index_select_g_gpu(const Tensor&, const Tensor&, const Tensor&, size_t);
+        friend void detail::gather_g_cpu(const Tensor&, const Tensor&, const Tensor&, size_t);
+        friend void detail::gather_g_gpu(const Tensor&, const Tensor&, const Tensor&, size_t);
+        friend void detail::cat_g_cpu(const Tensor&, const Tensor&, size_t, size_t);
+        friend void detail::cat_g_gpu(const Tensor&, const Tensor&, size_t, size_t);
+        friend void detail::slice_g_cpu(const Tensor&, const Tensor&, const NodeMeta&);
+        friend void detail::slice_g_gpu(const Tensor&, const Tensor&, const NodeMeta&);
+        friend void detail::index_select_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::gather_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::cat_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
+        friend void detail::slice_g_node(Node*, const Tensor*, Tensor**, size_t, DataTypes::DType);
         friend void detail::elementwise_cpu(const Tensor&, const Tensor&, const Tensor&, ElementwiseOp, const detail::ElementwiseBcast&);
         friend void detail::elementwise_gpu(const Tensor&, const Tensor&, const Tensor&, ElementwiseOp, const detail::ElementwiseBcast&);
         friend void detail::elementwise_scalar_cpu(const Tensor&, const float64_t&, const Tensor&, ElementwiseOp);

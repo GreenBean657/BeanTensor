@@ -2,8 +2,8 @@
  * @file Errors.h
  * @author GreenBean
  * @brief ErrorHandling exception types and GPU API error-check macros.
- * @version 0.10
- * @date 2026-10-30
+ * @version 0.11
+ * @date 2026-11-14
  */
 #pragma once
 
@@ -279,6 +279,17 @@ namespace BeanTensor::ErrorHandling {
          * @param detail What value or constraint was violated.
          */
         explicit InvalidHyperparameter(const std::string& detail) : std::invalid_argument("Invalid hyperparameter: " + detail) { }
+    };
+
+    class InvalidOOMPolicy : public std::invalid_argument {
+    public:
+        InvalidOOMPolicy() = delete;
+        /**
+         * @brief Exception thrown when the process-wide OOM policy is configured
+         *        inconsistently (e.g. checkpoint mode without a hook or destination).
+         * @param detail What constraint was violated.
+         */
+        explicit InvalidOOMPolicy(const std::string& detail) : std::invalid_argument("Invalid OOM policy: " + detail) { }
     };
 
     class DimensionTooLarge : public std::out_of_range {

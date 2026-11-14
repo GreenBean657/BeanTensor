@@ -5,9 +5,10 @@
  * zero_grad, set_grad_dtype (with its validate_grad_dtype precheck), and
  * backward() (reverse-mode backpropagation, Kahn's algorithm over consumer
  * counts). accumulate_grad dispatches to the grad_acc cpu/gpu backends.
- * @version 0.3
- * @date 2026-10-23
+ * @version 0.4
+ * @date 2026-11-14
  */
+#include <algorithm>
 #include <limits>
 #include <unordered_set>
 #include <vector>
@@ -17,6 +18,30 @@
 #include "Tensor/Tensor.h"
 
 namespace BeanTensor::Tensors {
+
+    namespace {
+        /**
+         * Every graph parent of a node: the direct _inputs plus any overflow
+         * parents the owning op stored in the node's owned metadata (cat wires
+         * more than BT_TENSOR_MAX_PARENTS inputs). Graph discovery, consumer
+         * counting and the firing loop all iterate through this one helper, so
+         * the two lists can never disagree.
+         * @brief Invoke fn on every graph parent of n.
+         * @param n Node whose parents are walked.
+         * @param fn Callable receiving each parent Tensor*.
+         */
+        template<typename F>
+        void for_each_graph_input(Node* n, F&& fn) {
+            for (auto i = size_t{0}; i < n->_n_inputs; ++i) {
+                fn(n->_inputs[i]);
+            }
+            if (n->_meta != nullptr) {
+                for (auto i = size_t{0}; i < n->_meta->n_extra_parents; ++i) {
+                    fn(n->_meta->extra_parents[i]);
+                }
+            }
+        }
+    }
 
     /**
      * Allocates grad with this tensor's shape, grad_dtype and device, zero-filled, and syncs
@@ -122,6 +147,54 @@ namespace BeanTensor::Tensors {
     }
 
     /**
+     * No-op (deleting meta) when no input requires grad. Otherwise marks this
+     * tensor as a non-leaf that requires grad, allocates a Node recording
+     * backward_fn, fills _inputs with the first BT_TENSOR_MAX_PARENTS inputs,
+     * and moves any overflow into meta->extra_parents (an owned array the node
+     * then adopts). Parents are borrowed raw pointers — they must outlive
+     * backward().
+     * @brief Attach an N-input autograd node with owned metadata.
+     * @param backward_fn Backward trampoline invoked as (owning node, output grad, inputs, input count, grad dtype).
+     * @param inputs Every forward input tensor.
+     * @param meta Owned metadata payload; adopted by the node, or deleted on no-op.
+     */
+    void Tensor::wire_node_meta(void (*backward_fn)(Node*, Tensor*, Tensor**, size_t, DataTypes::DType), const std::vector<const Tensor*>& inputs, NodeMeta* meta) {
+        auto any_grad = false;
+        for (const auto* t : inputs) {
+            if (t->requires_grad) {
+                any_grad = true;
+                break;
+            }
+        }
+        if (!any_grad) {
+            delete meta;
+            return;
+        }
+        this->requires_grad = true;
+        this->is_leaf = false;
+        auto* new_node = new Node{};
+        new_node->_backward_fn = backward_fn;
+        const auto direct = std::min(inputs.size(), static_cast<size_t>(BT_TENSOR_MAX_PARENTS));
+        for (auto i = size_t{0}; i < direct; ++i) {
+            new_node->_inputs[i] = const_cast<Tensor*>(inputs[i]);
+            this->parents[i] = new_node->_inputs[i];
+        }
+        new_node->_n_inputs = static_cast<uint8_t>(direct);
+        this->n_parents = new_node->_n_inputs;
+        if (inputs.size() > direct) {
+            const auto extra = inputs.size() - direct;
+            meta->extra_parents = new Tensor*[extra];
+            for (auto i = size_t{0}; i < extra; ++i) {
+                meta->extra_parents[i] = const_cast<Tensor*>(inputs[direct + i]);
+            }
+            meta->n_extra_parents = extra;
+        }
+        new_node->_meta = meta;
+        delete this->node; // re-wiring replaces any stale node
+        this->node = new_node;
+    }
+
+    /**
      * Deletes grad (its destructor drains pending workers) and resets it to nullptr;
      * the next accumulation reallocates it.
      * @brief Drop this tensor's accumulated gradient.
@@ -218,9 +291,9 @@ namespace BeanTensor::Tensors {
             }
             visited.push_back(t);
             if (t->node != nullptr) {
-                for (auto i = size_t{0}; i < t->node->_n_inputs; ++i) {
-                    stack.push_back(t->node->_inputs[i]);
-                }
+                for_each_graph_input(t->node, [&stack](Tensor* p) {
+                    stack.push_back(p);
+                });
             }
         }
         // Intermediate (node-owning) grads hold only this call's delta, in this
@@ -251,16 +324,18 @@ namespace BeanTensor::Tensors {
             if (t->node == nullptr) {
                 continue;
             }
-            for (auto i = size_t{0}; i < t->node->_n_inputs; ++i) {
-                if (
-                    const auto* in = t->node->_inputs[i];
-                    in->node != nullptr
-                    ) {
+            auto fan_in_error = false;
+            for_each_graph_input(t->node, [&fan_in_error](Tensor* in) {
+                if (in->node != nullptr) {
                     if (in->node->_n_outputs_pending == std::numeric_limits<uint8_t>::max()) {
-                        throw ErrorHandling::DimensionTooLarge("backward graph fan-in exceeds 255");
+                        fan_in_error = true;
+                        return;
                     }
                     ++in->node->_n_outputs_pending;
                 }
+            });
+            if (fan_in_error) [[unlikely]] {
+                throw ErrorHandling::DimensionTooLarge("backward graph fan-in exceeds 255");
             }
         }
         std::vector<Tensor*> ready;
@@ -280,14 +355,11 @@ namespace BeanTensor::Tensors {
             auto* const n = t->node;
             n->_backward_fn(n, t->grad, n->_inputs, n->_n_inputs, grad_dtype);
             ++fired;
-            for (auto i = size_t{0}; i < n->_n_inputs; ++i) {
-                if (
-                    auto* const in = n->_inputs[i];
-                    in->node != nullptr && --in->node->_n_outputs_pending == 0
-                    ) {
+            for_each_graph_input(n, [&ready](Tensor* in) {
+                if (in->node != nullptr && --in->node->_n_outputs_pending == 0) {
                     ready.push_back(in);
                 }
-            }
+            });
         }
         if (fired != node_count) [[unlikely]] {
             // The graph is built exclusively by binary/unary ops on fresh

@@ -2,9 +2,11 @@
  * @file Slice.cpp
  * @author GreenBean
  * @brief Tensor::slice / Tensor::split: strided same-buffer views over
- * per-dimension [start, end) ranges.
- * @version 0.1
- * @date 2026-10-22
+ * per-dimension [start, end) ranges. When the source requires grad each view
+ * joins the graph with a slice_g node whose ranges ride in the node's owned
+ * NodeMeta — split's chunks therefore reuse the slice backward verbatim.
+ * @version 0.2
+ * @date 2026-11-14
  */
 #include <string>
 #include <utility>
@@ -20,6 +22,8 @@ namespace BeanTensor::Tensors {
      * non-leading dimension yields a non-contiguous view (ops requiring
      * contiguous operands reject it with NotImplemented, matching the rest of
      * the framework). Works identically on CPU and GPU — no data moves.
+     * Autograd: when this tensor requires grad the view joins the graph with a
+     * slice_g node; the recorded ranges live in the node's owned NodeMeta.
      * @brief View into per-dimension [start, end) ranges of this tensor.
      * @param ranges One [start, end) range per dimension (rank must match).
      * @return View tensor sharing this tensor's buffer.
@@ -67,6 +71,18 @@ namespace BeanTensor::Tensors {
         view.is_contiguous = contiguous || view.numel == 0;
         this->children.emplace_back(&view);
         view.view_parents.emplace_back(this);
+        view.wire_node(detail::slice_g_bridge, *this);
+        if (view.node != nullptr) {
+            auto* meta = new NodeMeta{};
+            meta->tag = NodeMetaTag::Slice;
+            std::copy_n(this->shape, BT_TENSOR_MAX_DIMS, meta->src_shape);
+            meta->src_ndim = this->ndim;
+            for (auto d = size_t{0}; d < this->ndim; ++d) {
+                meta->ranges[d][0] = ranges[d].first;
+                meta->ranges[d][1] = ranges[d].second;
+            }
+            view.node->_meta = meta;
+        }
         return view;
     }
 

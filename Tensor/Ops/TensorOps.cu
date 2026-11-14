@@ -693,6 +693,11 @@ __global__ void impli_gpu_set_static_val_unpacked(Ptr* __restrict__ ptr, const s
          */
         template<typename Val>
         __host__ void launch_set_static(void* data, const size_t numel, const DataTypes::DType dtype, const Val amount) {
+            // An empty tensor has nothing to fill; <<<0, threads>>> would be an
+            // invalid configuration.
+            if (numel == 0) {
+                return;
+            }
             constexpr size_t threads = 256;
             const size_t blocks = (numel + threads - 1) / threads;
             using DType = DataTypes::DType;
