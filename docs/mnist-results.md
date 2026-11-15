@@ -17,6 +17,7 @@
 | backend | test accuracy | test mean loss | wall time |
 |--------:|--------------:|---------------:|----------:|
 | BeanTensor CPU | 96.88% | 0.104828 | 5.88 s |
+| BeanTensor Python bindings (CPU) | 96.88% | 0.104828 | 5.84 s |
 | BeanTensor CUDA | 96.95% | 0.101921 | 5.59 s |
 | PyTorch CPU | 96.60% | 0.128132 | 1.887 s |
 | PyTorch CUDA | N/A | N/A | N/A |
@@ -34,6 +35,21 @@ cmake -B build-cpu -S . -DUSE_CUDA=OFF -DUSE_HIP=OFF -DBUILD_TESTING=ON -DCMAKE_
 cmake --build build-cpu --target BeanTensorV5 -j 6
 ./build-cpu/BeanTensorV5
 ```
+
+### BeanTensor Python bindings (CPU)
+
+```bash
+cd <your-beantensor-clone>
+./fetch_mnist.sh
+cmake -B build-cpu -S . -DUSE_CUDA=OFF -DUSE_HIP=OFF -DBUILD_TESTING=ON -DBUILD_PYTHON_BINDINGS=ON -DCMAKE_BUILD_TYPE=Release -G Ninja
+cmake --build build-cpu --target beantensor -j 6
+PYTHONPATH=build-cpu/Bindings python3 python/digits.py
+```
+
+`python/digits.py` replays the C++ demo call-for-call through the pybind11
+surface; every epoch line's accuracy and loss fields are bit-identical to the
+`BeanTensorV5` run above (96.88% / 0.104828 on epoch 3), with only wall-time
+fields differing.
 
 ### BeanTensor CUDA
 

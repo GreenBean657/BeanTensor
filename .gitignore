@@ -18,5 +18,6 @@ comparison/perf-results/
 .clangd
 gpu-test.sh
 datasets/
+digits_mlp.bt
 .superpowers
 docs/doxygen/

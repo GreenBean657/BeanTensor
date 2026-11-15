@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 4.2)
 option(USE_HIP "Build with AMD ROCM" OFF)
 option(USE_CUDA "Build with NVIDIA CUDA" ON)
 option(USE_STRIX_HALO "Build with Xilinx StrixHalo NPU backend" OFF)
+option(BUILD_PYTHON_BINDINGS "Build the pybind11 'beantensor' Python module (requires pybind11 from pip)" OFF)
 
 if (USE_HIP AND USE_CUDA)
     message(FATAL_ERROR "USE_HIP and USE_CUDA are mutually exclusive — enable only one.")
@@ -1009,6 +1010,11 @@ elseif(USE_CUDA)
     target_link_libraries(BeanTensorV5Core PUBLIC CUDA::cublas)
 endif()
 
+# Python bindings are opt-in: the pybind11 CMake package ships with the pip
+# install, and a default build must never require Python on the system.
+if (BUILD_PYTHON_BINDINGS)
+    add_subdirectory(Bindings)
+endif ()
 
 add_executable(BeanTensorV5 main.cpp)
 target_link_libraries(BeanTensorV5 PRIVATE BeanTensorV5Core)
@@ -1692,6 +1698,26 @@ if(BUILD_TESTING)
     set_tests_properties(mnist_cnn PROPERTIES LABELS mnist WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     add_test(NAME csv_demo COMMAND BeanTensorV5CSVDemo)
     set_tests_properties(csv_demo PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    if (BUILD_PYTHON_BINDINGS)
+        add_test(NAME bindings_smoke
+                 COMMAND "${BEANTENSOR_PYTHON3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tests/bindings_smoke.py)
+        set_tests_properties(bindings_smoke PROPERTIES
+                ENVIRONMENT "PYTHONPATH=$<TARGET_FILE_DIR:beantensor>"
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+        # GPU variant: same script with --gpu, synthetic training on
+        # Device::GPU. Registered only when the build has a GPU backend, and
+        # run only through gpu-test.sh (the flock-serialized GPU gate) —
+        # never bare ctest.
+        if (USE_CUDA OR USE_HIP)
+            add_test(NAME bindings_gpu
+                     COMMAND "${BEANTENSOR_PYTHON3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tests/bindings_smoke.py --gpu)
+            set_tests_properties(bindings_gpu PROPERTIES
+                    ENVIRONMENT "PYTHONPATH=$<TARGET_FILE_DIR:beantensor>"
+                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+        endif ()
+    endif ()
 
     add_executable(BeanTensorV5Benchmarks benchmark/benchmark.cpp)
     if(USE_HIP)

@@ -38,10 +38,18 @@ namespace {
         std::cout << "Device: " << Tensors::stringify_device_source(device) << "\n";
         std::cout << std::string(60, '=') << "\n";
 
+        // Construct the layers as separate statements in layer order: the
+        // Linears draw their init seeds from the process-wide default
+        // generator at construction, and one-expression Sequential::make(...)
+        // would leave that draw order to the compiler's (unspecified)
+        // argument evaluation order — GCC evaluates right-to-left, which
+        // silently reassigns the seeds and changes the training trajectory.
+        auto fc1 = std::make_unique<nn::Linear>(kInputs, kHidden, kDType, device);
+        auto fc2 = std::make_unique<nn::Linear>(kHidden, kClasses, kDType, device);
         auto net = nn::Sequential::make(
-            std::make_unique<nn::Linear>(kInputs, kHidden, kDType, device),
+            std::move(fc1),
             std::make_unique<nn::Relu>(),
-            std::make_unique<nn::Linear>(kHidden, kClasses, kDType, device));
+            std::move(fc2));
         std::cout << net;
 
         auto train_data = demos::mnist::upload_flat(train, device, kDType, kHostDType);

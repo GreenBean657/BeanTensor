@@ -76,6 +76,56 @@ set: their scanner findings are namespace-scope `detail` internals (autograd
 trampolines, dispatcher hooks) — not binding surface — plus the explicit
 byte-I/O exception above. See `docs/roadmap.md`.
 
+## Python bindings
+
+The opt-in `beantensor` extension module (`Bindings/pybind_module.cpp`, built
+with `-DBUILD_PYTHON_BINDINGS=ON`, pybind11 >= 3.0 from pip) exposes the training
+surface used by the demos: `set_seed`; `Tensor` (`from_numpy`/`to_numpy`,
+`shape`/`dtype`/`device`, `set_zero`, `sync`, `to` (in-place, blocking device
+move), `add`, `item`, `backward`);
+`Linear`/`Relu`/`Gelu`/`Sequential` (`forward`, `zero_grad`, `adam_step`,
+`train`/`eval`, `named_parameters`); `softmax_cross_entropy`;
+`load_mnist_flat`; `DataLoader` (`reset`, `next_batch`); `evaluate` returning
+`(accuracy, mean_loss)`; and `save`/`load` with `CheckpointLevel`.
+
+Determinism contract: the bindings add no RNG draws, conversions, or
+reordering of their own, so a Python training loop that replays a C++ program
+call-for-call reproduces it bit-for-bit. `python/digits.py` does exactly this
+against the `BeanTensorV5` MNIST demo: the epoch accuracy/loss lines are
+identical to the C++ binary's on the same machine, data, and commit (only
+wall-time fields differ). One replay rule follows from the engine's seed
+model: layers draw their init seeds from the process-wide generator in
+construction order, so Python must construct layers in the same statement
+order the C++ reference uses — C++ argument evaluation order is unspecified,
+and collapsing layer construction into one call expression would make the
+draw order compiler-dependent.
+
+Graph lifetime: the engine's graph nodes borrow raw pointers to their inputs
+and to module parameters, so every graph-output tensor pins its parents with
+result-to-parent `py::keep_alive` — `Module.forward`'s output keeps the module
+and the input alive, `softmax_cross_entropy`'s loss keeps the logits and
+labels alive, and `Tensor.add`'s output keeps both operands alive. Deleting
+the Python-side temporaries is safe while the output you backward from stays
+alive. One engine rule comes with it: because every `forward()` replaces the
+module's forward-cache (`clear_forward_cache`, see `Module/Module.h`), a
+module's output must be backwarded BEFORE that module's next `forward()` —
+the natural training-loop order (forward, loss, backward, step, zero_grad)
+satisfies it.
+
+Build and run:
+
+```bash
+cmake -B <build-dir> -S . -DUSE_CUDA=OFF -DUSE_HIP=OFF \
+      -DBUILD_TESTING=ON -DBUILD_PYTHON_BINDINGS=ON -DCMAKE_BUILD_TYPE=Release -G Ninja
+cmake --build <build-dir> --target beantensor -j 6
+PYTHONPATH=<build-dir>/Bindings python3 python/digits.py
+```
+
+`python/digits.py` is stdlib-only apart from `beantensor` itself. It accepts
+`--device gpu` (requires a CUDA/HIP build), `--data-dir`, and `--save`; after
+training it writes a `.bt` checkpoint and reloads it, printing the reloaded
+model's eval numbers.
+
 ## CSV datasets
 
 `Data::load_csv(path, options)` turns a CSV file into the tensor pair
