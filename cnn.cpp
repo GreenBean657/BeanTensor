@@ -89,20 +89,40 @@ namespace {
         std::cout << "Device: " << Tensors::stringify_device_source(device) << "\n";
         std::cout << std::string(60, '=') << "\n";
 
+        // Construct the layers as separate statements in layer order: the
+        // Conv2ds and Linears draw their init seeds from the process-wide
+        // default generator at construction, and one-expression
+        // Sequential::make(...) would leave that draw order to the
+        // compiler's (unspecified) argument evaluation order — GCC evaluates
+        // right-to-left, which silently reassigns the seeds and changes the
+        // training trajectory.
+        auto conv1 = std::make_unique<nn::Conv2d>(1, kChannels1, 3, 1, 0, kDType, device);
+        auto bn1 = std::make_unique<nn::BatchNorm>(kChannels1, kDType, device);
+        auto relu1 = std::make_unique<nn::Relu>();
+        auto pool1 = std::make_unique<nn::MaxPool2d>(2);
+        auto conv2 = std::make_unique<nn::Conv2d>(kChannels1, kChannels2, 3, 1, 0, kDType, device);
+        auto bn2 = std::make_unique<nn::BatchNorm>(kChannels2, kDType, device);
+        auto relu2 = std::make_unique<nn::Relu>();
+        auto pool2 = std::make_unique<nn::MaxPool2d>(2);
+        auto flatten = std::make_unique<nn::Flatten>();
+        auto drop = std::make_unique<nn::Dropout>(kDropout);
+        auto fc1 = std::make_unique<nn::Linear>(kFlattened, kHidden, kDType, device);
+        auto relu3 = std::make_unique<nn::Relu>();
+        auto fc2 = std::make_unique<nn::Linear>(kHidden, kClasses, kDType, device);
         auto net = nn::Sequential::make(
-            std::make_unique<nn::Conv2d>(1, kChannels1, 3, 1, 0, kDType, device),
-            std::make_unique<nn::BatchNorm>(kChannels1, kDType, device),
-            std::make_unique<nn::Relu>(),
-            std::make_unique<nn::MaxPool2d>(2),
-            std::make_unique<nn::Conv2d>(kChannels1, kChannels2, 3, 1, 0, kDType, device),
-            std::make_unique<nn::BatchNorm>(kChannels2, kDType, device),
-            std::make_unique<nn::Relu>(),
-            std::make_unique<nn::MaxPool2d>(2),
-            std::make_unique<nn::Flatten>(),
-            std::make_unique<nn::Dropout>(kDropout),
-            std::make_unique<nn::Linear>(kFlattened, kHidden, kDType, device),
-            std::make_unique<nn::Relu>(),
-            std::make_unique<nn::Linear>(kHidden, kClasses, kDType, device));
+            std::move(conv1),
+            std::move(bn1),
+            std::move(relu1),
+            std::move(pool1),
+            std::move(conv2),
+            std::move(bn2),
+            std::move(relu2),
+            std::move(pool2),
+            std::move(flatten),
+            std::move(drop),
+            std::move(fc1),
+            std::move(relu3),
+            std::move(fc2));
         std::cout << net;
 
         auto train_data = demos::mnist::upload_nchw(train, device, kDType, kHostDType);

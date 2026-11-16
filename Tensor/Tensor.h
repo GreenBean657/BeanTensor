@@ -1028,6 +1028,7 @@ namespace BeanTensor::Tensors {
          * shape).
          * @brief Full-tensor sum reduction.
          * @return Shape-{1} tensor holding the sum.
+         * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
          */
         [[nodiscard]] Tensor sum() const &;
 

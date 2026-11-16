@@ -117,13 +117,13 @@ namespace BeanTensor::Serialization {
                 case k_tag_float16x2: return DataTypes::DType::Float16x2;
                 case k_tag_bfloat16x2: return DataTypes::DType::BFloat16x2;
                 case k_tag_int4x2: return DataTypes::DType::Int4x2;
+                [[unlikely]] default: throw ErrorHandling::CorruptFile("unknown dtype tag " + std::to_string(tag));;
             }
-            throw ErrorHandling::CorruptFile("unknown dtype tag " + std::to_string(tag));
         }
 
         // ---- CRC32 (IEEE, reflected, polynomial 0xEDB88320) ----
         [[nodiscard]] uint32_t crc32(const uint8_t* data, const size_t n) {
-            static const auto table = [] {
+            static constexpr auto table = [] {
                 auto t = std::array<uint32_t, 256>{};
                 for (uint32_t i = 0; i < 256; ++i) {
                     auto c = i;

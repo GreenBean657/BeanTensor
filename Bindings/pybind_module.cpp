@@ -30,6 +30,7 @@ namespace py = pybind11;
 
 using BeanTensor::Data::DataLoader;
 using BeanTensor::DataTypes::DType;
+using BeanTensor::float16_t;
 using BeanTensor::float32_t;
 using BeanTensor::float64_t;
 using BeanTensor::Modules::Gelu;
@@ -54,18 +55,28 @@ namespace {
     }
 
     /**
-     * @brief Map a NumPy dtype onto the engine dtype for the four dtypes the
-     * buffer exchange supports.
+     * @brief Map a NumPy dtype onto the engine dtype for every NumPy-native
+     * scalar dtype with an engine counterpart (float16 through uint64).
      * @param dt NumPy dtype of the source array.
      * @return Matching engine dtype.
-     * @throws py::value_error The dtype is not float32/float64/int32/int64.
+     * @throws py::value_error The dtype has no engine counterpart (bool,
+     *         float128, complex, object, str).
      */
     [[nodiscard]] DType dtype_from_numpy(const py::dtype& dt) {
+        if (dt.is(py::dtype("float16"))) {
+            return DType::Float16;
+        }
         if (dt.is(py::dtype::of<float32_t>())) {
             return DType::Float32;
         }
         if (dt.is(py::dtype::of<float64_t>())) {
             return DType::Float64;
+        }
+        if (dt.is(py::dtype::of<int8_t>())) {
+            return DType::Int8;
+        }
+        if (dt.is(py::dtype::of<int16_t>())) {
+            return DType::Int16;
         }
         if (dt.is(py::dtype::of<int32_t>())) {
             return DType::Int32;
@@ -73,7 +84,22 @@ namespace {
         if (dt.is(py::dtype::of<int64_t>())) {
             return DType::Int64;
         }
-        throw py::value_error("from_numpy: unsupported dtype (supported: float32, float64, int32, int64)");
+        if (dt.is(py::dtype::of<uint8_t>())) {
+            return DType::UInt8;
+        }
+        if (dt.is(py::dtype::of<uint16_t>())) {
+            return DType::UInt16;
+        }
+        if (dt.is(py::dtype::of<uint32_t>())) {
+            return DType::UInt32;
+        }
+        if (dt.is(py::dtype::of<uint64_t>())) {
+            return DType::UInt64;
+        }
+        throw py::value_error(
+            "from_numpy: unsupported dtype (supported: float16, float32, float64, "
+            "int8, int16, int32, int64, uint8, uint16, uint32, uint64)"
+        );
     }
 
     /**
@@ -98,17 +124,20 @@ namespace {
     /**
      * @brief Copy one element out to a freshly allocated NumPy array of the
      * matching dtype, so the result survives the tensor's destruction.
-     * @tparam T Element type matching the tensor's dtype.
+     * @tparam T Element type matching the tensor's dtype; only sizeof(T) is
+     *         used, so the packed/enum engine element types work too.
      * @param t Synced CPU tensor.
+     * @param np_dt NumPy dtype of the output array (numpy has no dtype for the
+     *        engine's BFloat16 or packed lanes, hence the explicit argument).
      * @return New 1-element NumPy array; the copy owns its buffer.
      */
     template <typename T>
-    [[nodiscard]] py::array to_numpy_typed(const Tensor& t) {
+    [[nodiscard]] py::array to_numpy_typed(const Tensor& t, const py::dtype& np_dt) {
         std::vector<ssize_t> dims(t.rank());
         for (size_t i = 0; i < t.rank(); ++i) {
             dims[i] = static_cast<ssize_t>(t.dim(i));
         }
-        py::array_t<T> out(dims);
+        py::array out(np_dt, dims);
         t.read_element(0, out.mutable_data(), static_cast<size_t>(out.size()) * sizeof(T));
         return out;
     }
@@ -117,7 +146,10 @@ namespace {
      * @brief Sync a CPU tensor and copy its elements out to a new NumPy array.
      * @param t Source tensor.
      * @return New NumPy array owning a copy of the tensor's data.
-     * @throws RuntimeError The tensor is on GPU or holds an unsupported dtype.
+     * @throws RuntimeError The tensor is on GPU.
+     * @throws py::value_error The dtype has no NumPy-native counterpart
+     *         (BFloat16, BFloat16x2, Float16x2, Int4x2); read those with
+     *         to_bytes() instead.
      * @note The bulk read copies the tensor's base buffer. Every tensor the
      *       current binding surface can produce is freshly allocated and
      *       contiguous; engine-side strided views would need per-element
@@ -129,17 +161,85 @@ namespace {
         }
         t.sync();
         switch (t.get_dtype()) {
+            case DType::Float16:
+                return to_numpy_typed<float16_t>(t, py::dtype("float16"));
             case DType::Float32:
-                return to_numpy_typed<float32_t>(t);
+                return to_numpy_typed<float32_t>(t, py::dtype::of<float32_t>());
             case DType::Float64:
-                return to_numpy_typed<float64_t>(t);
+                return to_numpy_typed<float64_t>(t, py::dtype::of<float64_t>());
+            case DType::Int8:
+                return to_numpy_typed<int8_t>(t, py::dtype::of<int8_t>());
+            case DType::Int16:
+                return to_numpy_typed<int16_t>(t, py::dtype::of<int16_t>());
             case DType::Int32:
-                return to_numpy_typed<int32_t>(t);
+                return to_numpy_typed<int32_t>(t, py::dtype::of<int32_t>());
             case DType::Int64:
-                return to_numpy_typed<int64_t>(t);
-            default:
-                raise_runtime_error("to_numpy: unsupported dtype (supported: float32, float64, int32, int64)");
+                return to_numpy_typed<int64_t>(t, py::dtype::of<int64_t>());
+            case DType::UInt8:
+                return to_numpy_typed<uint8_t>(t, py::dtype::of<uint8_t>());
+            case DType::UInt16:
+                return to_numpy_typed<uint16_t>(t, py::dtype::of<uint16_t>());
+            case DType::UInt32:
+                return to_numpy_typed<uint32_t>(t, py::dtype::of<uint32_t>());
+            case DType::UInt64:
+                return to_numpy_typed<uint64_t>(t, py::dtype::of<uint64_t>());
+            default: {
+                const auto name = BeanTensor::DataTypes::dtype_to_string(t.get_dtype());
+                throw py::value_error(
+                    std::string{"to_numpy: dtype "} + name.c_str() +
+                    " has no NumPy-native counterpart; use to_bytes() for the raw element bytes"
+                );
+            }
         }
+    }
+
+    /**
+     * @brief Build a tensor from raw element bytes (the only host path for the
+     *        dtypes NumPy cannot represent: BFloat16, the x2 float packs and
+     *        Int4x2 — and any future dtype).
+     * @param data Little-endian element bytes, exactly element_count times the
+     *        dtype's element size.
+     * @param shape Tensor shape.
+     * @param dtype Engine dtype the bytes are interpreted as.
+     * @param device Device the tensor is created on.
+     * @return Owning tensor with the given shape and dtype.
+     * @throws py::value_error The byte count does not match shape times dtype.
+     */
+    [[nodiscard]] Tensor from_bytes(py::bytes data, std::vector<size_t> shape, const DType dtype, const Device device) {
+        char* buffer = nullptr;
+        Py_ssize_t length = 0;
+        if (PyBytes_AsStringAndSize(data.ptr(), &buffer, &length) != 0) {
+            throw py::error_already_set();
+        }
+        auto count = size_t{1};
+        for (const size_t dim : shape) {
+            count *= dim;
+        }
+        if (
+            const size_t expected = count * BeanTensor::DataTypes::dtype_bytes(dtype);
+            static_cast<size_t>(length) != expected
+        ) {
+            const auto msg = std::string{"from_bytes: got "} + std::to_string(length) +
+                " bytes, but shape and dtype require exactly " + std::to_string(expected);
+            throw py::value_error(msg);
+        }
+        Tensor t(std::move(shape), dtype, device);
+        t.write_element(0, buffer, static_cast<size_t>(length));
+        return t;
+    }
+
+    /**
+     * @brief Sync the tensor and copy its element bytes out to a Python bytes
+     *        object — the exact inverse of from_bytes.
+     * @param t Source tensor.
+     * @return Exactly element_count times the dtype's element size bytes.
+     */
+    [[nodiscard]] py::bytes to_bytes(const Tensor& t) {
+        t.sync();
+        const size_t n = t.byte_count();
+        std::string out(n, '\0');
+        t.read_element(0, out.data(), n);
+        return py::bytes(out);
     }
 
     /**
@@ -290,11 +390,21 @@ PYBIND11_MODULE(beantensor, m) {
     m.attr("__version__") = "0.1";
 
     py::enum_<DType>(m, "DType")
+        .value("BFloat16", DType::BFloat16)
+        .value("BFloat16x2", DType::BFloat16x2)
         .value("Float16", DType::Float16)
+        .value("Float16x2", DType::Float16x2)
         .value("Float32", DType::Float32)
         .value("Float64", DType::Float64)
+        .value("Int64", DType::Int64)
         .value("Int32", DType::Int32)
-        .value("Int64", DType::Int64);
+        .value("Int16", DType::Int16)
+        .value("Int8", DType::Int8)
+        .value("UInt64", DType::UInt64)
+        .value("UInt32", DType::UInt32)
+        .value("UInt16", DType::UInt16)
+        .value("UInt8", DType::UInt8)
+        .value("Int4x2", DType::Int4x2);
 
     py::enum_<Device>(m, "Device")
         .value("CPU", Device::CPU)
@@ -313,7 +423,15 @@ PYBIND11_MODULE(beantensor, m) {
 
     py::class_<Tensor>(m, "Tensor")
         .def_static("from_numpy", &from_numpy)
+        // Raw-bits construction for the dtypes NumPy cannot represent
+        // (BFloat16, the x2 float packs, Int4x2): one bulk host write after an
+        // exact byte-size check.
+        .def_static("from_bytes", &from_bytes,
+                    py::arg("data"), py::arg("shape"), py::arg("dtype"),
+                    py::arg("device") = Device::CPU)
         .def("to_numpy", &to_numpy)
+        // Exact inverse of from_bytes; works for every engine dtype.
+        .def("to_bytes", &to_bytes)
         .def_property_readonly("shape", &shape_tuple)
         .def_property_readonly("dtype", &Tensor::get_dtype)
         .def_property_readonly("device", &Tensor::get_device)

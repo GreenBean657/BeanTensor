@@ -277,14 +277,17 @@ namespace BeanTensor::Tensors::detail {
 namespace BeanTensor::Tensors {
 
     /**
-     * Validates rank/dtype/device implicitly via the backends, syncs, then routes
-     * to the CPU or GPU backend and wires the autograd node (SumG backward:
-     * dx = the scalar seed broadcast to this tensor's shape).
+     * Syncs, rejects non-contiguous inputs (same contract as mean), then
+     * routes to the CPU or GPU backend and wires the autograd node (SumG
+     * backward: dx = the scalar seed broadcast to this tensor's shape).
      * @brief Sum of every element.
      * @return Single element tensor of the same dtype and device.
      */
     Tensor Tensor::sum() const & {
         sync();
+        if (!this->is_contiguous) {
+            throw ErrorHandling::NotImplemented();
+        }
         auto out = Tensor(std::vector<size_t>{1}, this->dtype, this->device, false);
         if (this->device == Device::CPU) {
             detail::sum_cpu(*this, out);

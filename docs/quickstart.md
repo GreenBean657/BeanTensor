@@ -49,10 +49,17 @@ int main() {
     auto train_data = demos::mnist::upload_flat(train, Device::CPU, DType::Float32, DType::Float32);
     auto test_data = demos::mnist::upload_flat(test, Device::CPU, DType::Float32, DType::Float32);
 
+    // Construct the layers as separate statements in layer order: the
+    // Linears draw their init seeds from the process-wide default
+    // generator at construction, and one-expression Sequential::make(...)
+    // would leave that draw order to the compiler's (unspecified)
+    // argument evaluation order.
+    auto fc1 = std::make_unique<nn::Linear>(784, 128);
+    auto fc2 = std::make_unique<nn::Linear>(128, 10);
     auto net = nn::Sequential::make(
-        std::make_unique<nn::Linear>(784, 128),
+        std::move(fc1),
         std::make_unique<nn::Relu>(),
-        std::make_unique<nn::Linear>(128, 10));
+        std::move(fc2));
 
     auto train_loader = data::DataLoader(train_data->images, train_data->labels, 100, true, 1234, true);
     auto test_loader = data::DataLoader(test_data->images, test_data->labels, 100, false, std::nullopt, true);

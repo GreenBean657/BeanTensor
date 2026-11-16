@@ -4,7 +4,7 @@
  * @brief Reduction, optimization and shape ops tests - framework-free assertion suite.
  * Covers reshape, sgd_update/sgd_step, sum and argmax across the full dtype family (CPU threaded + SIMD tiers),
  * and the GPU (CUDA/HIP) paths for all four ops when a backend and device exist.
- * @version 0.3
+ * @version 0.4
  * @date 2026-10-26
  */
 #include <cmath>
@@ -319,6 +319,54 @@ static void test_sum_cpu() {
         CHECK(i4x2_lo(s.at<int4x2_t>({0})) == int8_t{5});
         CHECK(i4x2_hi(s.at<int4x2_t>({0})) == int8_t{-8});
     }
+}
+
+// --- sum/mean non-contiguous view rejection ---
+
+static void test_sum_mean_noncontiguous() {
+    // Inner-dim slice: the {3,2} view inherits row stride 4, so it is a
+    // non-contiguous view. The reduction family contract (already enforced
+    // by min/max/mean) rejects those views instead of silently reading the
+    // parent's buffer as if it were contiguous.
+    auto base = Tensor({3, 4}, DType::Float32, Device::CPU);
+    for (auto r = size_t{0}; r < 3; ++r) {
+        for (auto c = size_t{0}; c < 4; ++c) {
+            base.set<float32_t>({r, c}, static_cast<float32_t>(r * 4 + c));
+        }
+    }
+    auto view = base.slice({{0, 3}, {1, 3}}); // inner box: non-contiguous view
+
+    auto threw = false;
+    try {
+        auto s = view.sum();
+        static_cast<void>(s);
+    } catch (const BeanTensor::ErrorHandling::NotImplemented&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    threw = false;
+    try {
+        auto m = view.mean();
+        static_cast<void>(m);
+    } catch (const BeanTensor::ErrorHandling::NotImplemented&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    // The contiguous parent still reduces correctly: 0..11 sums to 66.
+    auto s = base.sum();
+    CHECK(near(s.at<float32_t>({0}), 66.0f, 1e-6));
+    auto m = base.mean();
+    CHECK(near(m.at<float32_t>({0}), 5.5f, 1e-6));
+
+    // A leading-dim slice is a contiguous view and must keep reducing:
+    // rows 1..2 hold 4..11, sum 60, mean 7.5 over 8 elements.
+    auto leading = base.slice({{1, 3}, {0, 4}});
+    auto ls = leading.sum();
+    CHECK(near(ls.at<float32_t>({0}), 60.0f, 1e-6));
+    auto lm = leading.mean();
+    CHECK(near(lm.at<float32_t>({0}), 7.5f, 1e-6));
 }
 
 // --- argmax ---
@@ -905,6 +953,7 @@ static void test_sum_avx2_kernels() {
 int main() {
     test_reshape_cpu();
     test_sum_cpu();
+    test_sum_mean_noncontiguous();
     test_sum_avx2_kernels();
     test_argmax_cpu();
     test_sgd_cpu();

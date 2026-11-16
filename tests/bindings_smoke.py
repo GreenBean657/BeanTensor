@@ -124,7 +124,7 @@ base = np.arange(12, dtype=np.float32).reshape(3, 4)
 expect_raises(ValueError, lambda: bt.Tensor.from_numpy(base[:, ::2]), "strided view")
 expect_raises(ValueError, lambda: bt.Tensor.from_numpy(base.T), "transposed view")
 expect_raises(ValueError, lambda: bt.Tensor.from_numpy(np.arange(10)[::2]), "step-2 view")
-expect_raises(ValueError, lambda: bt.Tensor.from_numpy(np.arange(8, dtype=np.uint8)), "uint8")
+expect_raises(ValueError, lambda: bt.Tensor.from_numpy(np.zeros(8, dtype=np.bool_)), "bool")
 
 # (d) shape/dtype/device report correctly.
 t = bt.Tensor.from_numpy(np.zeros((2, 3, 4), dtype=np.float64))
@@ -699,5 +699,128 @@ s.backward(F32)
 assert lifetime_grads_blob(net) == add_ref_grads_blob, "add: gradients diverged bitwise"
 del net, s
 gc.collect()
+
+# --- All engine dtypes: full enum, NumPy-native inference, raw-bits I/O ---
+
+# (a) bt.DType exposes every engine dtype (15 values — Tensor/DTypes.h:89-105;
+# the task brief said 14, the enum itself carries 15).
+ALL_DTYPES = (
+    bt.DType.BFloat16, bt.DType.BFloat16x2, bt.DType.Float16, bt.DType.Float16x2,
+    bt.DType.Float32, bt.DType.Float64, bt.DType.Int64, bt.DType.Int32,
+    bt.DType.Int16, bt.DType.Int8, bt.DType.UInt64, bt.DType.UInt32,
+    bt.DType.UInt16, bt.DType.UInt8, bt.DType.Int4x2,
+)
+assert len(ALL_DTYPES) == 15 and len(set(ALL_DTYPES)) == 15, (
+    f"bt.DType must expose 15 distinct values, got {len(set(ALL_DTYPES))}"
+)
+
+# (b) from_numpy -> to_numpy roundtrip, byte-compared, for every NumPy-native
+# dtype with an engine counterpart. Engine Float16 is IEEE-754 binary16 — same
+# sign/exp/mantissa layout as numpy float16 — so byte equality is the
+# assertion; float16 values are exactly representable halves (0.5, -2.25).
+NATIVE_MAP = {
+    np.dtype(np.float16): bt.DType.Float16,
+    np.dtype(np.float32): bt.DType.Float32,
+    np.dtype(np.float64): bt.DType.Float64,
+    np.dtype(np.int8): bt.DType.Int8,
+    np.dtype(np.int16): bt.DType.Int16,
+    np.dtype(np.int32): bt.DType.Int32,
+    np.dtype(np.int64): bt.DType.Int64,
+    np.dtype(np.uint8): bt.DType.UInt8,
+    np.dtype(np.uint16): bt.DType.UInt16,
+    np.dtype(np.uint32): bt.DType.UInt32,
+    np.dtype(np.uint64): bt.DType.UInt64,
+}
+# Sign/exponent-exercising values every listed dtype holds exactly (uint8 tops
+# out at 255, so no 300 there).
+NATIVE_VALUES = {
+    np.dtype(np.float16): [0.5, -2.25, 0.0, 300.0, -1.5],
+    np.dtype(np.float32): [0.5, -2.25, 0.0, 300.0, -1.5],
+    np.dtype(np.float64): [0.5, -2.25, 0.0, 300.0, -1.5],
+    np.dtype(np.int8): [-1, 0, 127],
+    np.dtype(np.int16): [-1, 0, 300],
+    np.dtype(np.int32): [-1, 0, 300],
+    np.dtype(np.int64): [-1, 0, 300],
+    np.dtype(np.uint8): [0, 255],
+    np.dtype(np.uint16): [0, 300, 65535],
+    np.dtype(np.uint32): [0, 300, 4294967295],
+    np.dtype(np.uint64): [0, 300, 18446744073709551615],
+}
+for np_dt, bt_dt in NATIVE_MAP.items():
+    src = np.array(NATIVE_VALUES[np_dt], dtype=np_dt)
+    t = bt.Tensor.from_numpy(src)
+    assert t.dtype == bt_dt, f"dtype mismatch for {np_dt}"
+    assert t.shape == src.shape, f"shape mismatch for {np_dt}"
+    out = t.to_numpy()
+    assert out.dtype == np_dt, f"numpy dtype mismatch for {np_dt}"
+    assert out.tobytes() == src.tobytes(), f"bytes not preserved for {np_dt}"
+
+# Raw-bits tie-out for Float16: the bytes path and the numpy path must agree
+# on the IEEE half patterns (0.5 = 0x3800, -2.25 = 0xC080).
+F16_BITS = bytes([0x00, 0x38, 0x80, 0xC0])
+t = bt.Tensor.from_bytes(F16_BITS, (2,), bt.DType.Float16)
+assert t.to_numpy().tobytes() == F16_BITS, "float16 raw bits disagree with numpy"
+assert bt.Tensor.from_numpy(np.array([0.5, -2.25], dtype=np.float16)).to_bytes() == F16_BITS
+
+# (c) from_bytes/to_bytes roundtrip for the non-NumPy-native dtypes, crafted
+# bit patterns: BFloat16 0x3F80 = 1.0; Int4x2 packs two signed 4-bit lanes per
+# byte (0x21 -> lo=1, hi=2; 0xFE -> lo=-2, hi=-1); the x2 float packs hold two
+# lanes per 4-byte element.
+BF16_BITS = bytes([0x80, 0x3F, 0x00, 0x40, 0x80, 0xBF])  # 1.0, 2.0, -1.0
+BF16X2_BITS = bytes([0x80, 0x3F, 0x00, 0x40, 0x80, 0xBF, 0x00, 0xC0])  # [1,2], [-1,-2]
+F16X2_BITS = bytes([0x00, 0x3C, 0x80, 0xC0, 0x00, 0x38, 0x00, 0xBE])  # [1,-2.25], [0.5,-1.5]
+I4X2_BITS = bytes([0x21, 0xFE])  # (1,2), (-2,-1)
+for bits, shape, dt in (
+    (BF16_BITS, (3,), bt.DType.BFloat16),
+    (BF16X2_BITS, (2,), bt.DType.BFloat16x2),
+    (F16X2_BITS, (2,), bt.DType.Float16x2),
+    (I4X2_BITS, (2,), bt.DType.Int4x2),
+):
+    t = bt.Tensor.from_bytes(bits, shape, dt)
+    assert t.dtype == dt, f"dtype mismatch for {dt}"
+    assert t.shape == shape, f"shape mismatch for {dt}"
+    assert t.device == CPU, f"device mismatch for {dt}"
+    assert t.to_bytes() == bits, f"raw bytes not preserved for {dt}"
+
+# Wrong-size from_bytes raises ValueError (2 bytes given, 3 * 2 required; and
+# 3 bytes given, 2 * 1 required).
+expect_raises(
+    ValueError,
+    lambda: bt.Tensor.from_bytes(bytes([0x80, 0x3F]), (3,), bt.DType.BFloat16),
+    "from_bytes wrong size",
+)
+expect_raises(
+    ValueError,
+    lambda: bt.Tensor.from_bytes(bytes([0x21, 0x00, 0x00]), (2,), bt.DType.Int4x2),
+    "from_bytes wrong size (Int4x2)",
+)
+
+# (d) to_numpy on a non-NumPy-native dtype raises ValueError pointing at
+# to_bytes; the packed dtypes raise the same way.
+bf16_t = bt.Tensor.from_bytes(BF16_BITS, (3,), bt.DType.BFloat16)
+try:
+    bf16_t.to_numpy()
+    raise AssertionError("to_numpy on BFloat16 did not raise")
+except ValueError as e:
+    assert "to_bytes" in str(e), f"error message must mention to_bytes: {e}"
+expect_raises(
+    ValueError,
+    lambda: bt.Tensor.from_bytes(I4X2_BITS, (2,), bt.DType.Int4x2).to_numpy(),
+    "to_numpy on Int4x2",
+)
+
+# (e) NumPy dtypes with no engine counterpart keep raising ValueError: bool,
+# complex, and a strided view of a supported dtype still raises too.
+expect_raises(ValueError, lambda: bt.Tensor.from_numpy(np.array([True, False])), "bool array")
+expect_raises(
+    ValueError,
+    lambda: bt.Tensor.from_numpy(np.array([1.0 + 2.0j], dtype=np.complex128)),
+    "complex array",
+)
+expect_raises(
+    ValueError,
+    lambda: bt.Tensor.from_numpy(np.arange(12, dtype=np.uint16).reshape(3, 4)[:, ::2]),
+    "strided uint16 view",
+)
 
 print("BINDINGS SMOKE OK")

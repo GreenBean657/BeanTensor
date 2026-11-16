@@ -1717,6 +1717,19 @@ if(BUILD_TESTING)
                     ENVIRONMENT "PYTHONPATH=$<TARGET_FILE_DIR:beantensor>"
                     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
         endif ()
+
+        # Full-run parity contract: digits.py must reproduce the C++ demo's
+        # epoch accuracy/loss fields bit-for-bit (wall time stripped before
+        # the diff). Skips with exit 0 when the MNIST IDX files are absent.
+        # The C++ side runs the full 60k/10k/3-epoch pass, so this is the
+        # slowest entry in the suite (~12s) after mnist_demo.
+        add_test(NAME mnist_parity
+                 COMMAND bash ${CMAKE_SOURCE_DIR}/tests/mnist_parity.sh
+                         $<TARGET_FILE:BeanTensorV5>
+                         $<TARGET_FILE_DIR:beantensor>)
+        set_tests_properties(mnist_parity PROPERTIES
+                LABELS mnist
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     endif ()
 
     add_executable(BeanTensorV5Benchmarks benchmark/benchmark.cpp)
