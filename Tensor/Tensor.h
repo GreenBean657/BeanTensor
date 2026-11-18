@@ -2,8 +2,8 @@
  * @file Tensor.h
  * @author GreenBean
  * @brief Tensor class declaration: dtype, shape, device and buffer ownership.
- * @version 0.5.0
- * @date 2026-11-14
+ * @version 0.5.1
+ * @date 2026-11-18
  */
 #pragma once
 #define BT_TENSOR_MAX_DIMS 4
@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <exception>
 #include <future>
 #include <optional>
 #include <utility>
@@ -221,7 +222,14 @@ namespace BeanTensor::Tensors {
             // regardless (the error already surfaced at sync() if anyone
             // was listening).
             (void)drain_tasks(); // OK to discard, a destructor doesn't need to care about errors - the Tensor is gone anyway.
-            hand_off_children();
+            try {
+                hand_off_children();
+            } catch (...) {
+                // A destructor cannot throw: a failed child clone
+                // (OutOfMemory from notify_child) moves this buffer whole to
+                // an heir child instead of copying it.
+                hand_off_children_fallback_noexcept();
+            }
             detach_from_parents();
             kill_cpu_data();
             kill_gpu_teardown_noexcept();
@@ -269,7 +277,13 @@ namespace BeanTensor::Tensors {
             // Drain this tensor's own pending work first; its error is
             // re-queued after the steal so it survives the overwrite.
             const auto own_error = drain_tasks();
-            hand_off_children();
+            try {
+                hand_off_children();
+            } catch (...) {
+                // noexcept: a failed child clone moves this buffer whole to an
+                // heir child instead of copying it (see the destructor).
+                hand_off_children_fallback_noexcept();
+            }
             detach_from_parents();
             kill_cpu_data();
             kill_gpu_teardown_noexcept();
@@ -1028,6 +1042,7 @@ namespace BeanTensor::Tensors {
          * shape).
          * @brief Full-tensor sum reduction.
          * @return Shape-{1} tensor holding the sum.
+         * @throws ErrorHandling::IndexOutOfRange Tensor is empty.
          * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
          */
         [[nodiscard]] Tensor sum() const &;
@@ -2171,8 +2186,12 @@ namespace BeanTensor::Tensors {
         /**
          * Notify a child tensor it needs to clone the data to stay alive.
          * The child takes ownership of its fresh buffer and unregisters from
-         * the dying parent.
-         * @param parent The tensor being destroyed (source of the clone).
+         * the dying parent. Throws on clone allocation/copy failure BEFORE
+         * mutating the child, so a failed call leaves the child a valid view
+         * of the parent (see hand_off_children_fallback_noexcept).
+         * @brief Clone this view's elements into an owned buffer.
+         * @throws ErrorHandling::OutOfMemory CPU clone allocation failed.
+         * @throws ErrorHandling::GPUError GPU clone allocation/copy failed.
          */
         void notify_child(Tensor* parent);
 
@@ -2193,6 +2212,12 @@ namespace BeanTensor::Tensors {
          * data to clone, so its children are re-homed to this view's own
          * parents instead — they alias the same buffer, and the link chain
          * stays valid after this view is gone.
+         * @brief Hand every child view off.
+         * @throws ErrorHandling::OutOfMemory A child clone allocation failed
+         * (mid-loop: children already handed off keep their fresh copies, the
+         * rest stay linked here). noexcept callers (destructor, move
+         * assignment) must catch and fall back to
+         * hand_off_children_fallback_noexcept.
          */
         void hand_off_children() {
             if (this->children.empty()) {
@@ -2212,6 +2237,64 @@ namespace BeanTensor::Tensors {
                 }
             }
             children.clear();
+        }
+
+        /**
+         * Fallback for a hand_off_children throw in a context that cannot
+         * throw (destructor, move assignment): a child clone allocation failed,
+         * so instead of copying, ownership of this tensor's buffer moves WHOLE
+         * to the first child still linked here — its data pointer already
+         * aliases the buffer and its view metadata (offset/strides) keeps
+         * describing its view. The remaining linked children are re-homed onto
+         * that heir, exactly like a dying view's children. Children already
+         * handed off (no longer linked) are skipped. No copy, no dangling:
+         * the buffer stays alive under the heir and every view keeps valid
+         * data. A push_back allocation failure here terminates — the same
+         * noexcept bargain drain_tasks documents for its poisoned future.
+         *
+         * OWNER-ONLY precondition: the bequest hands over THIS tensor's own
+         * buffer. A dying view (owns_data == false) owns no buffer to give —
+         * it reaches here only when a re-homing push_back threw bad_alloc in
+         * hand_off_children's non-owner branch, leaving the child being
+         * processed with partially rewritten links that no allocation-free
+         * path can safely re-register with a living parent. Crowning an heir
+         * there would grant ownership of a buffer owned by this view's parent
+         * (eventual double-free), so the function terminates instead — a loud
+         * stop beats silent heap corruption.
+         * @brief Move this buffer whole to an heir child (noexcept fallback).
+         */
+        void hand_off_children_fallback_noexcept() noexcept {
+            if (!this->owns_data) {
+                // No buffer to bequeath and no safe allocation-free re-home
+                // (see the doc above): terminate per the noexcept bargain.
+                std::terminate();
+            }
+            Tensor* heir = nullptr;
+            for (const auto& c : this->children) {
+                if (std::ranges::find(c->view_parents, this) != c->view_parents.end()) {
+                    heir = c;
+                    break;
+                }
+            }
+            if (heir == nullptr) {
+                this->children.clear();
+                return;
+            }
+            std::erase(heir->view_parents, this);
+            heir->owns_data = true;
+            for (const auto& c : this->children) {
+                if (c == heir || std::ranges::find(c->view_parents, this) == c->view_parents.end()) {
+                    continue;
+                }
+                std::erase(c->view_parents, this);
+                c->view_parents.push_back(heir);
+                heir->children.push_back(c);
+            }
+            this->children.clear();
+            // The buffer belongs to the heir now; the teardown frees
+            // (kill_cpu_data / kill_gpu_teardown_noexcept) must skip it.
+            this->data = nullptr;
+            this->owns_data = false;
         }
 
         /**

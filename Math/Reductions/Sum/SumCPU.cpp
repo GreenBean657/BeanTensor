@@ -4,8 +4,8 @@
  * @brief CPU backend for sum. Hosts the Tensor::sum method definition
  * (mirrors how Tensor::matmul lives in MatmulCPU.cpp), wiring the SumG
  * backward node onto the output.
- * @version 0.5
- * @date 2026-10-26
+ * @version 0.6
+ * @date 2026-11-18
  */
 #include <cstdint>
 #include <future>
@@ -277,14 +277,20 @@ namespace BeanTensor::Tensors::detail {
 namespace BeanTensor::Tensors {
 
     /**
-     * Syncs, rejects non-contiguous inputs (same contract as mean), then
-     * routes to the CPU or GPU backend and wires the autograd node (SumG
-     * backward: dx = the scalar seed broadcast to this tensor's shape).
+     * Syncs, rejects empty and non-contiguous inputs (same contract as
+     * mean/min/max/argmax), then routes to the CPU or GPU backend and wires
+     * the autograd node (SumG backward: dx = the scalar seed broadcast to this
+     * tensor's shape).
      * @brief Sum of every element.
      * @return Single element tensor of the same dtype and device.
+     * @throws ErrorHandling::IndexOutOfRange Tensor is empty.
+     * @throws ErrorHandling::NotImplemented Tensor is non-contiguous.
      */
     Tensor Tensor::sum() const & {
         sync();
+        if (this->numel == 0) {
+            throw ErrorHandling::IndexOutOfRange();
+        }
         if (!this->is_contiguous) {
             throw ErrorHandling::NotImplemented();
         }

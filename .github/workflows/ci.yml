@@ -40,3 +40,8 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Gradient parity vs PyTorch (CPU)
+        run: |
+          python3 -m pip install --user --index-url https://download.pytorch.org/whl/cpu torch
+          BT_PARITY_PYTHON=python3 bash comparison/run_gradient_parity.sh --build-dir build --device cpu

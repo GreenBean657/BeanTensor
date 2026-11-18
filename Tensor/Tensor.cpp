@@ -2,8 +2,8 @@
  * @file Tensor.cpp
  * @author GreenBean
  * @brief Tensor definitions: allocation, fills (incl. pool-chunked set_zero), dtype guards, conversion, transfer, printing and cloning.
- * @version 0.6
- * @date 2026-10-25
+ * @version 0.7
+ * @date 2026-11-18
  */
 #include "Tensor.h"
 
@@ -283,6 +283,59 @@ namespace BeanTensor::Tensors::detail {
 
 namespace BeanTensor::Tensors {
     namespace detail {
+        /**
+         * Gather a possibly non-contiguous view's elements into a fresh
+         * contiguous buffer, honoring the view's strides. Inner runs copy
+         * whole when the innermost stride is 1 (every slice/split-produced
+         * view); anything wider copies element-wise. copy_run moves one
+         * contiguous byte run, so the same walker serves CPU (memcpy) and GPU
+         * (device-to-device memcpy). Callers guard numel != 0, so the inner
+         * extent is nonzero.
+         * @brief Stride-aware gather into a contiguous buffer.
+         */
+        template<typename CopyRun>
+        static void gather_view_strided(
+            const void* src_base,
+            const size_t src_offset,
+            const size_t* shape,
+            const size_t* strides,
+            const uint32_t ndim,
+            const size_t numel,
+            const size_t elem_bytes,
+            void* dst,
+            CopyRun&& copy_run)
+        {
+            const auto* const src = static_cast<const uint8_t*>(src_base);
+            auto* const out = static_cast<uint8_t*>(dst);
+            const auto inner = shape[ndim - 1];
+            // Row-major decomposition of the run index over the outer dims, in
+            // RUN units (the innermost dim is the run itself) — the coordinate
+            // scheme slice_g_cpu uses.
+            size_t run_strides[BT_TENSOR_MAX_DIMS]{};
+            auto acc = size_t{1};
+            for (auto d = size_t{ndim}; d-- > 0;) {
+                if (d + 1 == ndim) {
+                    continue;
+                }
+                run_strides[d] = acc;
+                acc *= shape[d];
+            }
+            const auto rows = numel / inner;
+            for (auto r = size_t{0}; r < rows; ++r) {
+                auto src_off = src_offset;
+                for (auto d = size_t{0}; d + 1 < ndim; ++d) {
+                    src_off += ((r / run_strides[d]) % shape[d]) * strides[d];
+                }
+                if (strides[ndim - 1] == 1) {
+                    copy_run(src + src_off * elem_bytes, out + r * inner * elem_bytes, inner * elem_bytes);
+                } else {
+                    for (auto k = size_t{0}; k < inner; ++k) {
+                        copy_run(src + (src_off + k * strides[ndim - 1]) * elem_bytes, out + (r * inner + k) * elem_bytes, elem_bytes);
+                    }
+                }
+            }
+        }
+
         TransferFailureClassification classify_transfer_failure(const Device source, const Device target, const bool temp_allocated) {
             auto classification = TransferFailureClassification{};
             classification.alloc_failed_pre_change = !temp_allocated;
@@ -423,9 +476,12 @@ namespace BeanTensor::Tensors {
      * allocate destination → copy → hand-off views → commit. The source
      * data pointer, offset, and device are unchanged until the copy
      * succeeds; a failure therefore leaves the source tensor usable and
-     * retryable. Views become owned contiguous copies on the destination.
+     * retryable. A hand-off failure (a child view's clone allocation) frees
+     * the staged destination before rethrowing, so it leaves no leak behind
+     * either. Views become owned contiguous copies on the destination.
      * @param new_device Destination device.
-     * @throws ErrorHandling::OutOfMemory CPU-side destination allocation failed.
+     * @throws ErrorHandling::OutOfMemory CPU-side destination allocation failed,
+     *         or a child view's clone allocation failed during the hand-off.
      * @throws ErrorHandling::GPUOutOfMemory GPU-side destination allocation failed
      *         (a GPUError subclass).
      * @throws ErrorHandling::GPUError A GPU copy or device operation failed.
@@ -506,7 +562,19 @@ namespace BeanTensor::Tensors {
             // Commit: topology is mutated only after the copy has landed. The
             // old CPU buffer is freed, then the new GPU pointer, offset, device,
             // and strides are installed.
-            hand_off_children();
+            try {
+                hand_off_children();
+            } catch (...) {
+                // A child clone failed during the hand-off (notify_child):
+                // the source is still fully intact, so free the staged
+                // destination and leave the transfer retryable.
+#if defined(USE_CUDA)
+                (void)cudaFree(dst);
+#elif defined(USE_HIP)
+                (void)hipFree(dst);
+#endif
+                throw;
+            }
             if (!this->owns_data) {
                 detach_from_parents();
             }
@@ -555,7 +623,15 @@ namespace BeanTensor::Tensors {
                 }
                 throw;
             }
-            hand_off_children();
+            try {
+                hand_off_children();
+            } catch (...) {
+                // A child clone failed during the hand-off (notify_child):
+                // the source is still fully intact, so free the staged
+                // destination and leave the transfer retryable.
+                std::free(dst);
+                throw;
+            }
             if (!this->owns_data) {
                 detach_from_parents();
             }
@@ -786,8 +862,23 @@ namespace BeanTensor::Tensors {
     }
 
     /**
-     * TODO - Write documentation.
-     * @param parent
+     * Parent-death/device-transfer hand-off: clone this view's elements into a
+     * fresh owned buffer and detach from the dying parent. This function is
+     * reached from BOTH throwing contexts (atomic_transfer_to) and noexcept
+     * ones (~Tensor, move assignment — they catch the failure and fall back to
+     * hand_off_children_fallback_noexcept, which moves the parent's buffer
+     * whole to an heir child). Allocation is therefore checked and reported by
+     * a throw BEFORE any mutation of this view: a failed call leaves this view
+     * fully intact (still aliasing the parent), which the fallback relies on.
+     * The copy is one memcpy for a contiguous view and a stride-honoring
+     * gather (gather_view_strided) for a non-contiguous one; the fresh buffer
+     * is always contiguous, so offset/strides/is_contiguous are rewritten to
+     * match and the clone's metadata stays self-consistent.
+     * @param parent The dying (or device-moving) tensor the view aliases.
+     * @throws ErrorHandling::OutOfMemory CPU clone allocation failed.
+     * @throws ErrorHandling::GPUOutOfMemory GPU clone allocation failed (a GPUError subclass).
+     * @throws ErrorHandling::GPUError GPU clone copy failed.
+     * @throws ErrorHandling::GPUTaskOnCPUBuild GPU tensor on a CPU-only build.
      */
     void Tensor::notify_child(Tensor* parent) {
         const auto elem_bytes = DataTypes::dtype_bytes(this->dtype);
@@ -795,23 +886,65 @@ namespace BeanTensor::Tensors {
         const auto* const src = static_cast<const uint8_t*>(parent->data) + src_offset_bytes;
         if (this->device == Device::CPU) {
             this->sync();
+            void* const fresh = bt_aligned_alloc(this->nbytes);
+            if (fresh == nullptr) {
+                throw ErrorHandling::OutOfMemory();
+            }
+            try {
+                if (this->numel != 0) {
+                    if (this->is_contiguous) {
+                        memcpy(fresh, src, this->nbytes);
+                    } else {
+                        detail::gather_view_strided(parent->data, this->offset, this->shape, this->dims, this->ndim, this->numel, elem_bytes, fresh,
+                            [](const uint8_t* s, uint8_t* d, const size_t bytes) { memcpy(d, s, bytes); });
+                    }
+                }
+            } catch (...) {
+                std::free(fresh);
+                throw;
+            }
             this->kill_cpu_data();
             this->kill_buffer();
-            this->data = bt_aligned_alloc(this->nbytes);
-            memcpy(this->data, src, this->nbytes);
+            this->data = fresh;
         } else if (this->device == Device::GPU) {
             this->sync();
-            this->kill_gpu_data();
-            this->kill_buffer();
 #if defined(USE_HIP)
             void* new_data = nullptr;
             HIP_CHECK_ERROR(hipMalloc(&new_data, this->nbytes));
-            HIP_CHECK_ERROR(hipMemcpy(new_data, src, this->nbytes, hipMemcpyDeviceToDevice));
+            try {
+                if (this->numel != 0) {
+                    if (this->is_contiguous) {
+                        HIP_CHECK_ERROR(hipMemcpy(new_data, src, this->nbytes, hipMemcpyDeviceToDevice));
+                    } else {
+                        detail::gather_view_strided(parent->data, this->offset, this->shape, this->dims, this->ndim, this->numel, elem_bytes, new_data,
+                            [](const uint8_t* s, uint8_t* d, const size_t bytes) { HIP_CHECK_ERROR(hipMemcpy(d, s, bytes, hipMemcpyDeviceToDevice)); });
+                    }
+                }
+            } catch (...) {
+                (void)hipFree(new_data);
+                throw;
+            }
+            this->kill_gpu_data();
+            this->kill_buffer();
             this->data = new_data;
 #elif defined(USE_CUDA)
             void* new_data = nullptr;
             CUDA_CHECK_ERROR(cudaMalloc(&new_data, this->nbytes));
-            CUDA_CHECK_ERROR(cudaMemcpy(new_data, src, this->nbytes, cudaMemcpyDeviceToDevice));
+            try {
+                if (this->numel != 0) {
+                    if (this->is_contiguous) {
+                        CUDA_CHECK_ERROR(cudaMemcpy(new_data, src, this->nbytes, cudaMemcpyDeviceToDevice));
+                    } else {
+                        detail::gather_view_strided(parent->data, this->offset, this->shape, this->dims, this->ndim, this->numel, elem_bytes, new_data,
+                            [](const uint8_t* s, uint8_t* d, const size_t bytes) { CUDA_CHECK_ERROR(cudaMemcpy(d, s, bytes, cudaMemcpyDeviceToDevice)); });
+                    }
+                }
+            } catch (...) {
+                (void)cudaFree(new_data);
+                throw;
+            }
+            this->kill_gpu_data();
+            this->kill_buffer();
             this->data = new_data;
 #else
             throw ErrorHandling::GPUTaskOnCPUBuild();

@@ -843,6 +843,81 @@ static void test_clone() {
     CHECK(g.contents_to_string() == "[1, 1]");
 }
 
+// Parent-death hand-off of slice views (notify_child): the child must receive
+// its OWN elements — a contiguous byte span of the parent's buffer starting at
+// the view offset is wrong for any non-contiguous view — and the fresh clone
+// must carry self-consistent contiguity metadata.
+static void test_view_handoff_slice() {
+    auto eq = [](const float32_t a, const float32_t b) {
+        return std::bit_cast<uint32_t>(a) == std::bit_cast<uint32_t>(b);
+    };
+    auto make_parent = [] {
+        auto p = std::make_unique<Tensor>(std::vector<size_t>{3, 4}, DType::Float32);
+        for (auto r = size_t{0}; r < 3; ++r) {
+            for (auto c = size_t{0}; c < 4; ++c) {
+                p->set<float32_t>({r, c}, static_cast<float32_t>(r * 4 + c));
+            }
+        }
+        p->sync();
+        return p;
+    };
+
+    // Contiguous leading-dim slice child (rows 1..2): the hand-off copy must
+    // start at the view offset, not at the buffer base.
+    {
+        auto parent = make_parent();
+        auto child = parent->slice({{1, 3}, {0, 4}});
+        parent.reset();
+        child.sync();
+        CHECK(child.contents_to_string() == "[[4, 5, 6, 7],\n [8, 9, 10, 11]]");
+    }
+
+    // Non-contiguous inner-dim slice child (columns 1..2 of every row). The
+    // hand-off must gather strided elements; a contiguous copy of the view's
+    // nbytes would lift elements 1..6 instead.
+    {
+        auto parent = make_parent();
+        auto child = parent->slice({{0, 3}, {1, 3}});
+        parent.reset();
+        child.sync();
+        CHECK(child.contents_to_string() == "[[1, 2],\n [5, 6],\n [9, 10]]");
+        CHECK(eq(child.at<float32_t>({2, 1}), 10.0f));
+        // The clone is a fresh contiguous buffer: reductions (which reject
+        // non-contiguous operands) accept it and see the gathered values.
+        auto s = child.sum();
+        CHECK(eq(s.at<float32_t>({0}), 33.0f));
+    }
+
+    // Same hand-off through a split chunk (an inner-axis chunk is a
+    // non-contiguous view).
+    {
+        auto parent = make_parent();
+        auto chunks = parent->split(1, 2); // two {3,2} column views
+        parent.reset();
+        chunks[0].sync();
+        chunks[1].sync();
+        CHECK(chunks[0].contents_to_string() == "[[0, 1],\n [4, 5],\n [8, 9]]");
+        CHECK(chunks[1].contents_to_string() == "[[2, 3],\n [6, 7],\n [10, 11]]");
+    }
+
+    // Non-owner hand-off branch: a view dying before its parent re-homes its
+    // children onto the parent (no clone, no allocation); the parent's later
+    // death then hands the re-homed child its own gathered copy. This is the
+    // branch hand_off_children_fallback_noexcept refuses to crown an heir in
+    // (the dying view owns no buffer) — here the normal path must stay clean.
+    {
+        auto parent = make_parent();
+        auto view = std::make_unique<Tensor>(parent->slice({{0, 3}, {1, 3}})); // {3,2} strided
+        auto child = view->slice({{0, 2}, {0, 2}}); // {2,2} view-of-view
+        view.reset(); // non-owner branch: child re-homed onto parent
+        child.sync();
+        CHECK(child.contents_to_string() == "[[1, 2],\n [5, 6]]");
+        parent.reset(); // owner branch: child gathers its strided copy
+        child.sync();
+        CHECK(child.contents_to_string() == "[[1, 2],\n [5, 6]]");
+    }
+}
+
 static void test_at_cpu() {
     Tensor t({2, 3}, DType::Float32);
     t.set_zero();
@@ -1690,6 +1765,7 @@ int32_t main() {
     test_convert_dtype_int4x2();
     test_convert_dtype_async_cpu();
     test_clone();
+    test_view_handoff_slice();
     test_at_cpu();
     test_move_defers_pending_error();
     test_indexing_cpu();

@@ -48,7 +48,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 VENV="$REPO_ROOT/comparison/.venv/bin/python"
-if [[ ! -x "$VENV" ]]; then
+if [[ -n "${BT_PARITY_PYTHON:-}" ]]; then
+    # Explicit interpreter override: CI installs CPU-only torch into the user
+    # site-packages of the runner's python3 instead of keeping a venv here.
+    VENV="$BT_PARITY_PYTHON"
+elif [[ ! -x "$VENV" ]]; then
     # Worktrees share the venv from the main checkout.
     MAIN_VENV="/srv/dev/BeanTensor/comparison/.venv/bin/python"
     if [[ -x "$MAIN_VENV" ]]; then

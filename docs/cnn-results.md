@@ -1,4 +1,4 @@
-# CNN end-to-end acceptance results (Task 5)
+# CNN end-to-end acceptance results
 
 ## Model, optimizer, and data
 

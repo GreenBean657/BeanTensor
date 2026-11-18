@@ -369,6 +369,38 @@ static void test_sum_mean_noncontiguous() {
     CHECK(near(lm.at<float32_t>({0}), 7.5f, 1e-6));
 }
 
+// --- sum empty-tensor guard ---
+
+static void test_sum_empty_guard() {
+    // The reduction family (min/max/mean/argmax) rejects an empty tensor with
+    // IndexOutOfRange; sum must match that contract instead of reducing zero
+    // elements.
+    auto empty = Tensor({0}, DType::Float32, Device::CPU);
+    auto threw = false;
+    try {
+        auto s = empty.sum();
+        static_cast<void>(s);
+    } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    // A zero-extent slice view is empty too (and counts as contiguous, so it
+    // must trip the empty guard, not the contiguity one).
+    auto base = Tensor({2, 3}, DType::Float32, Device::CPU);
+    base.set_one();
+    base.sync();
+    auto empty_view = base.slice({{0, 2}, {0, 0}});
+    threw = false;
+    try {
+        auto s = empty_view.sum();
+        static_cast<void>(s);
+    } catch (const BeanTensor::ErrorHandling::IndexOutOfRange&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 // --- argmax ---
 
 static void test_argmax_cpu() {
@@ -954,6 +986,7 @@ int main() {
     test_reshape_cpu();
     test_sum_cpu();
     test_sum_mean_noncontiguous();
+    test_sum_empty_guard();
     test_sum_avx2_kernels();
     test_argmax_cpu();
     test_sgd_cpu();
