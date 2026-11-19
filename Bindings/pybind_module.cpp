@@ -13,10 +13,16 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include "Data/Csv.h"
 #include "Data/DataLoader.h"
 #include "Metrics/Metrics.h"
+#include "Module/BatchNorm.h"
+#include "Module/Conv2d.h"
+#include "Module/Dropout.h"
+#include "Module/Flatten.h"
 #include "Module/Gelu.h"
 #include "Module/Linear.h"
+#include "Module/MaxPool2d.h"
 #include "Module/Module.h"
 #include "Module/Relu.h"
 #include "Module/Sequential.h"
@@ -28,13 +34,22 @@
 
 namespace py = pybind11;
 
+using BeanTensor::Data::CsvDataset;
+using BeanTensor::Data::CsvNormalize;
+using BeanTensor::Data::CsvNullPolicy;
+using BeanTensor::Data::CsvOptions;
 using BeanTensor::Data::DataLoader;
 using BeanTensor::DataTypes::DType;
 using BeanTensor::float16_t;
 using BeanTensor::float32_t;
 using BeanTensor::float64_t;
+using BeanTensor::Modules::BatchNorm;
+using BeanTensor::Modules::Conv2d;
+using BeanTensor::Modules::Dropout;
+using BeanTensor::Modules::Flatten;
 using BeanTensor::Modules::Gelu;
 using BeanTensor::Modules::Linear;
+using BeanTensor::Modules::MaxPool2d;
 using BeanTensor::Modules::Module;
 using BeanTensor::Modules::Relu;
 using BeanTensor::Modules::Sequential;
@@ -371,6 +386,49 @@ namespace {
     }
 
     /**
+     * @brief Load one MNIST split as NCHW rank-4 {N, 1, 28, 28} images
+     *        through the header-only demos::mnist utilities (the CNN demo's
+     *        data path; C=1 NCHW is pixel-order contiguous, so the flat IDX
+     *        payload maps 1:1).
+     * @param dir Directory holding the uncompressed IDX files.
+     * @param train True selects the 60k train pair (t10k-* when false).
+     * @param dtype Model dtype for the images; the host staging buffer is
+     *        Float64 only when the model dtype is Float64, else Float32.
+     * @param device Device both tensors are uploaded to.
+     * @return (images {N, 1, 28, 28} in @p dtype, labels {N} Int64).
+     * @throws RuntimeError The IDX files are missing/invalid or the upload
+     *         failed; the message names @p dir.
+     */
+    [[nodiscard]] std::pair<Tensor, Tensor> load_mnist_nchw(
+        const std::string& dir,
+        bool train,
+        DType dtype,
+        Device device
+    ) {
+        auto split = demos::mnist::Split{};
+        const auto image_file = train
+            ? std::string_view{demos::mnist::kTrainImages}
+            : std::string_view{demos::mnist::kTestImages};
+        const auto label_file = train
+            ? std::string_view{demos::mnist::kTrainLabels}
+            : std::string_view{demos::mnist::kTestLabels};
+        if (
+            const auto ok = demos::mnist::load_split(std::filesystem::path{dir}, image_file, label_file, split);
+            !ok
+        ) {
+            const auto msg = std::string{"load_mnist_nchw: failed to read the MNIST split from '"} + dir + "'";
+            raise_runtime_error(msg.c_str());
+        }
+        const auto host_dtype = dtype == DType::Float64 ? DType::Float64 : DType::Float32;
+        auto uploaded = demos::mnist::upload_nchw(split, device, dtype, host_dtype);
+        if (!uploaded.has_value()) {
+            const auto msg = std::string{"load_mnist_nchw: failed to upload the MNIST split from '"} + dir + "'";
+            raise_runtime_error(msg.c_str());
+        }
+        return std::pair{std::move(uploaded->images), std::move(uploaded->labels)};
+    }
+
+    /**
      * @brief Run Metrics::evaluate and unpack the host-side result into a
      * plain (accuracy, mean_loss) tuple of Python floats.
      * @param model Module to evaluate; its parameter requires_grad flags are
@@ -382,6 +440,23 @@ namespace {
     [[nodiscard]] std::tuple<float64_t, float64_t> evaluate_pair(Module& model, DataLoader& loader) {
         const auto result = BeanTensor::Metrics::evaluate(model, loader);
         return std::make_tuple(result.accuracy, result.mean_loss);
+    }
+
+    /**
+     * @brief Load a CSV file through data::load_csv and hand the whole
+     *        dataset (tensor pair + inspection metadata) to Python.
+     * @param path Filesystem path to the CSV file.
+     * @param opts Parsing options; only the bound fields (feature dtype, null
+     *        policy, normalization) depart from the engine defaults.
+     * @return The CsvDataset: features {N, F} in opts.feature_dtype, labels
+     *         {N} Int32 class ids, plus null_count, feature/label names and
+     *         the NaN-skipped per-column stats csv_demo.cpp prints.
+     * @throws RuntimeError The file cannot be opened or a cell violates the
+     *         chosen policies; the engine's message is preserved through the
+     *         module's exception translator.
+     */
+    [[nodiscard]] CsvDataset load_csv_dataset(const std::string& path, const CsvOptions& opts) {
+        return BeanTensor::Data::load_csv(path, opts);
     }
 
 } // namespace
@@ -421,6 +496,48 @@ PYBIND11_MODULE(beantensor, m) {
         .value("WeightsAndGrads", CheckpointLevel::WeightsAndGrads)
         .value("Full", CheckpointLevel::Full);
 
+    /**
+     * CSV parsing policies; member names mirror Data/Csv.h exactly. Note
+     * CsvNormalize.None is reachable only through getattr — "None" is not a
+     * dotted-access name in Python syntax.
+     */
+    py::enum_<CsvNullPolicy>(m, "CsvNullPolicy")
+        .value("KeepNaN", CsvNullPolicy::KeepNaN)
+        .value("Error", CsvNullPolicy::Error)
+        .value("FillMean", CsvNullPolicy::FillMean)
+        .value("FillMedian", CsvNullPolicy::FillMedian)
+        .value("FillConstant", CsvNullPolicy::FillConstant);
+
+    py::enum_<CsvNormalize>(m, "CsvNormalize")
+        .value("None", CsvNormalize::None)
+        .value("MinMax", CsvNormalize::MinMax)
+        .value("Standardize", CsvNormalize::Standardize);
+
+    // The bound subset of data::CsvOptions (Data/Csv.h): the three fields
+    // the csv demo exercises. The unbound fields keep the engine defaults
+    // (automatic header/delimiter detection, last-column labels, KeepNaN
+    // nulls). load_csv takes the struct by value, so mutating the Python
+    // handle after a call never retroactively changes that call.
+    py::class_<CsvOptions>(m, "CsvOptions")
+        .def(py::init<>())
+        .def_readwrite("feature_dtype", &CsvOptions::feature_dtype)
+        .def_readwrite("nulls", &CsvOptions::nulls)
+        .def_readwrite("normalize", &CsvOptions::normalize);
+
+    // The C++ load_csv return (Data/Csv.h): the tensor pair plus the column
+    // metadata the csv demo's inspection act prints. Tensor members are
+    // handles onto the dataset's members (reference_internal keeps the
+    // dataset alive); the name/stat vectors come back as plain Python lists.
+    py::class_<CsvDataset>(m, "CsvDataset")
+        .def_readonly("features", &CsvDataset::features, py::return_value_policy::reference_internal)
+        .def_readonly("labels", &CsvDataset::labels, py::return_value_policy::reference_internal)
+        .def_readonly("label_names", &CsvDataset::label_names)
+        .def_readonly("feature_names", &CsvDataset::feature_names)
+        .def_readonly("null_count", &CsvDataset::null_count)
+        .def_readonly("column_min", &CsvDataset::column_min)
+        .def_readonly("column_max", &CsvDataset::column_max)
+        .def_readonly("column_mean", &CsvDataset::column_mean);
+
     py::class_<Tensor>(m, "Tensor")
         .def_static("from_numpy", &from_numpy)
         // Raw-bits construction for the dtypes NumPy cannot represent
@@ -447,6 +564,25 @@ PYBIND11_MODULE(beantensor, m) {
         // pointers — see the Tensor class docs and Module::forward below).
         .def("add", [](const Tensor& self, const Tensor& other) { return self.add(other); },
              py::keep_alive<0, 1>(), py::keep_alive<0, 2>())
+        // Same op and graph contract as the softmax_cross_entropy free
+        // function: the loss node borrows this tensor and the labels, so the
+        // output keeps BOTH alive until backward() returns.
+        .def("softmax_ce", [](const Tensor& self, const Tensor& labels) { return self.softmax_ce(labels); },
+             py::keep_alive<0, 1>(), py::keep_alive<0, 2>())
+        // The evaluation verbs the csv demo replays (csv_demo.cpp:
+        // argmax(1) -> convert_dtype(Int32) -> equal(labels) ->
+        // convert_dtype(Float32) -> mean). argmax and equal outputs never
+        // join the autograd graph (the Tensor.h op docs say so explicitly),
+        // so they carry no keep_alive; mean attaches a MeanG node when the
+        // input requires_grad, so its output keeps the input alive until
+        // backward() returns (same contract as add above).
+        .def("argmax", [](const Tensor& self, const size_t axis) { return self.argmax(axis); })
+        .def("equal", [](const Tensor& self, const Tensor& other) { return self.equal(other); })
+        .def("mean", [](const Tensor& self) { return self.mean(); },
+             py::keep_alive<0, 1>())
+        // In-place dtype conversion (Tensor::convert_dtype with the default
+        // PERMISSIVE clamp method); returns None.
+        .def("convert_dtype", [](Tensor& self, const DType new_dtype) { self.convert_dtype(new_dtype); })
         .def("item", &item)
         .def("backward", &Tensor::backward);
 
@@ -488,6 +624,28 @@ PYBIND11_MODULE(beantensor, m) {
         .def("named_parameters", &named_parameters_dict)
         .def("__str__", [](const Module& self) { return self.print(0); });
 
+    // CNN stack factories. Conv2d's argument order mirrors cnn.cpp's call
+    // exactly — (in_channels, out_channels, kernel, stride, pad, dtype,
+    // device) — so a user copying the demo gets the same topology; the
+    // remaining ctors expose the demo-used subset of their headers' defaults
+    // (BatchNorm keeps its momentum/eps, MaxPool2d its stride-is-kernel).
+    m.def("Conv2d",
+          [](uint32_t in_channels, uint32_t out_channels, uint32_t kernel,
+             uint32_t stride, uint32_t pad, DType dtype, Device device) {
+              return std::unique_ptr<Module>(std::make_unique<Conv2d>(
+                  in_channels, out_channels, kernel, stride, pad, dtype, device));
+          });
+    m.def("BatchNorm",
+          [](size_t channels, DType dtype, Device device) {
+              return std::unique_ptr<Module>(std::make_unique<BatchNorm>(channels, dtype, device));
+          });
+    m.def("MaxPool2d",
+          [](uint32_t kernel) {
+              return std::unique_ptr<Module>(std::make_unique<MaxPool2d>(kernel));
+          });
+    m.def("Flatten", []() { return std::unique_ptr<Module>(std::make_unique<Flatten>()); });
+    m.def("Dropout",
+          [](float64_t p) { return std::unique_ptr<Module>(std::make_unique<Dropout>(p)); });
     m.def("Linear",
           [](size_t in_features, size_t out_features, DType dtype, Device device) {
               return std::unique_ptr<Module>(std::make_unique<Linear>(in_features, out_features, dtype, device));
@@ -503,6 +661,9 @@ PYBIND11_MODULE(beantensor, m) {
     m.def("evaluate", &evaluate_pair, py::arg("model"), py::arg("loader"));
     m.def("load_mnist_flat", &load_mnist_flat,
           py::arg("dir"), py::arg("train"), py::arg("dtype"), py::arg("device"));
+    m.def("load_mnist_nchw", &load_mnist_nchw,
+          py::arg("dir"), py::arg("train"), py::arg("dtype"), py::arg("device"));
+    m.def("load_csv", &load_csv_dataset, py::arg("path"), py::arg("opts"));
     // Training-loop determinism starts from the process-wide default
     // generator: Linear draws its init seed from it, so reseeding here makes
     // a from-scratch net construction reproducible across processes.

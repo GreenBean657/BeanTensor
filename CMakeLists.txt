@@ -1721,8 +1721,13 @@ if(BUILD_TESTING)
         # Full-run parity contract: digits.py must reproduce the C++ demo's
         # epoch accuracy/loss fields bit-for-bit (wall time stripped before
         # the diff). Skips with exit 0 when the MNIST IDX files are absent.
-        # The C++ side runs the full 60k/10k/3-epoch pass, so this is the
-        # slowest entry in the suite (~12s) after mnist_demo.
+        # The C++ side runs the full 60k/10k/3-epoch pass; the script also
+        # asserts exactly 3 epoch lines per side so an empty stream can never
+        # diff green.
+        # Skip contract: on GPU-backend builds the C++ demo prints both a CPU
+        # and a GPU set of epoch lines that the diff cannot attribute, so the
+        # test can never pass there — BT_GPU_BACKEND=1 tells the script to
+        # SKIP itself (exit 0) without probing hardware.
         add_test(NAME mnist_parity
                  COMMAND bash ${CMAKE_SOURCE_DIR}/tests/mnist_parity.sh
                          $<TARGET_FILE:BeanTensorV5>
@@ -1730,6 +1735,31 @@ if(BUILD_TESTING)
         set_tests_properties(mnist_parity PROPERTIES
                 LABELS mnist
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+        if (USE_CUDA OR USE_HIP)
+            set_tests_properties(mnist_parity PROPERTIES
+                    ENVIRONMENT "BT_GPU_BACKEND=1")
+        endif ()
+
+        # Same parity contract for the CNN demo: python/cnn.py must reproduce
+        # the BeanTensorV5CNN binary's epoch accuracy/loss fields bit-for-bit
+        # (wall time stripped before the diff). Skips with exit 0 when the
+        # MNIST IDX files are absent. Both sides run the full 60k/10k
+        # 2-epoch pass and the script asserts exactly 2 epoch lines per side,
+        # so this is the slowest entry in the suite.
+        # Skip contract: same as mnist_parity — GPU-backend builds make the
+        # C++ demo emit CPU and GPU epoch lines, so BT_GPU_BACKEND=1 makes
+        # the script SKIP itself (exit 0) without probing hardware.
+        add_test(NAME cnn_parity
+                 COMMAND bash ${CMAKE_SOURCE_DIR}/tests/cnn_parity.sh
+                         $<TARGET_FILE:BeanTensorV5CNN>
+                         $<TARGET_FILE_DIR:beantensor>)
+        set_tests_properties(cnn_parity PROPERTIES
+                LABELS mnist
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+        if (USE_CUDA OR USE_HIP)
+            set_tests_properties(cnn_parity PROPERTIES
+                    ENVIRONMENT "BT_GPU_BACKEND=1")
+        endif ()
     endif ()
 
     add_executable(BeanTensorV5Benchmarks benchmark/benchmark.cpp)

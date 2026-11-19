@@ -16,6 +16,12 @@ import beantensor as bt
 # TensorOps.cpp set_random_gpu). The two final losses must agree within 1e-3:
 # an approximate sanity bound only. Float reduction order is backend-defined
 # (Tensor.h reduction docs), so cross-device bit parity is NOT claimed here.
+# The same discipline then repeats on the conv stack: a tiny
+# Conv2d(1,4,3)->BatchNorm(4)->Relu->MaxPool2d(2)->Flatten->Linear net
+# trained 5 steps,
+# once on CPU and once on Device::GPU after a fresh set_seed(4321), with the
+# same 1e-3 approximate cross-device bound — reduction order is
+# backend-defined, so this is a drift sanity check, not a parity claim.
 if "--gpu" in sys.argv:
     import math
 
@@ -67,6 +73,61 @@ if "--gpu" in sys.argv:
         "cpu/gpu final losses diverged beyond the sanity bound "
         f"(reduction order is backend-defined, 1e-3 is approximate): "
         f"cpu={cpu_loss} gpu={gpu_loss}"
+    )
+
+    # Conv stack twin: Conv2d(1,4,3,1,0) -> BatchNorm(4) -> Relu ->
+    # MaxPool2d(2) -> Flatten
+    # -> Linear(36,3) on {6,1,8,8} input (conv3 drops to 6x6, pool2 to 3x3,
+    # flatten width 4*3*3 = 36), 5 train steps. Named statements pin each
+    # layer's init-seed draw to its position, same as the CNN stack probe
+    # below (BatchNorm draws nothing — gamma/beta start at 1/0 — so inserting
+    # it does not shift the Linear's draw). One net is trained on CPU, one on
+    # Device::GPU, each after a
+    # fresh set_seed(4321) so both draw identical init weights; the final
+    # losses must agree within the same 1e-3 approximate bound as the MLP
+    # above (float reduction order is backend-defined per the Tensor.h
+    # reduction docs — cross-device bit parity is NOT claimed here).
+    CONV_X = (
+        np.arange(6 * 1 * 8 * 8, dtype=np.float32).reshape(6, 1, 8, 8) - 191.5
+    ) / 64.0
+    CONV_LABELS = np.array([0, 1, 2, 0, 1, 2], dtype=np.int64)
+
+    def gpu_smoke_conv_losses(device):
+        bt.set_seed(4321)
+        conv = bt.Conv2d(1, 4, 3, 1, 0, F32_GPU, device)
+        bn = bt.BatchNorm(4, F32_GPU, device)
+        relu = bt.Relu()
+        pool = bt.MaxPool2d(2)
+        flat = bt.Flatten()
+        fc = bt.Linear(36, 3, F32_GPU, device)
+        net = bt.Sequential([conv, bn, relu, pool, flat, fc])
+        net.train()
+        x = bt.Tensor.from_numpy(CONV_X)
+        labels = bt.Tensor.from_numpy(CONV_LABELS)
+        x.to(device)
+        labels.to(device)
+        losses = []
+        for _ in range(5):
+            logits = net.forward(x)
+            loss = bt.softmax_cross_entropy(logits, labels)
+            net.zero_grad()
+            loss.backward(F32_GPU)
+            net.adam_step(1e-2, 0.9, 0.999, 1e-8)
+            losses.append(loss.item())
+        return losses
+
+    cpu_conv = gpu_smoke_conv_losses(bt.Device.CPU)
+    gpu_conv = gpu_smoke_conv_losses(GPU)
+    print(f"bindings_gpu: conv cpu_loss={cpu_conv[-1]:.6f} "
+          f"gpu_loss={gpu_conv[-1]:.6f} "
+          f"diff={abs(cpu_conv[-1] - gpu_conv[-1]):.3e}")
+    assert all(math.isfinite(v) for v in cpu_conv + gpu_conv), (
+        f"non-finite conv loss: cpu={cpu_conv} gpu={gpu_conv}"
+    )
+    assert abs(cpu_conv[-1] - gpu_conv[-1]) < 1e-3, (
+        "conv cpu/gpu final losses diverged beyond the sanity bound "
+        f"(reduction order is backend-defined, 1e-3 is approximate): "
+        f"cpu={cpu_conv[-1]} gpu={gpu_conv[-1]}"
     )
     print("BINDINGS GPU SMOKE OK")
     raise SystemExit(0)
@@ -217,6 +278,108 @@ assert set(net2.named_parameters().keys()) == {"0.weight", "0.bias"}
 del net, net2, w, x, y, y2
 gc.collect()
 
+# --- CNN module stack (conv2d, batchnorm, maxpool2d, flatten, dropout) ---
+
+# (a) The full CNN stack as named statements in layer order — statement
+# sequencing pins each layer's init-seed draw to its position (one-expression
+# construction would leave the draw order to the caller, per the digits MVP).
+# Geometry follows cnn.cpp's first batch: 28 -> conv3 -> 26 -> pool2 -> 13 ->
+# conv3 -> 11 -> pool2 -> 5, so a C-channel second conv flattens to C * 5 * 5.
+# Keeping 16 channels makes the flatten width 16 * 5 * 5 = 400, which is what
+# pins fc1's fan-in below — any other channel count must change fc1's width
+# to C * 25 to match.
+conv1 = bt.Conv2d(1, 16, 3, 1, 0, F32, CPU)
+bn1 = bt.BatchNorm(16, F32, CPU)
+relu1 = bt.Relu()
+pool1 = bt.MaxPool2d(2)
+conv2 = bt.Conv2d(16, 16, 3, 1, 0, F32, CPU)
+bn2 = bt.BatchNorm(16, F32, CPU)
+relu2 = bt.Relu()
+pool2 = bt.MaxPool2d(2)
+flatten = bt.Flatten()
+drop = bt.Dropout(0.25)
+fc1 = bt.Linear(400, 128, F32, CPU)
+relu3 = bt.Relu()
+fc2 = bt.Linear(128, 10, F32, CPU)
+
+# (b) Per-layer shape probe: 26 -> 13 -> 11 -> 5 -> 400, F32 throughout.
+# Runs before the Sequential assembly below: the container moves each
+# element's unique_ptr holder, disowning these Python handles (same ownership
+# transfer as the Task 3 module-surface check).
+cnn_img = bt.Tensor.from_numpy(np.ones((2, 1, 28, 28), dtype=np.float32))
+probe = cnn_img
+for layer, want in (
+    (conv1, (2, 16, 26, 26)),
+    (bn1, (2, 16, 26, 26)),
+    (relu1, (2, 16, 26, 26)),
+    (pool1, (2, 16, 13, 13)),
+    (conv2, (2, 16, 11, 11)),
+    (bn2, (2, 16, 11, 11)),
+    (relu2, (2, 16, 11, 11)),
+    (pool2, (2, 16, 5, 5)),
+    (flatten, (2, 400)),
+    (drop, (2, 400)),
+):
+    probe = layer.forward(probe)
+    assert probe.shape == want, f"cnn probe shape: {probe.shape} != {want}"
+    assert probe.dtype == F32
+
+cnn = bt.Sequential([
+    conv1, bn1, relu1, pool1, conv2, bn2, relu2, pool2,
+    flatten, drop, fc1, relu3, fc2,
+])
+
+# (c) named_parameters: the registry numbers every child in insertion order
+# (parameterless layers occupy their index without contributing keys).
+# Conv2d and Linear register weight+bias; BatchNorm registers gamma+beta —
+# the key set plus the Conv2d weight layout {C,R,S,K} pins the topology.
+params = cnn.named_parameters()
+assert set(params.keys()) == {
+    "0.weight", "0.bias", "1.gamma", "1.beta",
+    "4.weight", "4.bias", "5.gamma", "5.beta",
+    "10.weight", "10.bias", "12.weight", "12.bias",
+}, f"cnn named_parameters keys: {sorted(params.keys())}"
+assert params["0.weight"].shape == (1, 3, 3, 16)
+assert params["0.bias"].shape == (16,)
+assert params["1.gamma"].shape == (16,)
+assert params["1.beta"].shape == (16,)
+assert params["4.weight"].shape == (16, 3, 3, 16)
+assert params["4.bias"].shape == (16,)
+assert params["5.gamma"].shape == (16,)
+assert params["5.beta"].shape == (16,)
+assert params["10.weight"].shape == (400, 128)
+assert params["10.bias"].shape == (128,)
+assert params["12.weight"].shape == (128, 10)
+assert params["12.bias"].shape == (10,)
+
+# (d) Full-stack forward of {2,1,28,28} ones returns {2,10}. Eval mode makes
+# dropout an identity; the assertion is shape/dtype only.
+cnn.eval()
+logits = cnn.forward(cnn_img)
+assert logits.shape == (2, 10), f"cnn forward shape: {logits.shape}"
+assert logits.dtype == F32
+assert str(cnn) and isinstance(str(cnn), str)
+
+# (e) Dropout-only train/eval difference on the same input. With input ones,
+# eval forward returns exactly ones while train forward returns 0 or
+# 1/(1-0.5) = 2 per element, so the raw output bytes differ deterministically
+# (the assertion is byte inequality, never float == on engine values).
+drop_mod = bt.Dropout(0.5)
+drop_x = bt.Tensor.from_numpy(np.ones((4, 8), dtype=np.float32))
+drop_mod.train()
+drop_train = drop_mod.forward(drop_x).to_numpy()
+drop_mod.eval()
+drop_eval = drop_mod.forward(drop_x).to_numpy()
+assert np.array_equal(drop_eval, np.ones((4, 8), dtype=np.float32)), (
+    "eval-mode dropout must be an identity on the input"
+)
+assert drop_train.tobytes() != drop_eval.tobytes(), (
+    "train-mode dropout must differ from eval-mode on the same input"
+)
+
+del cnn, probe, logits, params, drop_mod, drop_train, drop_eval
+gc.collect()
+
 # --- Task 4: training verbs + determinism ---
 
 import math
@@ -338,6 +501,136 @@ assert len(loss_seq) == 30
 assert all(math.isfinite(v) for v in loss_seq)
 assert loss_seq[-1] < loss_seq[0], (
     f"training did not reduce loss: first {loss_seq[0]}, last {loss_seq[-1]}"
+)
+
+# --- Task 2: data path — NCHW MNIST loader, CSV loader, softmax_ce method ---
+
+# (a) load_csv with the policy enums: a null cell under FillMean is filled
+# with the NaN-skipped column mean; Standardize then centers on that same
+# column_mean (Data/Csv.cpp), so the filled cell standardizes to exactly 0.0
+# — asserted byte-wise, never float ==. Features come back in
+# CsvOptions.feature_dtype; labels are Int32 ids in first-seen order.
+SCRATCH_BINDINGS = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scratch", "bindings")
+)
+os.makedirs(SCRATCH_BINDINGS, exist_ok=True)
+
+CSV_PATH = os.path.join(SCRATCH_BINDINGS, "task2_null_fill.csv")
+with open(CSV_PATH, "w") as fh:
+    fh.write(
+        "f1,f2,cls\n"
+        "1.0,10.0,a\n"
+        "2.0,,a\n"
+        "3.0,30.0,b\n"
+        "4.0,40.0,b\n"
+    )
+
+csv_opts = bt.CsvOptions()
+csv_opts.feature_dtype = bt.DType.Float32
+csv_opts.nulls = bt.CsvNullPolicy.FillMean
+csv_opts.normalize = bt.CsvNormalize.Standardize
+
+# load_csv returns the full dataset object (the C++ CsvDataset mirror): the
+# tensor pair plus the inspection metadata csv_demo.cpp prints — null count,
+# feature/label names, and the NaN-skipped per-column stats (computed before
+# filling/normalization, Data/Csv.cpp). The fixture has exactly one null
+# (row 2, f2), so null_count pins the parse; the stats are NaN-skipped
+# references of f1=[1,2,3,4], f2=[10,null,30,40] (mean 80/3 computed in the
+# same row order the engine sums in, so exact == is safe here).
+ds = bt.load_csv(CSV_PATH, csv_opts)
+features, labels = ds.features, ds.labels
+assert ds.null_count == 1, f"csv null_count: {ds.null_count}"
+assert ds.feature_names == ["f1", "f2"], f"csv feature_names: {ds.feature_names}"
+assert ds.label_names == ["a", "b"], f"csv label_names: {ds.label_names}"
+assert ds.column_min == [1.0, 10.0], f"csv column_min: {ds.column_min}"
+assert ds.column_max == [4.0, 40.0], f"csv column_max: {ds.column_max}"
+assert ds.column_mean == [2.5, (10.0 + 30.0 + 40.0) / 3.0], (
+    f"csv column_mean: {ds.column_mean}"
+)
+assert features.shape == (4, 2), f"csv features shape: {features.shape}"
+assert labels.shape == (4,), f"csv labels shape: {labels.shape}"
+assert features.dtype == F32
+assert labels.dtype == bt.DType.Int32
+assert np.array_equal(labels.to_numpy(), np.array([0, 0, 1, 1], dtype=np.int32)), (
+    f"csv labels not in first-seen order: {labels.to_numpy()}"
+)
+
+# In-test reference: parse in float64, NaN-skip mean-fill, population-std
+# standardize, narrow to float32 — the pipeline Data/Csv.cpp runs.
+ref = np.array(
+    [[1.0, 10.0], [2.0, np.nan], [3.0, 30.0], [4.0, 40.0]],
+    dtype=np.float64,
+)
+col_mean = np.nanmean(ref, axis=0)
+filled = np.where(np.isnan(ref), col_mean, ref)
+std_dev = np.sqrt(np.mean((filled - col_mean) ** 2, axis=0))
+expected_features = ((filled - col_mean) / std_dev).astype(np.float32)
+got_features = features.to_numpy()
+assert got_features.dtype == np.float32
+assert np.isclose(got_features, expected_features, rtol=1e-6, atol=1e-7).all(), (
+    f"standardized features diverged:\n{got_features}\nvs\n{expected_features}"
+)
+# The filled cell (row 1, col 1) holds the column mean pre-standardization,
+# so it must land on exactly +0.0.
+assert got_features[1, 1].tobytes() == np.float32(0.0).tobytes(), (
+    f"FillMean cell must standardize to exactly 0.0, got {got_features[1, 1]!r}"
+)
+
+# A missing CSV raises RuntimeError naming the file.
+MISSING_CSV = os.path.join(SCRATCH_BINDINGS, "__no_such_file__.csv")
+expect_raises(RuntimeError, lambda: bt.load_csv(MISSING_CSV, csv_opts), "load_csv on a missing file")
+
+# (b) load_mnist_nchw: rank-4 {60000,1,28,28} F32 images + Int64 labels when
+# the IDX files are present (SKIP-print, never download); a missing dir
+# raises RuntimeError naming the dir, same contract as load_mnist_flat.
+NCHW_BAD_DIR = "datasets/__definitely_not_mnist__"
+try:
+    bt.load_mnist_nchw(NCHW_BAD_DIR, True, F32, CPU)
+    raise AssertionError("load_mnist_nchw on a missing dir did not raise")
+except RuntimeError as e:
+    assert NCHW_BAD_DIR in str(e), f"error message does not mention the dir: {e}"
+
+mnist_dir = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "datasets", "mnist")
+)
+need = [
+    "train-images-idx3-ubyte",
+    "train-labels-idx1-ubyte",
+    "t10k-images-idx3-ubyte",
+    "t10k-labels-idx1-ubyte",
+]
+if all(os.path.isfile(os.path.join(mnist_dir, f)) for f in need):
+    images4, labels4 = bt.load_mnist_nchw(mnist_dir, True, F32, CPU)
+    assert images4.shape == (60000, 1, 28, 28), f"nchw train images shape: {images4.shape}"
+    assert labels4.shape == (60000,), f"nchw train labels shape: {labels4.shape}"
+    assert images4.dtype == F32 and labels4.dtype == bt.DType.Int64
+    assert np.array_equal(
+        labels4.to_numpy()[:5], np.array([5, 0, 4, 1, 9], dtype=np.int64)
+    ), f"unexpected MNIST train label head: {labels4.to_numpy()[:5]}"
+    img4 = images4.to_numpy()
+    assert float(img4.min()) >= 0.0 and float(img4.max()) <= 1.0
+    # C=1 NCHW is pixel-order contiguous, so the flat loader's rows and the
+    # NCHW images carry the same payload bitwise.
+    flat_images, _ = bt.load_mnist_flat(mnist_dir, True, F32, CPU)
+    assert flat_images.to_numpy()[:8].tobytes() == img4[:8, 0].reshape(8, 784).tobytes(), (
+        "flat and NCHW MNIST payloads diverge bitwise"
+    )
+    print("MNIST NCHW OK")
+else:
+    print("SKIP: datasets/mnist IDX files not present")
+
+# (c) The softmax_ce METHOD is the same op as the bound free function:
+# identical shape/dtype and bitwise-equal loss bytes on the same inputs.
+ce_logits_t = bt.Tensor.from_numpy(CE_LOGITS)
+ce_labels_t = bt.Tensor.from_numpy(CE_LABELS)
+method_loss = ce_logits_t.softmax_ce(ce_labels_t)
+free_loss = bt.softmax_cross_entropy(
+    bt.Tensor.from_numpy(CE_LOGITS), bt.Tensor.from_numpy(CE_LABELS)
+)
+assert method_loss.shape == (1,) and method_loss.dtype == F32
+assert free_loss.shape == (1,) and free_loss.dtype == F32
+assert method_loss.to_numpy().tobytes() == free_loss.to_numpy().tobytes(), (
+    "Tensor.softmax_ce and bt.softmax_cross_entropy disagree bitwise"
 )
 
 # --- Task 5: data path (DataLoader, evaluate, MNIST flat loader) ---
@@ -821,6 +1114,40 @@ expect_raises(
     ValueError,
     lambda: bt.Tensor.from_numpy(np.arange(12, dtype=np.uint16).reshape(3, 4)[:, ::2]),
     "strided uint16 view",
+)
+
+# --- Evaluation verbs: argmax(axis), equal, mean, convert_dtype ---
+
+# The chain csv_demo.cpp evaluates with: argmax(1) -> convert_dtype(Int32) ->
+# equal(labels) -> convert_dtype(Float32) -> mean. argmax/equal outputs never
+# join the autograd graph (Tensor.h op docs); mean attaches a MeanG node only
+# when the input requires_grad. Values are compared byte-wise, never float ==.
+ev_logits = bt.Tensor.from_numpy(
+    np.array([[0.1, 0.9, 0.0], [2.0, 1.0, 0.5]], dtype=np.float32)
+)
+ev_labels32 = bt.Tensor.from_numpy(np.array([1, 0], dtype=np.int32))
+ev_pred = ev_logits.argmax(1)
+assert ev_pred.shape == (2,) and ev_pred.dtype == bt.DType.Int64
+# convert_dtype is async: the dtype flips when the queued conversion
+# finalizes, so sync before asserting or feeding the next op (same syncs
+# csv_demo.cpp makes).
+ev_pred.convert_dtype(bt.DType.Int32)
+ev_pred.sync()
+assert ev_pred.dtype == bt.DType.Int32
+ev_mask = ev_pred.equal(ev_labels32)
+assert ev_mask.shape == (2,) and ev_mask.dtype == bt.DType.UInt8
+assert ev_mask.to_numpy().tobytes() == np.array([1, 1], dtype=np.uint8).tobytes()
+ev_mask.convert_dtype(F32)
+ev_mask.sync()
+ev_acc = ev_mask.mean()
+assert ev_acc.shape == (1,) and ev_acc.dtype == F32
+assert ev_acc.to_numpy().tobytes() == np.array([1.0], dtype=np.float32).tobytes()
+# equal enforces the shared-dtype contract: an Int64 left operand against the
+# Int32 labels raises instead of comparing across widths.
+expect_raises(
+    Exception,
+    lambda: ev_logits.argmax(1).equal(ev_labels32),
+    "dtype-mismatched equal",
 )
 
 print("BINDINGS SMOKE OK")
