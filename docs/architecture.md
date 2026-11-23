@@ -69,7 +69,8 @@ explicit policies rather than reshape:
 - `Tensor::read_element()` / `Tensor::write_element()` are C++-only bulk
   byte I/O (bounds-checked; the offset is in elements of size `bytes`). They
   are the primitives behind `.bt` export; language bindings get bulk access
-  via a future buffer protocol, not these.
+  through the `from_numpy`/`to_numpy`/`write_numpy` and
+  `from_bytes`/`to_bytes` pairs built on top of them, not these directly.
 
 `Tensor/Tensor.h` and `Tensor/Ops/TensorOps.h` are excluded from the checked
 set: their scanner findings are namespace-scope `detail` internals (autograd
@@ -83,12 +84,13 @@ with `-DBUILD_PYTHON_BINDINGS=ON`, pybind11 >= 3.0 from pip) exposes the trainin
 surface used by the demos: `set_seed`; the `Device` enum and the full
 fifteen-value `DType` enum;
 `Tensor` (`from_numpy`/`to_numpy` for the eleven NumPy-native dtypes,
+`write_numpy` for a validated in-place overwrite from a NumPy array,
 `from_bytes`/`to_bytes` raw-bits exchange for the rest, `shape`/`dtype`/`device`,
 `set_zero`, `sync`, `to` (in-place, blocking device
 move), `add`, `softmax_ce`, the evaluation verbs `argmax`/`equal`/`mean` with
 in-place `convert_dtype`, `item`, `backward`);
 `Linear`/`Relu`/`Gelu`/`Conv2d`/`BatchNorm`/`MaxPool2d`/`Flatten`/`Dropout`/
-`Sequential` (`forward`, `zero_grad`, `adam_step`,
+`Sequential` (`forward`, `zero_grad`, `adam_step`, `sgd_step`,
 `train`/`eval`, `named_parameters`); `softmax_cross_entropy`;
 `load_mnist_flat` and `load_mnist_nchw`; `load_csv` returning the `CsvDataset`
 mirror — the features/labels tensor pair plus the inspection fields
@@ -96,7 +98,18 @@ mirror — the features/labels tensor pair plus the inspection fields
 `column_min`/`column_max`/`column_mean` — with `CsvOptions`
 (`feature_dtype`, `nulls`, `normalize`) plus the `CsvNullPolicy` and
 `CsvNormalize` enums; `DataLoader` (`reset`, `next_batch`); `evaluate` returning
-`(accuracy, mean_loss)`; and `save`/`load` with `CheckpointLevel`.
+`(accuracy, mean_loss)`; `pool_snapshot` returning the CPU pool's live
+telemetry as plain dicts; `gpu_memory` returning
+{total_bytes, free_bytes, used_bytes} (None on CPU-only builds, on call
+failure, or with no live GPU — telemetry never throws);
+`Tensor.adam_step_count` (None until the first Adam step);
+`export_spec` returning a module's architecture
+spec as a plain dict tree (type, string hyperparameters, ordered children);
+and `save`/`load` with `CheckpointLevel`.
+The blocking calls on this surface (`to_numpy`, `write_numpy`, `item`,
+`evaluate`) release the GIL across their sync/compute regions so other
+Python threads (a UI redraw loop, a telemetry poller) stay responsive
+while the training thread waits on the pool.
 
 Determinism contract: the bindings add no RNG draws, conversions, or
 reordering of their own, so a Python training loop that replays a C++ program
@@ -145,6 +158,186 @@ the `BeanTensorV5CNN` convolutional demo (Conv2d → BatchNorm → ReLU →
 MaxPool2d twice, Flatten, Dropout, two Linears) with the same save/reload
 pattern.
 
+## btui
+
+`python/btui.py` is a standalone interactive training TUI over the
+`beantensor` bindings: a stdlib-curses front-end (imported lazily, so the
+module loads in terminal-less environments) plus a curses-free run core.
+Launch it with `python3 python/btui.py` (`--data-dir` overrides the MNIST
+directory). v1 trains in Float32 only, on CPU always and on GPU when the
+build has a backend — availability is probed once at startup (a tiny tensor
+move), and the device field locks to cpu with the
+`cpu (no gpu in this build)` message when the probe fails.
+
+Panels: a header strip (run state, `[edits pending]` once the spec or config
+has diverged from the live run, `[.bt seed loaded]` after a `W` or `L`
+load); a
+Model panel — the layer stack with each layer's constructor params, edited
+in place, plus a `data input:` info line showing the data source's logical
+per-sample shape (`784` for mnist_flat, `(1, 28, 28)` for mnist_nchw, the
+feature count for CSV — read through the current null/normalize policies —
+and `unknown` when detection fails); editing the FIRST layer's input param
+(Linear `in_features` / Conv2d `in_channels`) pre-fills the detected scalar
+into the edit form, stated in the prompt and freely overridable; a Params
+panel — data source (`mnist_flat`, `mnist_nchw`, `csv`),
+data dir, CSV path, CSV null and normalize policies (`KeepNaN`/`FillMean`/
+`FillMedian`/`FillConstant` and `None`/`MinMax`/`Standardize`, mapped onto
+`CsvOptions`), train/test row caps, optimizer (`adam`, `sgd`),
+lr/beta1/beta2/eps, epochs, batch, seed, and a `device` field
+(cpu/gpu — editable when the startup probe found a GPU, otherwise greyed
+to `cpu (no gpu in this build)` and locked); a Training panel — batch count and
+rate, last/mean loss over a bounded window with a vertical eighth-block
+graph (non-finite cells render as `?`), and the per-epoch
+train-loss/test-accuracy/test-loss
+line; and a Pool panel — the worker grid with status tags, stuck flagging,
+and done/stolen/helped counters, the same rendering vocabulary as the
+embedded dashboard (see [Training dashboard](#training-dashboard)). Below
+them sit a two-line log strip and a footer that shows either the help line
+or the active edit form.
+
+Keys: arrows move the selection (LEFT/RIGHT walk a layer's params), TAB
+switches Model/Params focus, ENTER edits the selected field, `a` starts the
+add-layer form (one prompt per param; an empty commit keeps the default),
+`d` deletes the selected layer, `j`/`k` move the selected layer down/up one
+slot, `r` starts or restarts the run, `p` pauses/resumes a live run (batch
+boundary; the header shows `run: paused`), `s`
+requests a stop, `w` saves the last finished net to a `.bt` checkpoint
+(three-step form: path, default `btui_model.bt`; then
+`strip for sharing? (y/n)`, default `n` — `y` writes a recipient-safe copy:
+Weights level, no gradients/moments, and NO config metadata, logged as
+`shared copy: <path> — weights only, config stripped`; `n` continues to the
+checkpoint level —
+`Weights`, `WeightsAndGrads`, or `Full`, default `Weights`; the file also
+carries the current data/hyperparam config as key=value metadata),
+`W` loads a `.bt` checkpoint as seed weights
+only, `L` imports a `.bt` checkpoint's ARCHITECTURE — the model stack is
+replaced with the file's layers (via `export_spec`; unknown layer types are
+rejected with a log error and no partial import) and the loaded module
+becomes the pending seed-weights source for the next run; when the file
+carries config metadata (written by `w`), the settings that parse are
+restored and named in a `restored config:` log line — unknown keys are
+ignored and malformed values keep defaults. `r` refuses
+shape-incompatible runs BEFORE any engine call: the first layer's input
+rank is checked against the data source, and a mismatch logs the shape
+contract (`first layer Conv2d needs rank-4 NCHW input {batch, channels,
+height, width}; this source gives rank-2 feature rows`) instead of the
+engine's raw rank error — the message states the requirement, with the
+built-in sources mentioned as one way to satisfy it, never the only way.
+Flatten accepts any input rank. Details the
+app's layer schema cannot express — Linear/Conv2d `bias=0`, MaxPool2d
+`stride != kernel`, BatchNorm `momentum`/`eps` — are dropped on import and
+each drop is named in the log line (`dropped: layer N ...`), `q` quits. Footer
+forms accept text with BACKSPACE editing; an empty commit keeps the current
+value, and ESC cancels the whole in-progress form sequence.
+
+Run semantics: the model and config stay editable while a run is live; edits
+are flagged pending and take effect when `r` restarts — the live run stops
+and the new run rebuilds from the current spec and config. A restart reuses
+weights from the last finished net: every parameter matching by name and
+shape is copied into the fresh build and everything else reinitializes
+(BatchNorm running statistics are module state, not named parameters, and
+are not carried). The copy is host-mediated, so it works across devices: a
+GPU-resident old param is moved to CPU in place for the read (safe — the
+old net is discarded post-restart) and a GPU-bound new param detours
+through CPU for the write before moving back. `W` instead seeds the matching parameters of the next
+run's freshly built net from the loaded checkpoint. Data always loads and
+slices (row caps) on CPU; with `device: gpu` each split tensor then uploads
+via `.to()` before its DataLoader is built, and the train/evaluate loop
+runs on-device, and the Training box shows a `vram: used/total GiB` readout
+(from `bt.gpu_memory()`, polled at the pool rate; GPU utilization % is out
+of scope — it needs NVML, beyond the no-external-libraries bar). A stop is
+cooperative:
+it lands at a batch boundary, at most one batch after `s`, and the pending
+per-epoch evaluate is skipped. Pause is likewise batch-boundary (plus one
+check before the per-epoch evaluate): loader position, epoch state, and
+optimizer state are preserved and the loss ring simply stops growing.
+Resume has two modes: right after an L import the spec is clean, so the
+loaded module trains DIRECTLY — a Full checkpoint's Adam moments and step
+counters survive (true resume, logged `resumed: optimizer state intact`);
+any spec edit marks it dirty and the next run rebuilds + re-seeds as above
+(moments reset, logged `rebuilt: weights re-seeded`). The ready net is
+consumed when the run starts — a second `r` rebuilds from the spec and
+re-seeds from the last finished net. Resume additionally requires the ready
+net to already live on the target device: Adam moments are address-keyed
+optimizer state and do NOT move with `Tensor.to`, so a CPU-saved
+checkpoint resumed onto GPU is rebuilt and re-seeded instead (logged
+`device changed: rebuilt with weight re-seed, optimizer state reset`)
+rather than silently zeroing its moments mid-run. Two data-path disclosures: CSV runs train
+AND evaluate on the same single split (a CSV has no held-out half; the row
+caps apply to both uses), and the app's loaders keep the ragged final batch
+(`drop_last=false`) rather than discarding it. Quit waits for the training
+thread: the first `q` during a live run requests the stop and the UI keeps
+redrawing until the thread joins; a second `q` force-quits immediately, and
+the (non-daemon) thread then finishes on its own before interpreter
+teardown. The same spec and seed give identical init
+draws — one seed draw per layer in spec order, the construction-order rule
+from [Python bindings](#python-bindings) above.
+
+Color: on terminals with color support the log strip renders error lines
+(`run failed:`, `cannot start:`, invalid input) red, the header run state
+is green (running) / yellow (paused) / dim (idle), and the Pool worker
+cells carry the IDLE/OWN/STEAL/HELP/WAIT color vocabulary from
+[Training dashboard](#training-dashboard). Graphs are btop-style VERTICAL
+bar graphs (Unicode eighth-block chars U+2581..U+2588, 8 levels per cell,
+bottom row is the base), with two flavors: the Pool box renders a 3-row
+ABSOLUTE graph of tasks
+completed-per-interval under its `workers=`/`pending=`/`done=` header
+(activity magnitude is its meaningful signal), while the Training box
+renders a 4-row CENTERED DELTA graph of per-batch loss — a dim mid-height
+centerline, each column the change from the previous sample (the first
+visible sample deltas against the window mean), up = loss rose, down =
+loss fell, heights scaled by the window's largest |delta| so the two
+directions read comparably; a zero delta renders exactly the centerline
+glyph and a flat series renders centerline only,
+and the `last=`/`mean=` readout above still carries the level.
+The absolute flavor keeps the shared normalization rules: exact zero
+renders blank, nonzero floors at one level, flat-but-busy sits
+mid-height — an idle graph slot
+is blank rows, never filler characters. Cells with no activity in the
+interval RECEDE as dim lowercase `#NN idle`; cells whose counter advanced
+DOMINATE in bright green as `#NN ~N` (the interval count, never the IDLE
+string), and the box header keeps the `workers=`/`pending=`/`done=`
+readouts above the interval graph — monochrome-safe, the block characters
+carry the information. At startup the app logs one
+color-diagnostic line to the log strip: `colors on (N pairs)`, or off with
+the reason — `colors off: NO_COLOR set` when the NO_COLOR convention is
+set (honored before any color init), or
+`colors off: TERM=<term> reports no color support (try TERM=xterm-256color)`.
+This is diagnose-only; the app never forces colors past terminfo.
+Instantaneous status is
+truthful but structurally blind to microsecond pool tasks (a worker
+finishing a sub-ms task between samples reads Idle even under full load),
+so the panel derives ACTIVITY from the cumulative `tasks_completed`
+counters: a worker whose counter advanced between polls rendered with a
+bright active style and a `+N` count, the header shows the interval total
+(`done=N`), and unchanged workers keep their resting rendering — the
+first poll has no baseline and falls back to the instantaneous tags. The
+Pool box is labeled
+`CPU pool` for honesty — on GPU runs the CPU pool genuinely idles between
+kernel-launch microtasks while the GPU does the work, so with
+`device: gpu` a dim hint row says
+`gpu run: pool enqueues kernels; watch batches/s + vram` (pool telemetry
+refreshes at 5 Hz; the snapshot costs ~0.1 ms). The Training box shows an
+`evaluating...` state on its counts line during each per-epoch evaluate
+(set by the training thread around the call, cleared in a finally), so
+the eval stall reads as intentional instead of a hang. Terminals without color
+(`TERM=dumb` or `has_colors()` false) get the identical layout in
+monochrome — style decisions live in the controller, the screen backends
+(CursesScreen, and BufferScreen which records the tokens for tests)
+merely apply them.
+
+Test seams: `python3 python/btui.py --headless <keys-file>` replays a
+scripted session — one event per line (named keys like `DOWN`/`ENTER`/`ESC`,
+`TYPE:<text>` for literal strings, `SET:<slug>=<value>` for config fields
+routed through the same validators as the forms, `#` comments) — and prints
+the final screen text to stdout. The exit code is 0 on a clean run and
+nonzero when the run failed (the shared error slot is set at completion)
+or a force quit left the training thread live, so headless CI never
+reports success after a failed run. The screen
+backend is dependency-injected: `BufferScreen` is a plain string grid
+implementing the curses subset the app draws through, so the UI and its
+tests run without a terminal.
+
 ## CSV datasets
 
 `Data::load_csv(path, options)` turns a CSV file into the tensor pair
@@ -177,7 +370,14 @@ tensor-op model.
 persist and rebuild a module tree. A `.bt` file holds a versioned
 architecture spec (layer types, constructor hyperparameters as lossless
 hexfloat strings, named children) plus CRC32-verified tensor records —
-parameters and BatchNorm running statistics — in registry order. The format
+parameters and BatchNorm running statistics — in registry order. A file may
+additionally carry ONE optional trailing metadata record (an opaque named
+blob, `btui.config` today, that the engine transports without parsing):
+any metadata payload makes the file version 3, so older builds fail cleanly
+with `UnsupportedVersion`, while new builds read versions 1–3 and skip
+unknown extra-record kinds inside v3. `save(..., metadata)` writes it and
+`Serialization::read_metadata(path)` returns the CRC-verified payload or
+"". The format
 byte layout lives in `docs/roadmap.md`. Bit-exactness contract: a
 save → load roundtrip on one machine is byte-identical per tensor (dtypes
 are restored from the records), and a CPU-saved file loads on GPU with
@@ -369,6 +569,69 @@ Adam's per-parameter step counter and first/second moment buffers are untouched
 and SGD leaves parameters unchanged. Static mode disables dynamic growth/backoff
 while still applying the fixed scale. The finite scan uses existing device ops
 (`sub`, `equal`, `min`) and performs no host fp16 arithmetic.
+
+## Training dashboard
+
+`BeanTensor::Helpers::Dashboard` (see `Helpers/Dashboard/Dashboard.h`) is an
+in-process terminal dashboard for training runs. Each frame is a framed,
+fixed-geometry block: a header strip, a Training box (batch count with a
+batches/second rate, a compact latest/mean loss readout over the bounded
+recent-loss ring with a sparkline — non-finite losses render as `?` cells and
+are excluded from the statistics — and an epoch line), a Pool box (the worker
+grid with OWN/STEAL/HELP/WAIT colors, counters, and stuck-flagging, reusing
+`PoolMonitor::render_pool_body` clipped to the box interior), and a one-line
+footer, all drawn with box-drawing borders at a fixed 76-cell width. It is a
+training-loop utility like the ones above: the training thread feeds it, and
+it only observes engine state, never participates in it. The standalone
+training TUI (`python/btui.py`, see [btui](#btui)) reuses the
+worker-status tags for its own Pool panel (its graphs use the vertical
+eighth-block idiom, not this dashboard's horizontal ramp).
+
+Activation is TTY-gated. The dashboard is active only when fd 2 (its sink,
+`std::cerr`) is a TTY and the run allows it; otherwise it is fully inert — no
+render thread is started, `report_batch`/`report_epoch` are no-ops, and the
+sink is never touched. Non-TTY runs (CI, pipes, the parity ctests) are
+byte-identical to running without a dashboard.
+
+The feed API is `report_batch(loss)` for the per-batch loss and
+`report_epoch(epoch, epochs, train_mean_loss, test_accuracy, test_mean_loss)`
+for each finished epoch; the Python binding exposes the same surface as
+`bt.Dashboard`. The per-batch loss read in dashboard mode syncs that batch —
+the scalar costs whatever the caller paid to obtain it (typically a sync via
+`item()`), so dashboard mode is a watching mode, not a benchmarking mode, and
+the demos only pay it while the dashboard is live. `--no-dashboard` restores
+the exact old pipeline with zero overhead.
+
+Lifecycle: when active, one plain render thread (never a pool worker) redraws
+at `refresh_hz` (default 2 Hz); the renderer reads the pool only through
+`PoolMonitor`'s snapshot API and never calls `sync()`. There is no alternate
+screen and no cursor hide: the dashboard claims a fixed-height region, and
+after the first frame each tick moves the cursor up by the frame's line count
+and rewrites the whole block (every content line is padded to the frame
+width, so the rewrite is exact). `stop()` is idempotent, joins the render
+thread, and does NOT erase — the last complete frame persists on screen and
+the recorded epoch history and final summary print below it; the destructor
+backstops `stop()`. In dashboard mode the demos defer their canonical epoch
+lines AND any caught failure diagnostics until after `stop()` so they print
+below the persisting frame in order. Ctrl+C simply dies with the partial
+frame on screen (nothing to restore — same as any killed full-screen TUI).
+
+Geometry contract: each frame re-checks the terminal size (TIOCGWINSZ on fd
+2; the `terminal_size()` virtual is the test seam). A terminal narrower than
+the 76-cell frame or shorter than frame height + 2 gets ONE
+"terminal too small" notice line and the dashboard goes render-inert for the
+run — the render thread exits after the notice, no partial frames — while
+reports keep recording and `stop()` still prints the deferred history.
+Mid-run resizes garble at most one tick and self-correct on the next full
+redraw; while the dashboard is active, nothing else may write to the sink
+(the demos defer their prints).
+
+Usage: pass `--no-dashboard` to `BeanTensorV5CNN`, `python/digits.py`, or
+`python/cnn.py` to suppress the dashboard (it defaults to on whenever stderr
+is a TTY). For custom training loops, construct `bt.Dashboard(tty=...,
+refresh_hz=...)` in Python, or `Helpers::Dashboard(std::cerr, sink_is_tty,
+refresh_hz)` in C++, feed it from the training thread, and call `stop()` at
+the end.
 
 ## GELU activation
 

@@ -99,3 +99,8 @@ g++ -std=c++23 -O2 -I. \
 You should see three epochs of training output ending with test accuracy around
 97% on MNIST. See [`docs/mnist-results.md`](mnist-results.md) for the full
 acceptance numbers.
+
+For an interactive version of this loop — edit the architecture and
+hyperparameters, restart runs with kept weights, and watch the loss and pool
+workers live — build the Python bindings and run `python3 python/btui.py`;
+see the btui section in [`docs/architecture.md`](architecture.md).

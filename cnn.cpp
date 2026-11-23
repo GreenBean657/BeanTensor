@@ -1,5 +1,10 @@
 #include "BeanTensor.h"
+#include "Helpers/Dashboard/Dashboard.h"
 #include "demos/Mnist.h"
+
+#include <cstdio>
+#include <sstream>
+#include <unistd.h>
 
 using namespace BeanTensor;
 using DType = DataTypes::DType;
@@ -38,6 +43,7 @@ namespace {
         size_t train_rows = 60000;
         size_t test_rows = 10000;
         size_t epochs = kEpochs;
+        bool no_dashboard = false;
     };
 
     [[nodiscard]] RunConfig parse_args(const int argc, char** argv) {
@@ -66,6 +72,8 @@ namespace {
                 v.has_value()
             ) {
                 cfg.epochs = *v;
+            } else if (arg == "--no-dashboard") {
+                cfg.no_dashboard = true;
             }
         }
         cfg.train_rows = std::min(cfg.train_rows, size_t{60000});
@@ -84,7 +92,9 @@ namespace {
     }
 
     [[nodiscard]] bool run_training(const demos::mnist::Split& train, const demos::mnist::Split& test,
-                                    const Device device, const size_t epochs) {
+                                    const Device device, const size_t epochs,
+                                    Helpers::Dashboard& dash, std::vector<std::string>& epoch_lines,
+                                    std::vector<std::string>& failure_lines) {
         std::cout << "\n" << std::string(60, '=') << "\n";
         std::cout << "Device: " << Tensors::stringify_device_source(device) << "\n";
         std::cout << std::string(60, '=') << "\n";
@@ -131,6 +141,13 @@ namespace {
             const auto uploaded = train_data.has_value() && test_data.has_value();
             !uploaded
         ) {
+            // Live mode: the dtype message just printed sits inside the
+            // dashboard's redraw region and is overwritten by the next frame
+            // — defer a replacement diagnostic so it survives past the
+            // persistent final frame stop() leaves on screen.
+            if (dash.active()) {
+                failure_lines.emplace_back("mnist upload failed (dtype mismatch reported during upload)\n");
+            }
             return false;
         }
 
@@ -168,6 +185,12 @@ namespace {
                     const auto batch_ok = demos::mnist::expect_dtype(batch, kDType, "train: input batch");
                     !batch_ok
                 ) {
+                    if (dash.active()) {
+                        auto msg = std::ostringstream{};
+                        msg << "train: input batch has dtype " << DataTypes::dtype_to_string(batch.get_dtype())
+                            << ", expected " << DataTypes::dtype_to_string(kDType) << "\n";
+                        failure_lines.push_back(msg.str());
+                    }
                     return false;
                 }
 
@@ -181,10 +204,21 @@ namespace {
                     const auto loss_ok = demos::mnist::expect_dtype(loss, kDType, "train loss");
                     !loss_ok
                 ) {
+                    if (dash.active()) {
+                        auto msg = std::ostringstream{};
+                        msg << "train loss has dtype " << DataTypes::dtype_to_string(loss.get_dtype())
+                            << ", expected " << DataTypes::dtype_to_string(kDType) << "\n";
+                        failure_lines.push_back(msg.str());
+                    }
                     return false;
                 }
                 loss_acc = loss_acc.add(loss);
                 ++steps;
+                // The per-batch scalar read costs a sync, so it only happens
+                // when the dashboard is live; the inert path never pays it.
+                if (dash.active()) {
+                    dash.report_batch(demos::mnist::read_scalar(loss, kHostDType));
+                }
             }
             // Drain pending optimizer/gradient work before the synchronous
             // eval pass; BatchNorm must also be in eval mode so the running
@@ -197,15 +231,36 @@ namespace {
             const auto result = metrics::evaluate(net, test_loader);
             net.train();
             const auto epoch_seconds = std::chrono::duration<float64_t>(std::chrono::steady_clock::now() - epoch_start).count();
-            std::cout << "epoch " << (epoch + 1) << "/" << epochs
-                      << "  train mean loss " << (demos::mnist::read_scalar(loss_acc, kHostDType) / static_cast<float64_t>(steps))
-                      << "  test accuracy " << (result.accuracy * float64_t{100}) << "%"
-                      << "  test mean loss " << result.mean_loss
-                      << "  time " << epoch_seconds << " s\n";
+            const auto train_mean_loss = demos::mnist::read_scalar(loss_acc, kHostDType) / static_cast<float64_t>(steps);
+            auto epoch_line = std::ostringstream{};
+            epoch_line << "epoch " << (epoch + 1) << "/" << epochs
+                       << "  train mean loss " << train_mean_loss
+                       << "  test accuracy " << (result.accuracy * float64_t{100}) << "%"
+                       << "  test mean loss " << result.mean_loss
+                       << "  time " << epoch_seconds << " s\n";
+            if (dash.active()) {
+                // Live mode defers the canonical epoch lines until stop()
+                // persists its final frame; the dashboard gets the numeric record.
+                dash.report_epoch(static_cast<uint32_t>(epoch + 1), static_cast<uint32_t>(epochs),
+                                  train_mean_loss, result.accuracy, result.mean_loss);
+                epoch_lines.push_back(epoch_line.str());
+            } else {
+                std::cout << epoch_line.str();
+            }
         }
         const auto total_seconds = std::chrono::duration<float64_t>(std::chrono::steady_clock::now() - run_start).count();
-        std::cout << "total time " << total_seconds << " s\n";
-        std::cout << "\nafter training:\n" << net;
+        if (dash.active()) {
+            // Live mode: nothing post-training may print while the dashboard
+            // owns its region — defer the tail behind stop() like the epoch
+            // lines, so the persisting final frame is never overwritten.
+            auto tail = std::ostringstream{};
+            tail << "total time " << total_seconds << " s\n";
+            tail << "\nafter training:\n" << net;
+            epoch_lines.push_back(tail.str());
+        } else {
+            std::cout << "total time " << total_seconds << " s\n";
+            std::cout << "\nafter training:\n" << net;
+        }
         return true;
     }
 }
@@ -216,7 +271,7 @@ int main(const int argc, char** argv) {
         try {
             return parse_args(argc, argv);
         } catch (const std::exception& e) {
-            std::cerr << "arguments: [--train-rows N] [--test-rows N] [--epochs N]\n";
+            std::cerr << "arguments: [--train-rows N] [--test-rows N] [--epochs N] [--no-dashboard]\n";
             throw;
         }
     }();
@@ -238,17 +293,38 @@ int main(const int argc, char** argv) {
     const auto test_sub = subsample(test, cfg.test_rows);
     std::cout << "Using " << train_sub.count << " training and " << test_sub.count << " test images\n";
 
-    if (!run_training(train_sub, test_sub, Device::CPU, cfg.epochs)) {
-        return 1;
+    // One dashboard for the whole run (CPU pass and, when compiled in, the
+    // GPU pass). The TTY assertion is fd-level because the sink is std::cerr.
+    auto dash = Helpers::Dashboard(std::cerr, isatty(fileno(stderr)) != 0 && !cfg.no_dashboard);
+    auto epoch_lines = std::vector<std::string>{};
+    auto failure_lines = std::vector<std::string>{};
+
+    // stop() leaves the final frame on screen and prints its summary below
+    // it; the deferred canonical epoch lines and any failure diagnostics
+    // captured during the run follow, so nothing the live dashboard drew over
+    // is lost.
+    const auto finish = [&](const int code) {
+        dash.stop();
+        for (const auto& line : epoch_lines) {
+            std::cout << line;
+        }
+        for (const auto& line : failure_lines) {
+            std::cerr << line;
+        }
+        return code;
+    };
+
+    if (!run_training(train_sub, test_sub, Device::CPU, cfg.epochs, dash, epoch_lines, failure_lines)) {
+        return finish(1);
     }
 
 #if defined(USE_CUDA) || defined(USE_HIP)
-    if (!run_training(train_sub, test_sub, Device::GPU, cfg.epochs)) {
-        return 1;
+    if (!run_training(train_sub, test_sub, Device::GPU, cfg.epochs, dash, epoch_lines, failure_lines)) {
+        return finish(1);
     }
 #else
     std::cout << "\nNo GPU backend compiled in; skipping GPU run.\n";
 #endif
 
-    return 0;
+    return finish(0);
 }

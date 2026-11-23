@@ -11,9 +11,12 @@
  * and CPU-saved -> GPU-loaded holds within the existing CPU<->GPU conversion
  * contract because load re-reads dtypes verbatim and only the device move is
  * backend-defined. Tensor payloads are optionally LZ77-compressed per record
- * (stored only when smaller). Errors raise ErrorHandling::* synchronously;
+ * (stored only when smaller). Version 3 files may carry ONE optional trailing
+ * extra-record section holding an opaque metadata blob the engine never
+ * parses; absent metadata keeps the version 1/2 byte layout exactly.
+ * Errors raise ErrorHandling::* synchronously;
  * file I/O is not part of the async tensor-op model.
- * @version 0.1
+ * @version 0.2
  * @date 2026-11-05
  */
 #pragma once
@@ -47,11 +50,14 @@ namespace BeanTensor::Serialization {
      * whole-file coherent (parameters are written record by record); sync
      * and quiesce the model first for a reproducible checkpoint.
      * @brief Export a module tree to a .bt file.
+     * @param metadata Opaque blob carried in a trailing extra-record section
+     *        (the engine never parses it); non-empty makes the file version 3,
+     *        empty keeps the version 1/2 layout byte-identical.
      * @throws ErrorHandling::SerializationError the file cannot be opened or written.
      * @throws ErrorHandling::NotSerializable a module in the tree does not export a spec.
      */
     void save(const Modules::Module&, const std::string& path, bool compress = true,
-              CheckpointLevel level = CheckpointLevel::Weights);
+              CheckpointLevel level = CheckpointLevel::Weights, std::string metadata = {});
 
     /**
      * @brief Import a module tree from a .bt file.
@@ -61,4 +67,15 @@ namespace BeanTensor::Serialization {
      * @throws ErrorHandling::UnknownModuleType the spec names a type no factory constructs.
      */
     [[nodiscard]] std::unique_ptr<Modules::Module> load(const std::string& path, Tensors::Device device = Tensors::Device::CPU);
+
+    /**
+     * @brief Read a .bt file's metadata payload.
+     * @return The metadata record's payload (CRC-verified), or "" when the
+     *         file carries none. Unknown extra-record kinds in a version-3
+     *         file are skipped, not rejected.
+     * @throws ErrorHandling::SerializationError the file cannot be opened or read.
+     * @throws ErrorHandling::CorruptFile bad magic, truncation, or a CRC mismatch on the metadata record.
+     * @throws ErrorHandling::UnsupportedVersion the file version is newer than this build reads.
+     */
+    [[nodiscard]] std::string read_metadata(const std::string& path);
 }

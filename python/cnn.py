@@ -12,6 +12,7 @@ Run from the repository root:
 """
 
 import argparse
+import os
 import sys
 import time
 
@@ -36,7 +37,8 @@ K_SHUFFLE_SEED = 1234
 K_DATA_DIR = "datasets/mnist"
 
 
-def run_training(train_images, train_labels, test_images, test_labels, device):
+def run_training(train_images, train_labels, test_images, test_labels, device,
+                 dash, dash_active, epoch_lines):
     print()
     print("=" * 60)
     print(f"Device: {'CPU' if device == bt.Device.CPU else 'GPU'}")
@@ -95,6 +97,10 @@ def run_training(train_images, train_labels, test_images, test_labels, device):
             # for a standalone zero tensor).
             loss_acc = loss if loss_acc is None else loss_acc.add(loss)
             steps += 1
+            # The per-batch scalar read costs a sync, so it only happens when
+            # the dashboard is live; the inert path never pays it.
+            if dash_active:
+                dash.report_batch(loss.item())
         # Drain pending optimizer/gradient work before the synchronous eval
         # pass; BatchNorm must also be in eval mode so the running statistics
         # (not batch statistics) drive the accuracy number.
@@ -104,15 +110,30 @@ def run_training(train_images, train_labels, test_images, test_labels, device):
         accuracy, mean_loss = bt.evaluate(net, test_loader)
         net.train()
         epoch_seconds = time.perf_counter() - epoch_start
-        print(f"epoch {epoch + 1}/{K_EPOCHS}"
-              f"  train mean loss {loss_acc.item() / steps:.6g}"
-              f"  test accuracy {accuracy * 100:.6g}%"
-              f"  test mean loss {mean_loss:.6g}"
-              f"  time {epoch_seconds:.6g} s")
+        train_mean_loss = loss_acc.item() / steps
+        epoch_line = (f"epoch {epoch + 1}/{K_EPOCHS}"
+                      f"  train mean loss {train_mean_loss:.6g}"
+                      f"  test accuracy {accuracy * 100:.6g}%"
+                      f"  test mean loss {mean_loss:.6g}"
+                      f"  time {epoch_seconds:.6g} s")
+        if dash_active:
+            # Live mode defers the canonical epoch lines until stop()
+            # persists its final frame; the dashboard gets the numeric record.
+            dash.report_epoch(epoch + 1, K_EPOCHS, train_mean_loss, accuracy, mean_loss)
+            epoch_lines.append(epoch_line)
+        else:
+            print(epoch_line)
     total_seconds = time.perf_counter() - run_start
-    print(f"total time {total_seconds:.6g} s")
-    print("\nafter training:")
-    print(net)
+    # Live mode: nothing post-training may print while the dashboard owns
+    # its redraw region — defer the tail behind stop() like the epoch lines,
+    # so the persisting final frame is never overwritten. The inert path
+    # prints immediately, byte-identical to before.
+    tail_lines = [f"total time {total_seconds:.6g} s", "\nafter training:", str(net)]
+    if dash_active:
+        epoch_lines.extend(tail_lines)
+    else:
+        for line in tail_lines:
+            print(line)
     return net, test_loader
 
 
@@ -124,6 +145,8 @@ def main():
                         help="directory holding the uncompressed MNIST IDX files")
     parser.add_argument("--save", default="cnn_mnist.bt",
                         help="path of the .bt checkpoint written after training")
+    parser.add_argument("--no-dashboard", action="store_true",
+                        help="disable the live training dashboard even on a TTY")
     args = parser.parse_args()
 
     device = bt.Device.CPU if args.device == "cpu" else bt.Device.GPU
@@ -139,21 +162,51 @@ def main():
     print(f"Loaded {train_images.shape[0]} training and {test_images.shape[0]} test images")
     print(f"Using {train_images.shape[0]} training and {test_images.shape[0]} test images")
 
+    # The binding sinks frames to fd 2 (std::cerr), so the TTY assertion is
+    # fd-level: os.isatty(2), not sys.stderr.isatty().
+    dash_active = (not args.no_dashboard) and os.isatty(2)
+    dash = bt.Dashboard(tty=dash_active)
+    epoch_lines = []
+    failure_lines = []
     try:
-        net, test_loader = run_training(train_images, train_labels, test_images, test_labels, device)
-    except RuntimeError as exc:
-        if device == bt.Device.GPU:
-            print(f"GPU run failed (CPU-only build?): {exc}", file=sys.stderr)
-            return 1
-        raise
+        try:
+            net, test_loader = run_training(train_images, train_labels, test_images, test_labels,
+                                            device, dash, dash_active, epoch_lines)
+        except RuntimeError as exc:
+            if device == bt.Device.GPU:
+                # Live mode: printing now would land inside the redrawn frame
+                # region and scroll away — defer the diagnostic past stop().
+                if dash_active:
+                    failure_lines.append(f"GPU run failed (CPU-only build?): {exc}")
+                else:
+                    print(f"GPU run failed (CPU-only build?): {exc}", file=sys.stderr)
+                return 1
+            raise
 
-    bt.save(net, args.save, True, bt.CheckpointLevel.Full)
-    print(f"\nsaved checkpoint to {args.save}")
-    reloaded = bt.load(args.save, device)
-    reloaded.eval()
-    accuracy, mean_loss = bt.evaluate(reloaded, test_loader)
-    print(f"reloaded: test accuracy {accuracy * 100:.6g}%  test mean loss {mean_loss:.6g}")
-    return 0
+        bt.save(net, args.save, True, bt.CheckpointLevel.Full)
+        reloaded = bt.load(args.save, device)
+        reloaded.eval()
+        accuracy, mean_loss = bt.evaluate(reloaded, test_loader)
+        # Same deferral rule as run_training's tail: these lines print after
+        # dash.stop() when the dashboard is live, immediately otherwise.
+        report_lines = [
+            f"\nsaved checkpoint to {args.save}",
+            f"reloaded: test accuracy {accuracy * 100:.6g}%  test mean loss {mean_loss:.6g}",
+        ]
+        if dash_active:
+            epoch_lines.extend(report_lines)
+        else:
+            for line in report_lines:
+                print(line)
+        return 0
+    finally:
+        # stop() leaves the final frame on screen and prints its summary
+        # below it; the deferred epoch lines and failure diagnostics follow.
+        dash.stop()
+        for line in epoch_lines:
+            print(line)
+        for line in failure_lines:
+            print(line, file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -6,8 +6,11 @@
  * to a stream using raw VT100/ANSI escape codes — no ncurses, no external
  * libraries, per the project's zero-dependency rule. The stuck threshold is a
  * purely presentational concern of the dashboard: scheduling never reads it.
- * @version 0.1
- * @date 2026-10-25
+ * The renderer is split into a cursor-neutral body (render_pool_body) and the
+ * standalone home-prefixed frame (render_dashboard) so composite renderers can
+ * place the grid under their own sections.
+ * @version 0.3
+ * @date 2026-11-19
  */
 #pragma once
 
@@ -38,6 +41,13 @@ namespace BeanTensor::Threading {
         inline constexpr const char* alt_off     = "\x1b[?1049l";
         inline constexpr const char* home        = "\x1b[H";
     }
+
+    /**
+     * Default running-time (ms) beyond which a worker cell is flagged as stuck.
+     * Display-only; shared by start_pool_monitor and the training dashboard.
+     * @brief Default stuck-flag threshold.
+     */
+    inline constexpr uint64_t default_stuck_threshold_ms = 10'000;
 
     /**
      * Foreground colors by worker status. Idle is dim, help-waiting is bright
@@ -71,19 +81,21 @@ namespace BeanTensor::Threading {
     }
 
     /**
-     * Renders ONE dashboard frame as a string (pure — no I/O, trivially testable).
-     * Layout: header (time, pending, workers, stop flag), a grid of worker cells
-     * (8 per row), then a per-worker detail strip with counters. A worker whose
-     * current task has run longer than stuck_threshold_ms gets a red background —
-     * this is a display heuristic ONLY; nothing in the pool consumes it.
-     * @brief Render a single dashboard frame.
+     * Renders the pool section content with NO cursor movement: header (time,
+     * pending, workers, stop flag), a grid of worker cells (8 per row), then a
+     * per-worker detail strip with counters. A worker whose current task has
+     * run longer than stuck_threshold_ms gets a red background — this is a
+     * display heuristic ONLY; nothing in the pool consumes it. Cursor-neutral
+     * so composite renderers (the training dashboard) can place the pool grid
+     * under their own sections without it homing over them.
+     * @brief Render the pool grid body (no cursor-home prefix).
      * @param snap The pool snapshot to render.
      * @param stuck_threshold_ms Running-time beyond which a worker cell is flagged.
-     * @return The full frame, ANSI escape sequences included.
+     * @return The pool section, ANSI colors included, cursor untouched.
      */
-    [[nodiscard]] inline std::string render_dashboard(const PoolSnapshot& snap, const uint64_t stuck_threshold_ms) {
+    [[nodiscard]] inline std::string render_pool_body(const PoolSnapshot& snap, const uint64_t stuck_threshold_ms) {
         auto out = std::ostringstream{};
-        out << ansi::home << ansi::bold
+        out << ansi::bold
             << "== BeanTensor pool  t=" << snap.snapshot_ms << "ms"
             << "  workers=" << snap.worker_count
             << "  pending=" << snap.pending_tasks_total
@@ -132,6 +144,21 @@ namespace BeanTensor::Threading {
         return out.str();
     }
 
+    /**
+     * Renders ONE standalone dashboard frame as a string (pure — no I/O,
+     * trivially testable): the cursor-home prefix plus render_pool_body, so a
+     * stream of frames rewrites in place. Byte-identical to the pre-split
+     * renderer; existing consumers (start_pool_monitor, the platform tests)
+     * are unaffected.
+     * @brief Render a single dashboard frame with the home prefix.
+     * @param snap The pool snapshot to render.
+     * @param stuck_threshold_ms Running-time beyond which a worker cell is flagged.
+     * @return The full frame, ANSI escape sequences included.
+     */
+    [[nodiscard]] inline std::string render_dashboard(const PoolSnapshot& snap, const uint64_t stuck_threshold_ms) {
+        return std::string(ansi::home) + render_pool_body(snap, stuck_threshold_ms);
+    }
+
     namespace detail {
         struct MonitorState {
             std::atomic<bool> run{false};
@@ -158,7 +185,7 @@ namespace BeanTensor::Threading {
      */
     inline void start_pool_monitor(std::ostream& sink,
                                    const std::chrono::milliseconds interval = std::chrono::milliseconds{150},
-                                   const uint64_t stuck_threshold_ms = 10'000) {
+                                   const uint64_t stuck_threshold_ms = default_stuck_threshold_ms) {
         auto& state = detail::monitor_state();
         if (state.run.exchange(true)) {
             return;

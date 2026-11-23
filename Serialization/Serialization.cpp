@@ -3,9 +3,10 @@
  * @author GreenBean
  * @brief Implementation of the .bt writer/reader declared in Serialization.h:
  * little-endian field I/O, the recursive spec record, the CRC32 checksum, the
- * dtype tag table, the registry-ordered tensor stream, and the layer factory
- * table used at load time.
- * @version 0.2
+ * dtype tag table, the registry-ordered tensor stream, the layer factory
+ * table used at load time, and the version-3 trailing extra-record section
+ * (the optional metadata blob) with its skip-unknown-kind reader.
+ * @version 0.3
  * @date 2026-11-10
  */
 #include "Serialization/Serialization.h"
@@ -15,6 +16,7 @@
 #include <fstream>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -43,15 +45,22 @@ namespace BeanTensor::Serialization {
         constexpr std::array<uint8_t, 4> k_magic = {0x42, 0x54, 0x30, 0x31};
         constexpr uint32_t k_version = 1;
         constexpr uint32_t k_version_checkpoint = 2;
+        constexpr uint32_t k_version_metadata = 3;
         // Section presence travels in the flags field: bit 0 = gradient
-        // section, bit 1 = adam section. Weights-only files keep version 1
-        // and flags 0 (the original v1 layout); checkpoint files are version
-        // 2 with the bits matching what save actually wrote.
+        // section, bit 1 = adam section, bit 2 = trailing extra-record
+        // section (today: the optional metadata record). Weights-only files
+        // keep version 1 and flags 0 (the original v1 layout); checkpoint
+        // files are version 2; any file carrying metadata is version 3.
         constexpr uint32_t k_flag_grads = 1u;
         constexpr uint32_t k_flag_adam = 2u;
-        constexpr uint32_t k_flag_mask = k_flag_grads | k_flag_adam;
+        constexpr uint32_t k_flag_metadata = 4u;
+        constexpr uint32_t k_flag_mask = k_flag_grads | k_flag_adam | k_flag_metadata;
         constexpr uint8_t k_compression_none = 0;
         constexpr uint8_t k_compression_lz = 1;
+        // Extra-record kinds (the trailing section, version 3). Kinds are
+        // append-only; a v3 reader skips kinds it does not know.
+        constexpr uint8_t k_kind_metadata = 1;
+        constexpr std::string_view k_metadata_name = "btui.config";
         // Format sanity limits: every file-controlled length/count/rank is
         // checked against these BEFORE anything is allocated or reserved, so
         // a malformed file raises CorruptFile instead of bad_alloc/length_error.
@@ -376,6 +385,91 @@ namespace BeanTensor::Serialization {
             }
         }
 
+        // Skip one tensor record WITHOUT decompressing: read the framing
+        // fields, bounds-check, then seek past the stored payload. Used by
+        // read_metadata, which must reach the trailing section without
+        // paying LZ77 on the way through.
+        void skip_record(std::istream& is) {
+            static_cast<void>(read_string(is, "tensor name"));
+            const auto tag = is.get();
+            if (tag == std::char_traits<char>::eof()) {
+                throw ErrorHandling::CorruptFile("truncated reading tensor dtype tag");
+            }
+            const auto rank = read_scalar<uint32_t>(is, "tensor rank");
+            if (rank > BT_TENSOR_MAX_DIMS) {
+                throw ErrorHandling::CorruptFile("tensor rank exceeds the maximum");
+            }
+            for (uint32_t i = 0; i < rank; ++i) {
+                static_cast<void>(read_scalar<uint64_t>(is, "tensor shape"));
+            }
+            static_cast<void>(read_scalar<uint32_t>(is, "tensor crc"));
+            const auto compression = is.get();
+            if (compression == std::char_traits<char>::eof()) {
+                throw ErrorHandling::CorruptFile("truncated reading tensor compression flag");
+            }
+            static_cast<void>(read_scalar<uint64_t>(is, "tensor raw size"));
+            const auto stored_size = read_scalar<uint64_t>(is, "tensor stored size");
+            if (stored_size > k_max_tensor_bytes) {
+                throw ErrorHandling::CorruptFile("tensor byte size exceeds the format limit");
+            }
+            if (stored_size > remaining_bytes(is)) {
+                throw ErrorHandling::CorruptFile("tensor payload overruns the file");
+            }
+            is.seekg(static_cast<std::streamoff>(stored_size), std::ios::cur);
+            if (!is) {
+                throw ErrorHandling::CorruptFile("truncated reading tensor payload");
+            }
+        }
+
+        // ---- Extra records (the trailing section, version 3) ----
+        void write_extra_record(std::ostream& os, const uint8_t kind, const std::string& name, const std::string& payload) {
+            os.put(static_cast<char>(kind));
+            write_string(os, name);
+            write_scalar<uint32_t>(os, crc32(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+            write_scalar<uint64_t>(os, static_cast<uint64_t>(payload.size()));
+            os.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+        }
+
+        // One extra record, skipped when the kind is unknown (v3 forward
+        // compat); the known metadata kind is CRC-verified and returned.
+        // Returns true only when a metadata payload was captured.
+        [[nodiscard]] bool read_extra_record(std::istream& is, std::string& metadata_out) {
+            const auto kind_byte = is.get();
+            if (kind_byte == std::char_traits<char>::eof()) {
+                throw ErrorHandling::CorruptFile("truncated reading extra record kind");
+            }
+            const auto kind = static_cast<uint8_t>(kind_byte);
+            auto name = read_string(is, "extra record name");
+            const auto crc_expected = read_scalar<uint32_t>(is, "extra record crc");
+            const auto size = read_scalar<uint64_t>(is, "extra record size");
+            if (size > k_max_tensor_bytes) {
+                throw ErrorHandling::CorruptFile("extra record size exceeds the format limit");
+            }
+            if (size > remaining_bytes(is)) {
+                throw ErrorHandling::CorruptFile("extra record payload overruns the file");
+            }
+            if (kind != k_kind_metadata) {
+                is.seekg(static_cast<std::streamoff>(size), std::ios::cur);
+                if (!is) {
+                    throw ErrorHandling::CorruptFile("truncated reading extra record payload");
+                }
+                return false;
+            }
+            auto payload = std::string(static_cast<size_t>(size), '\0');
+            is.read(payload.data(), static_cast<std::streamsize>(size));
+            if (static_cast<uint64_t>(is.gcount()) != size) {
+                throw ErrorHandling::CorruptFile("truncated reading extra record payload");
+            }
+            if (crc32(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()) != crc_expected) {
+                throw ErrorHandling::CorruptFile("CRC32 mismatch on extra record '" + name + "'");
+            }
+            if (name == k_metadata_name) {
+                metadata_out = std::move(payload);
+                return true;
+            }
+            return false;
+        }
+
         // ---- Layer factory table ----
         using Factory = std::function<std::unique_ptr<Modules::Module>(const Modules::ModuleSpec&, DataTypes::DType, Tensors::Device)>;
 
@@ -471,16 +565,22 @@ namespace BeanTensor::Serialization {
      * @throws ErrorHandling::SerializationError the file cannot be opened or written.
      * @throws ErrorHandling::NotSerializable a module in the tree does not export a spec.
      */
-    void save(const Modules::Module& module, const std::string& path, const bool compress, const CheckpointLevel level) {
+    void save(const Modules::Module& module, const std::string& path, const bool compress, const CheckpointLevel level, const std::string metadata) {
         auto out = std::ofstream(path, std::ios::binary | std::ios::trunc);
         if (!out) {
             throw ErrorHandling::SerializationError("cannot open '" + path + "' for writing");
         }
         out.write(reinterpret_cast<const char*>(k_magic.data()), static_cast<std::streamsize>(k_magic.size()));
         const auto with_grads = level == CheckpointLevel::WeightsAndGrads || level == CheckpointLevel::Full;
-        const auto version = with_grads || level == CheckpointLevel::Full ? k_version_checkpoint : k_version;
+        // Any metadata payload makes the file version 3 (old builds then
+        // fail cleanly with UnsupportedVersion instead of mis-parsing);
+        // absent metadata keeps the byte layout of the existing versions.
+        const auto has_metadata = !metadata.empty();
+        const auto version = has_metadata ? k_version_metadata
+            : with_grads || level == CheckpointLevel::Full ? k_version_checkpoint : k_version;
         write_scalar<uint32_t>(out, version);
-        const auto flags = (with_grads ? k_flag_grads : 0u) | (level == CheckpointLevel::Full ? k_flag_adam : 0u);
+        const auto flags = (with_grads ? k_flag_grads : 0u) | (level == CheckpointLevel::Full ? k_flag_adam : 0u)
+            | (has_metadata ? k_flag_metadata : 0u);
         write_scalar<uint32_t>(out, flags);
         write_spec(out, module.spec());
 
@@ -561,6 +661,14 @@ namespace BeanTensor::Serialization {
                 }
             }
         }
+        // Trailing extra-record section (version 3): today exactly one
+        // record — the opaque metadata blob the engine carries without
+        // interpreting. Absent metadata means no section at all, so a
+        // metadata-free file keeps the old layout byte-for-byte.
+        if (has_metadata) {
+            write_scalar<uint32_t>(out, 1u);
+            write_extra_record(out, k_kind_metadata, std::string{k_metadata_name}, metadata);
+        }
         out.flush();
         if (!out) {
             throw ErrorHandling::SerializationError("failed writing '" + path + "'");
@@ -596,8 +704,8 @@ namespace BeanTensor::Serialization {
             throw ErrorHandling::CorruptFile("bad magic — not a .bt file (or wrong format version)");
         }
         const auto version = read_scalar<uint32_t>(in, "format version");
-        if (version > k_version_checkpoint) {
-            throw ErrorHandling::UnsupportedVersion("file version " + std::to_string(version) + ", this build reads up to " + std::to_string(k_version_checkpoint));
+        if (version > k_version_metadata) {
+            throw ErrorHandling::UnsupportedVersion("file version " + std::to_string(version) + ", this build reads up to " + std::to_string(k_version_metadata));
         }
         if (version == 0) {
             throw ErrorHandling::CorruptFile("undefined .bt version 0");
@@ -608,6 +716,9 @@ namespace BeanTensor::Serialization {
         }
         if (version == k_version && flags != 0u) {
             throw ErrorHandling::CorruptFile("version 1 .bt file carries checkpoint flags " + std::to_string(flags));
+        }
+        if (version == k_version_checkpoint && (flags & k_flag_metadata) != 0u) {
+            throw ErrorHandling::CorruptFile("version 2 .bt file carries the metadata flag — metadata files are version 3");
         }
         auto spec = read_spec(in, 0);
         auto module = build_module(spec, DataTypes::DType::Float32, Tensors::Device::CPU);
@@ -732,11 +843,109 @@ namespace BeanTensor::Serialization {
             }
         }
 
+        // Trailing extra-record section (version 3 only): the metadata
+        // record is CRC-verified and ignored (load does not consume it —
+        // read_metadata is the accessor), and unknown kinds are SKIPPED so
+        // a future v3 file with new record kinds still loads here.
+        if (version == k_version_metadata) {
+            const auto n_extra = read_scalar<uint32_t>(in, "extra record count");
+            if (n_extra > k_max_records) {
+                throw ErrorHandling::CorruptFile("unreasonable extra record count " + std::to_string(n_extra));
+            }
+            auto ignored_metadata = std::string{};
+            for (uint32_t i = 0; i < n_extra; ++i) {
+                static_cast<void>(read_extra_record(in, ignored_metadata));
+            }
+        }
+
         // Trailing bytes after everything the version defines mean the file
         // was appended to or mis-parsed; refuse rather than silently ignore.
         if (in.peek() != std::char_traits<char>::eof()) {
             throw ErrorHandling::CorruptFile("trailing bytes after the last record");
         }
         return module;
+    }
+
+    /**
+     * Reads only as much of a .bt file as needed to reach the trailing
+     * extra-record section: header, spec tree, then each tensor/gradient/adam
+     * record is skipped via its framing (seekg past the stored payload — no
+     * decompression). The metadata record (kind 1, name "btui.config") is
+     * CRC-verified before its payload is returned; unknown kinds are skipped
+     * (the version-3 forward-compat rule). The engine never parses the blob.
+     * @brief Read a .bt file's metadata payload.
+     * @param path Source file path.
+     * @return The metadata record's payload, or "" when the file carries none.
+     * @throws ErrorHandling::SerializationError the file cannot be opened or read.
+     * @throws ErrorHandling::CorruptFile bad magic, truncation, or a CRC mismatch on the metadata record.
+     * @throws ErrorHandling::UnsupportedVersion the file version is newer than this build reads.
+     */
+    std::string read_metadata(const std::string& path) {
+        auto in = std::ifstream(path, std::ios::binary);
+        if (!in) {
+            throw ErrorHandling::SerializationError("cannot open '" + path + "' for reading");
+        }
+        auto magic = std::array<uint8_t, 4>{};
+        in.read(reinterpret_cast<char*>(magic.data()), static_cast<std::streamsize>(magic.size()));
+        if (in.gcount() != 4 || magic != k_magic) {
+            throw ErrorHandling::CorruptFile("bad magic — not a .bt file (or wrong format version)");
+        }
+        const auto version = read_scalar<uint32_t>(in, "format version");
+        if (version > k_version_metadata) {
+            throw ErrorHandling::UnsupportedVersion("file version " + std::to_string(version) + ", this build reads up to " + std::to_string(k_version_metadata));
+        }
+        if (version == 0) {
+            throw ErrorHandling::CorruptFile("undefined .bt version 0");
+        }
+        const auto flags = read_scalar<uint32_t>(in, "flags");
+        if ((flags & ~k_flag_mask) != 0u) {
+            throw ErrorHandling::CorruptFile("unsupported .bt flags " + std::to_string(flags));
+        }
+        static_cast<void>(read_spec(in, 0));
+        const auto n_records = read_scalar<uint32_t>(in, "tensor record count");
+        if (n_records > k_max_records) {
+            throw ErrorHandling::CorruptFile("unreasonable tensor record count " + std::to_string(n_records));
+        }
+        for (uint32_t i = 0; i < n_records; ++i) {
+            skip_record(in);
+        }
+        if ((flags & k_flag_grads) != 0u) {
+            const auto n_grads = read_scalar<uint32_t>(in, "gradient record count");
+            for (uint32_t i = 0; i < n_grads; ++i) {
+                const auto present = read_scalar<uint8_t>(in, "gradient presence flag");
+                if (present > 1) {
+                    throw ErrorHandling::CorruptFile("malformed gradient presence flag");
+                }
+                if (present != 0u) {
+                    skip_record(in);
+                }
+            }
+        }
+        if ((flags & k_flag_adam) != 0u) {
+            const auto n_adam = read_scalar<uint32_t>(in, "adam record count");
+            for (uint32_t i = 0; i < n_adam; ++i) {
+                const auto present = read_scalar<uint8_t>(in, "adam presence flag");
+                if (present > 1) {
+                    throw ErrorHandling::CorruptFile("malformed adam presence flag");
+                }
+                if (present != 0u) {
+                    static_cast<void>(read_scalar<uint64_t>(in, "adam step count"));
+                    skip_record(in);
+                    skip_record(in);
+                }
+            }
+        }
+        if (version != k_version_metadata) {
+            return "";
+        }
+        const auto n_extra = read_scalar<uint32_t>(in, "extra record count");
+        if (n_extra > k_max_records) {
+            throw ErrorHandling::CorruptFile("unreasonable extra record count " + std::to_string(n_extra));
+        }
+        auto metadata = std::string{};
+        for (uint32_t i = 0; i < n_extra; ++i) {
+            static_cast<void>(read_extra_record(in, metadata));
+        }
+        return metadata;
     }
 }

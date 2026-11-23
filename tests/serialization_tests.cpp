@@ -14,6 +14,7 @@
  * @version 0.1
  * @date 2026-11-05
  */
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -981,8 +982,7 @@ static void test_checkpoint_corrupt() {
 
 // ---- Review-2 fixes: checkpoint restore invariants ----
 
-static void test_restore_invariants() {
-    // restore_grad rejects a cross-device gradient and a shape mismatch.
+static void test_restore_invariants() {    // restore_grad rejects a cross-device gradient and a shape mismatch.
     Linear layer(4, 4, DType::Float32, Device::CPU, true, 201);
     Tensor x(std::vector<size_t>{4, 4}, DType::Float32, Device::CPU, false);
     x.random(-1.0, 1.0, 202);
@@ -1060,6 +1060,116 @@ static void test_restore_invariants() {
     std::cout << "restore invariants ok\n";
 }
 
+// ---- Optional metadata records (format version 3) ----
+
+// Read the header's version/flags words straight off the bytes.
+static std::pair<uint32_t, uint32_t> header_words(const std::vector<uint8_t>& bytes) {
+    CHECK(bytes.size() >= 12);
+    auto read_u32 = [&](const size_t off) {
+        return static_cast<uint32_t>(bytes[off]) |
+               (static_cast<uint32_t>(bytes[off + 1]) << 8U) |
+               (static_cast<uint32_t>(bytes[off + 2]) << 16U) |
+               (static_cast<uint32_t>(bytes[off + 3]) << 24U);
+    };
+    return {read_u32(4), read_u32(8)};
+}
+
+static void test_metadata_records() {
+    Sequential net;
+    net.append("fc", std::make_unique<Linear>(4, 4, DType::Float32, Device::CPU, true, 301));
+    const auto meta = std::string{"optimizer=adam\nlr=0.001\nepochs=3"};
+
+    // Save WITH metadata: version 3, metadata flag set, payload reads back
+    // byte-identical, and the params still roundtrip bit-exact.
+    {
+        const auto path = scratch_path("meta_full");
+        ser::save(net, path, true, CheckpointLevel::Weights, meta);
+        CHECK(ser::read_metadata(path) == meta);
+        const auto words = header_words(read_file(path));
+        CHECK(words.first == 3);
+        CHECK((words.second & 4u) != 0u);  // metadata flag bit
+        auto loaded = ser::load(path);
+        CHECK(module_bit_exact(net, *loaded));
+    }
+    // Save WITHOUT metadata: the old layout exactly — version 1, flags 0,
+    // and read_metadata reports "".
+    {
+        const auto path = scratch_path("meta_none");
+        ser::save(net, path, true, CheckpointLevel::Weights);
+        CHECK(ser::read_metadata(path).empty());
+        const auto words = header_words(read_file(path));
+        CHECK(words.first == 1);
+        CHECK(words.second == 0u);
+    }
+    // Forward compat inside version 3: an UNKNOWN extra-record kind is
+    // skipped, not a CorruptFile — and a metadata reader finds nothing.
+    {
+        const auto path = scratch_path("meta_unknown_kind");
+        ser::save(net, path, true, CheckpointLevel::Weights, meta);
+        auto bytes = read_file(path);
+        // The metadata record's kind byte sits right before the u32 name
+        // length (11) and the "btui.config" bytes; flip kind 1 -> 99.
+        const auto needle = std::string{"btui.config"};
+        auto it = std::search(bytes.begin(), bytes.end(), needle.begin(), needle.end());
+        CHECK(it != bytes.end());
+        const auto kind_off = static_cast<size_t>(it - bytes.begin()) - 5;
+        CHECK(bytes[kind_off] == 1u);
+        bytes[kind_off] = 99;
+        const auto bad = scratch_path("meta_unknown_kind_patched");
+        write_file(bad, bytes);
+        auto loaded = ser::load(bad);  // must not throw
+        CHECK(module_bit_exact(net, *loaded));
+        CHECK(ser::read_metadata(bad).empty());
+    }
+    // A corrupted metadata payload trips the CRC check in BOTH readers.
+    {
+        const auto path = scratch_path("meta_crc");
+        ser::save(net, path, true, CheckpointLevel::Weights, meta);
+        auto bytes = read_file(path);
+        const auto needle = std::string{"optimizer="};
+        auto it = std::search(bytes.begin(), bytes.end(), needle.begin(), needle.end());
+        CHECK(it != bytes.end());
+        const auto payload_off = static_cast<size_t>(it - bytes.begin());
+        bytes[payload_off] ^= 0xFFu;
+        const auto bad = scratch_path("meta_crc_patched");
+        write_file(bad, bytes);
+        CHECK(load_throws<eh::CorruptFile>(bad));
+        bool threw = false;
+        try {
+            static_cast<void>(ser::read_metadata(bad));
+        } catch (const eh::CorruptFile&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+    // Metadata composes with a Full checkpoint: optimizer state restores
+    // bit-exact AND the metadata payload rides along.
+    {
+        Sequential trained;
+        trained.append("fc", std::make_unique<Linear>(4, 4, DType::Float32, Device::CPU, true, 302));
+        Tensor x(std::vector<size_t>{16, 4}, DType::Float32, Device::CPU, false);
+        x.random(-1.0, 1.0, 303);
+        Tensor labels(std::vector<size_t>{16}, DType::Int32, Device::CPU, false);
+        for (int32_t i = 0; i < 16; ++i) {
+            const int32_t cls = i % 4;
+            labels.write_element(static_cast<size_t>(i), &cls, sizeof(int32_t));
+        }
+        train_steps(trained, x, labels, 2, 304);
+        const auto path = scratch_path("meta_ckpt_full");
+        ser::save(trained, path, true, CheckpointLevel::Full, meta);
+        const auto words = header_words(read_file(path));
+        CHECK(words.first == 3);
+        CHECK((words.second & 4u) != 0u);   // metadata
+        CHECK((words.second & 1u) != 0u);   // grads
+        CHECK((words.second & 2u) != 0u);   // adam
+        CHECK(ser::read_metadata(path) == meta);
+        auto loaded = ser::load(path);
+        CHECK(module_bit_exact(trained, *loaded));
+        CHECK(optimizer_state_equal(trained, *loaded));
+    }
+    std::cout << "metadata records ok\n";
+}
+
 int main() {
     std::error_code ec;
     std::filesystem::create_directories("scratch", ec);
@@ -1081,6 +1191,7 @@ int main() {
     test_checkpoint_levels();
     test_checkpoint_corrupt();
     test_restore_invariants();
+    test_metadata_records();
 #if defined(USE_HIP) || defined(USE_CUDA)
     if (gpu_available()) {
         test_gpu_roundtrip();

@@ -38,8 +38,11 @@ decision log.
 
 ```
 magic        4 bytes   'B' 'T' '0' '1'
-version      u32       currently 1; newer files raise UnsupportedVersion
-flags        u32       reserved, written 0
+version      u32       1 = weights layout, 2 = checkpoint sections,
+             3 = trailing metadata section; newer files raise
+             UnsupportedVersion
+flags        u32       v1: written 0. v2: bit 0 = gradients, bit 1 = Adam.
+             v3: those, plus bit 2 = metadata section present
 spec         recursive module node:
                type          u32 len + UTF-8 bytes (== Module::name())
                n_hyper       u32
@@ -97,6 +100,33 @@ Load restores whatever sections exist, after the device move, via
 checkpoint resumes training bit-reproducibly (grads + moments + step counter).
 Adam state access is the C++-only `has_adam_state` / `adam_step_count` /
 `adam_moments` / `adam_restore_moments` surface on Tensor.
+
+### Version 3 metadata section (2026-11-20)
+
+`save(..., metadata)` carries ONE optional opaque blob the engine transports
+without parsing (btui writes its training config there as `key=value` lines).
+Any non-empty payload makes the file version 3 (flags gain bit 2 =
+metadata), so pre-v3 builds fail cleanly with `UnsupportedVersion`; empty
+metadata keeps the version 1/2 layout byte-identical. The section trails
+everything else:
+
+```
+extra     only in version-3 files:
+            u32 n_extra_records
+            per record:
+              kind          u8 (1 = metadata; append-only — a v3 reader SKIPS
+                            kinds it does not know, it does not reject them)
+              name          u32 len + bytes ("btui.config" for the metadata
+                            record)
+              crc32         u32 (IEEE, over the payload)
+              payload_size  u64
+              payload       payload_size bytes
+```
+
+A known-kind record is CRC-verified on read (`read_metadata(path)` returns
+the payload, or "" when the file carries none); corrupted metadata is
+`CorruptFile`. The reader walks to the section via the framing alone
+(seek-skips stored payloads — no decompression).
 
 ## 2026-11-06 — Demos and benchmarking decisions (Tasks 4, 5)
 

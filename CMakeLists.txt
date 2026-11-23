@@ -431,6 +431,8 @@ set(CORE_SOURCES
         Data/Csv.h
         Data/Csv.cpp
         Helpers/Bits.h
+        Helpers/Dashboard/Dashboard.h
+        Helpers/Dashboard/Dashboard.cpp
         Helpers/KernelTune.h
         Helpers/KernelTune.cpp
         Helpers/OOMPolicy.h
@@ -1512,6 +1514,24 @@ if(BUILD_TESTING)
     )
     add_test(NAME BeanTensorV5PlatformTests COMMAND BeanTensorV5PlatformTests)
 
+    add_executable(BeanTensorV5DashboardTests tests/dashboard_tests.cpp)
+    if(USE_HIP)
+        target_compile_definitions(BeanTensorV5DashboardTests PRIVATE USE_HIP)
+    elseif(USE_CUDA)
+        target_compile_definitions(BeanTensorV5DashboardTests PRIVATE USE_CUDA)
+    endif()
+    if(USE_STRIX_HALO)
+        target_compile_definitions(BeanTensorV5DashboardTests PRIVATE USE_STRIX_HALO)
+    endif()
+
+    target_link_libraries(BeanTensorV5DashboardTests PRIVATE BeanTensorV5Core)
+    target_compile_options(BeanTensorV5DashboardTests PRIVATE
+            -O2
+            -mavx2
+            -mf16c
+    )
+    add_test(NAME BeanTensorV5DashboardTests COMMAND BeanTensorV5DashboardTests)
+
     add_executable(BeanTensorV5DTypeGuardTests tests/tensor_dtype_guard_tests.cpp)
     if(USE_HIP)
         target_compile_definitions(BeanTensorV5DTypeGuardTests PRIVATE USE_HIP)
@@ -1703,6 +1723,22 @@ if(BUILD_TESTING)
         add_test(NAME bindings_smoke
                  COMMAND "${BEANTENSOR_PYTHON3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tests/bindings_smoke.py)
         set_tests_properties(bindings_smoke PROPERTIES
+                ENVIRONMENT "PYTHONPATH=$<TARGET_FILE_DIR:beantensor>"
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+        # btui core logic (python/btui.py, no curses): stdlib unittest, runs
+        # directly as a script via its unittest.main() entry point.
+        add_test(NAME btui_logic
+                 COMMAND "${BEANTENSOR_PYTHON3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tests/btui_logic_tests.py)
+        set_tests_properties(btui_logic PROPERTIES
+                ENVIRONMENT "PYTHONPATH=$<TARGET_FILE_DIR:beantensor>"
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+        # btui curses front-end: same unittest style against the headless
+        # BufferScreen backend (no terminal needed).
+        add_test(NAME btui_ui
+                 COMMAND "${BEANTENSOR_PYTHON3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tests/btui_ui_tests.py)
+        set_tests_properties(btui_ui PROPERTIES
                 ENVIRONMENT "PYTHONPATH=$<TARGET_FILE_DIR:beantensor>"
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 

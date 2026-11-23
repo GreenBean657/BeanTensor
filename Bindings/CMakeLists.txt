@@ -41,6 +41,14 @@ set_target_properties(BeanTensorV5Core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 pybind11_add_module(beantensor pybind_module.cpp)
 target_link_libraries(beantensor PRIVATE BeanTensorV5Core)
 
+# The module needs the backend macros itself for the gpu_memory telemetry
+# bind (cudaMemGetInfo/hipMemGetInfo); the core's defines are PRIVATE.
+if (USE_CUDA)
+    target_compile_definitions(beantensor PRIVATE USE_CUDA)
+elseif (USE_HIP)
+    target_compile_definitions(beantensor PRIVATE USE_HIP)
+endif ()
+
 # The root CMakeLists registers the bindings_smoke ctest when the option is
 # on; hand the interpreter path up so the test runs the same Python.
 set(BEANTENSOR_PYTHON3_EXECUTABLE "${Python3_EXECUTABLE}" PARENT_SCOPE)

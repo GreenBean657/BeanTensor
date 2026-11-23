@@ -1150,4 +1150,291 @@ expect_raises(
     "dtype-mismatched equal",
 )
 
+# --- Training dashboard: inert contract and the active last_frame seam ---
+
+# The bound dashboard sinks to the C++ std::cerr stream (fd 2): frames and the
+# stop() summary go to the process's real stderr, so Python-level sys.stderr
+# redirection does not intercept them. Activity is gated on the ctor's tty
+# flag, not on the stream (Helpers/Dashboard/Dashboard.h), so under ctest —
+# where stderr is always a captured pipe, never a TTY — a tty=True dashboard
+# is live and renders into the log. The active checks are therefore guarded
+# to run only when stderr is NOT a TTY, so a manual run on a real terminal
+# never starts the framed region-redraw render thread.
+#
+# (a) Inert: tty=False constructs the fully inert dashboard — every verb is
+# callable, the sink is never touched, and the last-frame seam stays empty.
+dash_inert = bt.Dashboard(tty=False)
+dash_inert.report_batch(0.5)
+dash_inert.report_epoch(1, 3, 0.3, 0.9, 0.4)
+dash_inert.render_once()
+assert dash_inert.last_frame() == "", (
+    f"inert dashboard must never compose a frame, got {dash_inert.last_frame()!r}"
+)
+dash_inert.stop()  # idempotent no-op on an inert dashboard
+dash_inert.stop()
+
+if not sys.stderr.isatty():
+    # (b) Active on a non-TTY sink: feed two losses plus one epoch summary,
+    # render_once() composes on demand, and last_frame() must hold the exact
+    # composed bytes — the compact readout of the fed losses (latest 0.1,
+    # ring mean 0.3) with the sparkline, the epoch progress "1/3", and a pool
+    # worker status tag from the grid (IDLE, or OWN while a pool task runs).
+    dash = bt.Dashboard(tty=True, refresh_hz=10.0)
+    dash.report_batch(0.5)
+    dash.report_batch(0.1)
+    dash.report_epoch(1, 3, 0.3, 0.9, 0.4)
+    dash.render_once()
+    frame = dash.last_frame()
+    assert "last=0.1" in frame and "mean=0.3" in frame and "spark: " in frame, (
+        f"frame must carry the fed-loss readout and sparkline: {frame!r}"
+    )
+    assert "1/3" in frame, f"frame must carry the epoch progress: {frame!r}"
+    assert "IDLE" in frame or "OWN" in frame, (
+        f"frame must carry a pool worker status tag: {frame!r}"
+    )
+    dash.stop()
+    dash.stop()  # stop() is idempotent on an active dashboard too
+    print("DASHBOARD SMOKE OK")
+else:
+    print("SKIP: active-dashboard checks need a non-TTY stderr (run under ctest)")
+
+# --- Task 1 (btui): pool snapshots, in-place numpy writes, sgd_step ---
+
+# (a) pool_snapshot: plain POD dicts of the global CPU pool's live telemetry
+# (Helpers/CPUThreading.h snapshot()) — no tensor handles, no keep_alive.
+# The top-level key set pins the dict schema; each worker dict is keyed
+# exactly by the WorkerSnapshot member names; status/task_priority arrive
+# stringified; pending_tasks_total is the sum the snapshot was built from, so
+# it must equal the sum of the per-worker local depths exactly.
+snap1 = bt.pool_snapshot()
+assert isinstance(snap1, dict), f"pool_snapshot returned {type(snap1)}"
+assert set(snap1.keys()) == {"worker_count", "pending_tasks_total", "stopping", "workers"}, (
+    f"pool_snapshot keys: {sorted(snap1.keys())}"
+)
+assert isinstance(snap1["worker_count"], int) and snap1["worker_count"] > 0
+assert isinstance(snap1["pending_tasks_total"], int) and snap1["pending_tasks_total"] >= 0
+assert snap1["stopping"] is False, f"pool must not be stopping mid-run: {snap1['stopping']}"
+assert isinstance(snap1["workers"], list)
+assert len(snap1["workers"]) == snap1["worker_count"], (
+    f"worker list length {len(snap1['workers'])} != worker_count {snap1['worker_count']}"
+)
+WORKER_SNAPSHOT_KEYS = {
+    "worker_id", "status", "pinned_group", "task_sequence", "task_priority",
+    "task_running_ms", "futures_awaited", "tasks_completed", "tasks_stolen",
+    "tasks_helped", "local_queue_depth",
+}
+STATUS_STRINGS = {"Idle", "RunningOwn", "RunningStolen", "RunningHelped", "HelpWaiting"}
+PRIORITY_STRINGS = {"Low", "Normal", "High"}
+depth_sum = 0
+for w in snap1["workers"]:
+    assert set(w.keys()) == WORKER_SNAPSHOT_KEYS, f"worker keys: {sorted(w.keys())}"
+    assert w["status"] in STATUS_STRINGS, f"unexpected status string: {w['status']!r}"
+    # task_priority is valid only when status != Idle (WorkerSnapshot docs);
+    # an idle worker's raw slot may stringify to "?".
+    if w["status"] != "Idle":
+        assert w["task_priority"] in PRIORITY_STRINGS, (
+            f"unexpected priority string: {w['task_priority']!r}"
+        )
+    for counter in (
+        "worker_id", "pinned_group", "task_sequence", "task_running_ms",
+        "futures_awaited", "tasks_completed", "tasks_stolen", "tasks_helped",
+        "local_queue_depth",
+    ):
+        assert isinstance(w[counter], int) and w[counter] >= 0, (
+            f"{counter} not a sane int: {w[counter]!r}"
+        )
+    assert w["worker_id"] < snap1["worker_count"], (
+        f"worker_id out of range: {w['worker_id']}"
+    )
+    depth_sum += w["local_queue_depth"]
+assert depth_sum == snap1["pending_tasks_total"], (
+    f"pending_tasks_total {snap1['pending_tasks_total']} != sum of local depths {depth_sum}"
+)
+
+# The counters are monotonic lifetime totals of the process-wide pool, so two
+# back-to-back snapshots must not show a decrease on any shared worker.
+snap2 = bt.pool_snapshot()
+assert snap2["worker_count"] == snap1["worker_count"]
+for earlier, later in zip(snap1["workers"], snap2["workers"]):
+    for counter in ("futures_awaited", "tasks_completed", "tasks_stolen", "tasks_helped"):
+        assert later[counter] >= earlier[counter], (
+            f"{counter} decreased for worker {earlier['worker_id']}: "
+            f"{earlier[counter]} -> {later[counter]}"
+        )
+
+# (b) write_numpy: in-place payload overwrite, the exact inverse direction of
+# to_numpy's bulk read. Roundtrips are byte-compared per NumPy-native dtype;
+# every rejected call raises ValueError BEFORE anything is written, so the
+# payload stays byte-identical across all of them.
+for np_dt in (np.float16, np.float32, np.float64, np.int32, np.int64, np.uint8):
+    src = (np.arange(12, dtype=np.float64) - 5.5).reshape(3, 4).astype(np_dt)
+    t = bt.Tensor.from_numpy(np.zeros((3, 4), dtype=np_dt))
+    t.write_numpy(src)
+    assert t.to_numpy().tobytes() == src.tobytes(), (
+        f"write_numpy roundtrip bytes diverged for {np_dt}"
+    )
+
+wt = bt.Tensor.from_numpy(np.zeros((3, 4), dtype=np.float32))
+payload_before = wt.to_numpy().tobytes()
+expect_raises(ValueError, lambda: wt.write_numpy(np.zeros((3, 4), dtype=np.float64)), "write_numpy dtype mismatch")
+expect_raises(ValueError, lambda: wt.write_numpy(np.zeros((12,), dtype=np.float32)), "write_numpy shape mismatch")
+expect_raises(ValueError, lambda: wt.write_numpy(np.zeros((4, 3), dtype=np.float32).T), "write_numpy non-contiguous")
+expect_raises(ValueError, lambda: wt.write_numpy(np.zeros((3, 4), dtype=np.bool_)), "write_numpy unsupported dtype")
+assert wt.to_numpy().tobytes() == payload_before, (
+    "a rejected write_numpy must leave the payload byte-identical"
+)
+# A well-formed write still lands after the rejected ones.
+fix_up = np.arange(12, dtype=np.float32).reshape(3, 4)
+wt.write_numpy(fix_up)
+assert wt.to_numpy().tobytes() == fix_up.tobytes()
+
+# The GPU guard mirrors to_numpy's: a GPU-resident tensor raises RuntimeError
+# before any host write. On a CPU-only build no GPU tensor can exist, so the
+# guard's presence is pinned by the dtype-mismatch case above (same check
+# body); on GPU builds a staged tensor exercises the branch itself.
+try:
+    gpu_stage = bt.Tensor.from_numpy(np.zeros((2, 3), dtype=np.float32))
+    gpu_stage.to(bt.Device.GPU)
+except Exception:
+    gpu_stage = None
+if gpu_stage is not None:
+    expect_raises(RuntimeError, lambda: gpu_stage.write_numpy(np.zeros((2, 3), dtype=np.float32)), "write_numpy on a GPU tensor")
+    print("WRITE_NUMPY GPU GUARD OK")
+else:
+    print("SKIP: write_numpy GPU guard needs a GPU-backend build with a live device")
+
+# (c) sgd_step: one step moves every parameter holding an accumulated
+# gradient (byte inequality, never float ==), and a step with no gradients
+# accumulated is a no-op. lr is passed by keyword to pin the py::arg.
+bt.set_seed(20261119)
+sgd_net = bt.Sequential([
+    bt.Linear(4, 8, F32, CPU),
+    bt.Relu(),
+    bt.Linear(8, 4, F32, CPU),
+])
+sgd_net.train()
+sgd_x = bt.Tensor.from_numpy(np.array([
+    [1.0, 0.0, 0.0, -1.0],
+    [0.0, 1.0, 0.0, 0.5],
+    [0.0, 0.0, 1.0, 0.25],
+    [1.0, 1.0, 0.0, -0.5],
+    [0.0, 1.0, 1.0, 0.75],
+    [1.0, 0.0, 1.0, -0.25],
+], dtype=np.float32))
+sgd_labels = bt.Tensor.from_numpy(np.array([0, 1, 2, 3, 1, 2], dtype=np.int64))
+sgd_logits = sgd_net.forward(sgd_x)
+sgd_loss = bt.softmax_cross_entropy(sgd_logits, sgd_labels)
+sgd_net.zero_grad()
+sgd_loss.backward(F32)
+sgd_before = {name: t.to_numpy().tobytes() for name, t in sgd_net.named_parameters().items()}
+sgd_net.sgd_step(lr=0.1)
+sgd_after = {name: t.to_numpy().tobytes() for name, t in sgd_net.named_parameters().items()}
+assert sgd_before.keys() == sgd_after.keys()
+for name in sgd_before:
+    assert sgd_before[name] != sgd_after[name], f"sgd_step left {name} byte-identical"
+
+# No accumulated gradient (zeroed, no backward since) -> the step applies
+# nothing, whichever of the engine's zero_grad semantics is in effect (a
+# cleared grad is skipped; an all-zero grad updates by exactly zero).
+sgd_net.zero_grad()
+sgd_frozen = {name: t.to_numpy().tobytes() for name, t in sgd_net.named_parameters().items()}
+sgd_net.sgd_step(0.1)
+for name, p in sgd_net.named_parameters().items():
+    assert p.to_numpy().tobytes() == sgd_frozen[name], (
+        f"sgd_step with no accumulated grads moved {name}"
+    )
+
+# --- Task 7 (btui): architecture spec export ---
+
+# export_spec mirrors Module::spec() (Module/ModuleSpec.h) as a plain POD
+# dict tree: {type, hyperparameters: {k: v}, children: [{name, ...}]} with
+# Sequential children in registry order. Hyperparameter values stay strings
+# exactly as the spec stores them — decimal for counts, "0"/"1" for bools,
+# hexfloat for floats (format_hyper_f64).
+spec_net = bt.Sequential([
+    bt.Linear(4, 8, F32, CPU),
+    bt.Relu(),
+    bt.Dropout(0.25),
+    bt.Linear(8, 3, F32, CPU),
+])
+exported = bt.export_spec(spec_net)
+assert isinstance(exported, dict), f"export_spec returned {type(exported)}"
+assert exported["type"] == "Sequential", f"root type: {exported['type']}"
+assert exported["hyperparameters"] == {}
+spec_children = exported["children"]
+assert [c["name"] for c in spec_children] == ["0", "1", "2", "3"], (
+    f"children names/order: {[c['name'] for c in spec_children]}"
+)
+assert [c["type"] for c in spec_children] == ["Linear", "Relu", "Dropout", "Linear"]
+lin0_hyper = spec_children[0]["hyperparameters"]
+assert lin0_hyper == {"in_features": "4", "out_features": "8", "bias": "1"}, (
+    f"linear hypers: {lin0_hyper}"
+)
+assert spec_children[1]["hyperparameters"] == {}
+assert spec_children[1]["children"] == []
+# Dropout's p is a hexfloat; float.fromhex parses it back bit-exactly.
+assert float.fromhex(spec_children[2]["hyperparameters"]["p"]) == 0.25
+assert spec_children[3]["hyperparameters"]["in_features"] == "8"
+assert spec_children[3]["hyperparameters"]["out_features"] == "3"
+print("EXPORT SPEC SMOKE OK")
+
+# --- Task 8 (btui): gpu memory telemetry + adam step counters ---
+
+# gpu_memory is telemetry: on a CPU-only build (or with no live GPU) it must
+# return None, never raise. When a GPU is reachable it returns sane bytes.
+try:
+    gm_probe = bt.Tensor.from_numpy(np.zeros(1, dtype=np.float32))
+    gm_probe.to(bt.Device.GPU)
+    gm_has_gpu = True
+except Exception:
+    gm_has_gpu = False
+gm = bt.gpu_memory()
+if gm_has_gpu:
+    assert isinstance(gm, dict), f"gpu_memory returned {type(gm)}"
+    assert set(gm.keys()) == {"total_bytes", "free_bytes", "used_bytes"}
+    assert gm["total_bytes"] > 0
+    assert 0 <= gm["used_bytes"] <= gm["total_bytes"]
+    assert gm["used_bytes"] + gm["free_bytes"] == gm["total_bytes"]
+    print("GPU MEMORY SMOKE OK")
+else:
+    assert gm is None, f"gpu_memory on a CPU-only build must be None, got {gm}"
+
+# adam_step_count: None before any Adam step on the param, then counts.
+asc_net = bt.Sequential([bt.Linear(4, 4, F32, CPU)])
+asc_w = asc_net.named_parameters()["0.weight"]
+assert asc_w.adam_step_count() is None, "fresh param must have no Adam state"
+asc_net.train()
+asc_x = bt.Tensor.from_numpy(np.ones((3, 4), dtype=np.float32))
+asc_y = bt.Tensor.from_numpy(np.array([0, 1, 2], dtype=np.int64))
+for expected in (1, 2, 3):
+    asc_net.zero_grad()
+    asc_loss = bt.softmax_cross_entropy(asc_net.forward(asc_x), asc_y)
+    asc_loss.backward(F32)
+    asc_net.adam_step(1e-2, 0.9, 0.999, 1e-8)
+    assert asc_net.named_parameters()["0.weight"].adam_step_count() == expected, (
+        f"adam_step_count after {expected} steps"
+    )
+print("ADAM STEP COUNT SMOKE OK")
+
+# --- Task 14 (btui): optional training-config metadata in .bt ---
+
+META_PATH = os.path.join(SCRATCH_BINDINGS, "task14_meta.bt")
+META_PLAIN_PATH = os.path.join(SCRATCH_BINDINGS, "task14_plain.bt")
+meta_net = bt.Sequential([bt.Linear(4, 4, F32, CPU)])
+bt.save(meta_net, META_PATH, True, bt.CheckpointLevel.Weights,
+        metadata="optimizer=adam\nlr=0.001")
+assert bt.read_metadata(META_PATH) == "optimizer=adam\nlr=0.001", (
+    f"metadata roundtrip: {bt.read_metadata(META_PATH)!r}"
+)
+# Params survive the metadata-bearing file.
+assert bt.load(META_PATH).named_parameters()["0.weight"].to_numpy().tobytes() == (
+    meta_net.named_parameters()["0.weight"].to_numpy().tobytes()
+)
+# A code-written checkpoint carries no metadata; read_metadata returns "".
+bt.save(meta_net, META_PLAIN_PATH, True, bt.CheckpointLevel.Full)
+assert bt.read_metadata(META_PLAIN_PATH) == ""
+print("METADATA SMOKE OK")
+
+print("BTUI BINDING SMOKE OK")
+
 print("BINDINGS SMOKE OK")

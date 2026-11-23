@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -9,12 +10,21 @@
 #include <utility>
 #include <vector>
 
+#include <pybind11/gil.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#if defined(USE_CUDA)
+#include <cuda_runtime.h>
+#elif defined(USE_HIP)
+#include <hip/hip_runtime.h>
+#endif
+
 #include "Data/Csv.h"
 #include "Data/DataLoader.h"
+#include "Helpers/CPUThreading.h"
+#include "Helpers/Dashboard/Dashboard.h"
 #include "Metrics/Metrics.h"
 #include "Module/BatchNorm.h"
 #include "Module/Conv2d.h"
@@ -43,6 +53,7 @@ using BeanTensor::DataTypes::DType;
 using BeanTensor::float16_t;
 using BeanTensor::float32_t;
 using BeanTensor::float64_t;
+using BeanTensor::Helpers::Dashboard;
 using BeanTensor::Modules::BatchNorm;
 using BeanTensor::Modules::Conv2d;
 using BeanTensor::Modules::Dropout;
@@ -174,7 +185,14 @@ namespace {
         if (t.get_device() != Device::CPU) {
             raise_runtime_error("to_numpy: tensor lives on GPU; move it to CPU first");
         }
-        t.sync();
+        {
+            // The sync drains queued pool work and can block for as long as
+            // the training pipeline is busy; drop the GIL across it so UI /
+            // polling threads are never frozen behind a slow readback. The
+            // GIL is reacquired before any Python object is touched.
+            const py::gil_scoped_release release;
+            t.sync();
+        }
         switch (t.get_dtype()) {
             case DType::Float16:
                 return to_numpy_typed<float16_t>(t, py::dtype("float16"));
@@ -205,6 +223,77 @@ namespace {
                     " has no NumPy-native counterpart; use to_bytes() for the raw element bytes"
                 );
             }
+        }
+    }
+
+    /**
+     * @brief Overwrite a CPU tensor's whole payload in place with one bulk
+     *        host write, the exact inverse direction of to_numpy's bulk read.
+     * @param t Target tensor; must live on CPU.
+     * @param arr Source array; must be C-contiguous, carry a NumPy-native
+     *            dtype matching the tensor's dtype exactly, and have exactly
+     *            the tensor's shape.
+     * @throws RuntimeError The tensor lives on GPU (same guard as to_numpy).
+     * @throws py::value_error The array is not C-contiguous, its dtype is
+     *         unsupported or does not match the tensor's exactly, or its
+     *         shape differs. Every check runs before the single write, so a
+     *         rejected call leaves the payload untouched.
+     * @note Syncs the tensor first, like every sibling readback (to_numpy,
+     *       to_bytes, item): a queued pool task still touching this buffer
+     *       must drain before the host write lands.
+     */
+    void write_numpy(Tensor& t, py::array arr) {
+        if (t.get_device() != Device::CPU) {
+            raise_runtime_error("write_numpy: tensor lives on GPU; move it to CPU first");
+        }
+        {
+            // Same GIL rule as to_numpy: the drain can block behind in-flight
+            // pool work, so it must not hold the interpreter lock.
+            const py::gil_scoped_release release;
+            t.sync();
+        }
+        if ((arr.flags() & py::array::c_style) == 0) {
+            throw py::value_error("write_numpy: array must be C-contiguous");
+        }
+        DType arr_dt;
+        try {
+            arr_dt = dtype_from_numpy(arr.dtype());
+        } catch (const py::value_error&) {
+            throw py::value_error(
+                "write_numpy: unsupported dtype (supported: float16, float32, float64, "
+                "int8, int16, int32, int64, uint8, uint16, uint32, uint64)"
+            );
+        }
+        if (arr_dt != t.get_dtype()) {
+            const auto name = BeanTensor::DataTypes::dtype_to_string(t.get_dtype());
+            const auto msg = std::string{"write_numpy: dtype mismatch - array is "} +
+                py::cast<std::string>(py::str(arr.dtype())) + ", tensor is " + name.c_str();
+            throw py::value_error(msg);
+        }
+        const py::buffer_info info = arr.request();
+        const auto ndim = static_cast<size_t>(info.ndim);
+        bool shape_match = ndim == t.rank();
+        for (size_t i = 0; shape_match && i < ndim; ++i) {
+            shape_match = static_cast<size_t>(info.shape[i]) == t.dim(i);
+        }
+        if (!shape_match) {
+            auto msg = std::string{"write_numpy: shape mismatch - tensor is ("};
+            for (size_t i = 0; i < t.rank(); ++i) {
+                msg += (i == 0 ? "" : ", ") + std::to_string(t.dim(i));
+            }
+            msg += "), array is (";
+            for (size_t i = 0; i < ndim; ++i) {
+                msg += (i == 0 ? "" : ", ") + std::to_string(info.shape[i]);
+            }
+            msg += ")";
+            throw py::value_error(msg);
+        }
+        {
+            // The bulk host write can move a large payload; release the GIL
+            // across it (and there are no Python objects in this region).
+            const py::gil_scoped_release release;
+            const size_t total = static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
+            t.write_element(0, info.ptr, total);
         }
     }
 
@@ -258,6 +347,45 @@ namespace {
     }
 
     /**
+     * @brief Snapshot the global CPU pool's live telemetry as plain POD dicts.
+     * @return Dict keyed worker_count, pending_tasks_total, stopping, workers
+     *         (a list of dicts keyed exactly by the WorkerSnapshot member
+     *         names, with status and task_priority stringified via the
+     *         Threading fixed-text helpers). Copies scalars only - no Tensor
+     *         handles, no keep_alive concerns.
+     */
+    [[nodiscard]] py::dict pool_snapshot_dict() {
+        // No gil_scoped_release here by deliberate choice: snapshot() takes
+        // no locks beyond brief deque probes and copies scalars only, so the
+        // call returns in microseconds and a release would cost more than it
+        // saves. The blocking calls (to_numpy/write_numpy/item/evaluate)
+        // carry the release instead.
+        const auto snap = BeanTensor::Threading::GetCPUThreadPool().snapshot();
+        py::dict out;
+        out["worker_count"] = snap.worker_count;
+        out["pending_tasks_total"] = snap.pending_tasks_total;
+        out["stopping"] = snap.stopping;
+        py::list workers;
+        for (const auto& w : snap.workers) {
+            py::dict d;
+            d["worker_id"] = w.worker_id;
+            d["status"] = BeanTensor::Threading::detail::status_name(w.status);
+            d["pinned_group"] = w.pinned_group;
+            d["task_sequence"] = w.task_sequence;
+            d["task_priority"] = BeanTensor::Threading::detail::priority_name(w.task_priority);
+            d["task_running_ms"] = w.task_running_ms;
+            d["futures_awaited"] = w.futures_awaited;
+            d["tasks_completed"] = w.tasks_completed;
+            d["tasks_stolen"] = w.tasks_stolen;
+            d["tasks_helped"] = w.tasks_helped;
+            d["local_queue_depth"] = w.local_queue_depth;
+            workers.append(d);
+        }
+        out["workers"] = workers;
+        return out;
+    }
+
+    /**
      * @brief Read the single element of a scalar tensor as a Python float.
      * @param t Source tensor.
      * @return The element's value widened to float64.
@@ -265,7 +393,12 @@ namespace {
      * @throws RuntimeError The dtype is unsupported for scalar readback.
      */
     [[nodiscard]] float64_t item(const Tensor& t) {
-        t.sync();
+        {
+            // The sync is the blocking part (drains queued pool work); drop
+            // the GIL across it so other Python threads stay responsive.
+            const py::gil_scoped_release release;
+            t.sync();
+        }
         if (t.element_count() != 1) {
             throw py::value_error("item(): tensor must have exactly one element");
         }
@@ -438,8 +571,83 @@ namespace {
      * @return (accuracy, mean_loss) as float64 values.
      */
     [[nodiscard]] std::tuple<float64_t, float64_t> evaluate_pair(Module& model, DataLoader& loader) {
-        const auto result = BeanTensor::Metrics::evaluate(model, loader);
+        BeanTensor::Metrics::EvalResult result;
+        {
+            // evaluate runs a full synchronous epoch over the loader — the
+            // longest blocking call on the training surface. Release the GIL
+            // for the whole pass; no Python objects exist in this region.
+            const py::gil_scoped_release release;
+            result = BeanTensor::Metrics::evaluate(model, loader);
+        }
         return std::make_tuple(result.accuracy, result.mean_loss);
+    }
+
+    /**
+     * @brief Convert one ModuleSpec node (Module/ModuleSpec.h) into a plain
+     *        POD dict tree: {type, hyperparameters: {k: v}, children:
+     *        [{name, type, ...}]} in registry order. Values stay strings
+     *        exactly as the spec stores them (decimal counts, "0"/"1" bools,
+     *        hexfloat floats); parsing and validation are the consumer's job.
+     * @param node The spec node to convert.
+     * @return The spec dict. Scalars only — no Tensor handles, no keep_alive.
+     */
+    [[nodiscard]] py::dict spec_node_to_dict(const BeanTensor::Modules::ModuleSpec& node) {
+        py::dict out;
+        out["type"] = node.type;
+        py::dict hypers;
+        for (const auto& [key, value] : node.hyperparameters) {
+            hypers[key.c_str()] = value;
+        }
+        out["hyperparameters"] = hypers;
+        py::list children;
+        for (const auto& [name, child] : node.children) {
+            py::dict child_dict = spec_node_to_dict(child);
+            child_dict["name"] = name;
+            children.append(child_dict);
+        }
+        out["children"] = children;
+        return out;
+    }
+
+    /**
+     * @brief Export a module's architecture spec as a POD dict tree.
+     * @param module Module to export (read-only).
+     * @return The spec dict; the .bt architecture without the tensor records.
+     */
+    [[nodiscard]] py::dict export_spec_dict(const Module& module) {
+        return spec_node_to_dict(module.spec());
+    }
+
+    /**
+     * @brief GPU memory telemetry for the training TUI, never throwing.
+     * @return Dict {total_bytes, free_bytes, used_bytes} when a GPU backend
+     *         is compiled in and the runtime answers; None on CPU-only
+     *         builds, when the runtime call fails, or when no GPU is live.
+     *         Telemetry must never break the caller, hence no error path.
+     */
+    [[nodiscard]] py::object gpu_memory_dict() {
+#if defined(USE_CUDA) || defined(USE_HIP)
+        size_t free_bytes = 0;
+        size_t total_bytes = 0;
+#endif
+#if defined(USE_CUDA)
+        if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
+            return py::none();
+        }
+#elif defined(USE_HIP)
+        if (hipMemGetInfo(&free_bytes, &total_bytes) != hipSuccess) {
+            return py::none();
+        }
+#else
+        return py::none();
+#endif
+#if defined(USE_CUDA) || defined(USE_HIP)
+        py::dict out;
+        out["total_bytes"] = total_bytes;
+        out["free_bytes"] = free_bytes;
+        out["used_bytes"] = total_bytes - free_bytes;
+        return out;
+#endif
     }
 
     /**
@@ -547,6 +755,11 @@ PYBIND11_MODULE(beantensor, m) {
                     py::arg("data"), py::arg("shape"), py::arg("dtype"),
                     py::arg("device") = Device::CPU)
         .def("to_numpy", &to_numpy)
+        // In-place inverse of to_numpy's bulk read: validate the device
+        // guard (GPU raises RuntimeError, same as to_numpy), C-contiguity,
+        // exact dtype and exact shape, then one bulk write_element over the
+        // contiguous payload. Rejected calls write nothing.
+        .def("write_numpy", &write_numpy)
         // Exact inverse of from_bytes; works for every engine dtype.
         .def("to_bytes", &to_bytes)
         .def_property_readonly("shape", &shape_tuple)
@@ -584,6 +797,9 @@ PYBIND11_MODULE(beantensor, m) {
         // PERMISSIVE clamp method); returns None.
         .def("convert_dtype", [](Tensor& self, const DType new_dtype) { self.convert_dtype(new_dtype); })
         .def("item", &item)
+        // Adam optimizer state introspection (Tensor::adam_step_count):
+        // None when no Adam step has touched this tensor, else the count.
+        .def("adam_step_count", &Tensor::adam_step_count)
         .def("backward", &Tensor::backward);
 
     // The engine loader stores clone(false) views over the caller's tensor
@@ -597,6 +813,34 @@ PYBIND11_MODULE(beantensor, m) {
         .def("reset", &DataLoader::reset)
         // std::optional<std::pair<Tensor, Tensor>> maps to None | (Tensor, Tensor).
         .def("next_batch", &DataLoader::next_batch);
+
+    // Live training dashboard (Helpers/Dashboard/Dashboard.h). The sink is
+    // the C++ std::cerr stream (fd 2): frames and the stop() summary go to
+    // the process's real stderr, so Python-level sys.stderr redirection is
+    // NOT intercepted. tty=False constructs the fully inert dashboard — no
+    // render thread, reports discarded, sink never touched — while tty=True
+    // starts the render thread drawing the framed block to fd 2 (rewritten in
+    // place via cursor-up; the final frame persists after stop()), so Python
+    // callers should only pass tty=True when fd 2 is a real
+    // terminal. Activity is gated on the ctor's tty flag, not on the stream,
+    // so under ctest (stderr is a pipe) a tty=True dashboard is live and
+    // renders into the captured log. last_frame() is the test seam: the
+    // exact bytes of the last composed frame, empty when inert.
+    py::class_<Dashboard>(m, "Dashboard")
+        .def(py::init([](const bool tty, const float64_t refresh_hz) {
+                 return std::make_unique<Dashboard>(std::cerr, tty, refresh_hz);
+             }),
+             py::arg("tty") = true,
+             // Keep the default in lockstep with the C++ ctor's constant
+             // (Helpers/Dashboard/Dashboard.h), never a hardcoded literal.
+             py::arg("refresh_hz") = BeanTensor::Helpers::dashboard_default_refresh_hz)
+        .def("report_batch", &Dashboard::report_batch, py::arg("batch_loss"))
+        .def("report_epoch", &Dashboard::report_epoch,
+             py::arg("epoch"), py::arg("epochs"), py::arg("train_mean_loss"),
+             py::arg("test_accuracy"), py::arg("test_mean_loss"))
+        .def("render_once", &Dashboard::render_once)
+        .def("stop", &Dashboard::stop)
+        .def("last_frame", &Dashboard::last_frame);
 
     // Abstract base: every layer factory below returns a
     // std::unique_ptr<Module> and Sequential's list ctor disowns each
@@ -619,6 +863,9 @@ PYBIND11_MODULE(beantensor, m) {
              py::keep_alive<0, 1>(), py::keep_alive<0, 2>())
         .def("zero_grad", &Module::zero_grad)
         .def("adam_step", &Module::adam_step)
+        // SGD update of every parameter that currently holds an accumulated
+        // gradient; parameters without one are skipped (Module/Module.h).
+        .def("sgd_step", &Module::sgd_step, py::arg("lr"))
         .def("train", [](Module& self, bool mode) { self.train(mode); }, py::arg("mode") = true)
         .def("eval", &Module::eval)
         .def("named_parameters", &named_parameters_dict)
@@ -669,6 +916,14 @@ PYBIND11_MODULE(beantensor, m) {
     // a from-scratch net construction reproducible across processes.
     m.def("set_seed", &BeanTensor::Random::set_seed);
 
+    // Live CPU-pool telemetry for the training TUI: a best-effort snapshot of
+    // the global pool rendered as plain POD dicts (Helpers/CPUThreading.h).
+    m.def("pool_snapshot", &pool_snapshot_dict);
+
+    // GPU memory telemetry for the training TUI's run view; None when no
+    // GPU is usable (see the function's doc comment — never throws).
+    m.def("gpu_memory", &gpu_memory_dict);
+
     // .bt export/import. save is synchronous and quiesces nothing itself —
     // sync and settle the model first for a reproducible checkpoint (the
     // engine's contract, see Serialization.h). load's unique_ptr<Module>
@@ -678,9 +933,17 @@ PYBIND11_MODULE(beantensor, m) {
     // arrive as RuntimeError through the translator below.
     m.def("save", &BeanTensor::Serialization::save,
           py::arg("module"), py::arg("path"), py::arg("compress") = true,
-          py::arg("level") = CheckpointLevel::Weights);
+          py::arg("level") = CheckpointLevel::Weights, py::arg("metadata") = "");
     m.def("load", &BeanTensor::Serialization::load,
           py::arg("path"), py::arg("device") = Device::CPU);
+    // The version-3 trailing metadata blob (engine-carried, never parsed);
+    // "" when the file carries none.
+    m.def("read_metadata", &BeanTensor::Serialization::read_metadata,
+          py::arg("path"));
+
+    // Architecture introspection (Module/ModuleSpec.h): the .bt spec tree
+    // as plain dicts, for the training TUI's architecture import.
+    m.def("export_spec", &export_spec_dict, py::arg("module"));
 
     // Every ErrorHandling::* type in Helpers/Errors.h derives directly from a
     // std exception; the project has no deeper common root, so catching
