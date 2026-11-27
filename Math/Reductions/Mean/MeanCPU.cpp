@@ -4,7 +4,7 @@
  * @brief CPU backend for mean. Hosts the Tensor::mean method definition
  * (mirrors how Tensor::sum lives in SumCPU.cpp), wiring the MeanG backward
  * node onto the output.
- * @version 0.5
+ * @version 0.6
  * @date 2026-10-26
  */
 #include <algorithm>
@@ -79,6 +79,62 @@ namespace BeanTensor::Tensors::detail {
                 const auto bits = Intrinsics::detail::bit_cast_memcpy<uint32_t>(data[i]);
                 total_lo += widen_lane(lane_lo<H>(bits));
                 total_hi += widen_lane(lane_hi<H>(bits));
+            }
+            return {total_lo, total_hi};
+        }
+
+        /**
+         * A running fp32 sum saturates once the total passes 2^24: the addend
+         * falls below the running sum's ulp and is absorbed, so a large-tensor
+         * fp32 mean would lose most of its value. fp64 partials keep every
+         * addend significant (a 2^53 ceiling no in-cache or DRAM tensor
+         * reaches at fp32 magnitudes).
+         * @brief Widened range sum for the mean (fp32 input, fp64 accumulate).
+         * @param data Input elements.
+         * @param begin First element summed.
+         * @param end One past the last element summed.
+         * @return FP64 sum of the elements in [begin, end).
+         */
+        [[nodiscard]] float64_t mean_range_widen(const float32_t* data, const size_t begin, const size_t end) {
+            auto total = float64_t{0.0};
+            for (auto i = begin; i < end; ++i) {
+                total += static_cast<float64_t>(data[i]);
+            }
+            return total;
+        }
+
+        /**
+         * @brief Widened range sum for the mean (fp16/bf16, fp64 accumulate).
+         * @param data Input elements.
+         * @param begin First element summed.
+         * @param end One past the last element summed.
+         * @return FP64 sum of the elements in [begin, end).
+         */
+        template<typename H>
+        [[nodiscard]] float64_t mean_range_half_widen(const H* data, const size_t begin, const size_t end) {
+            auto total = float64_t{0.0};
+            for (auto i = begin; i < end; ++i) {
+                total += static_cast<float64_t>(widen_lane(data[i]));
+            }
+            return total;
+        }
+
+        /**
+         * @brief Widened range sum for the mean (fp16x2/bf16x2, fp64 accumulate).
+         * @param data Input elements.
+         * @param begin First element summed.
+         * @param end One past the last element summed.
+         * @return {sum_lo, sum_hi} of the signed lane values.
+         */
+        template<typename P>
+        [[nodiscard]] std::pair<float64_t, float64_t> mean_range_packed_widen(const P* data, const size_t begin, const size_t end) {
+            using H = packed_lane_t<P>;
+            auto total_lo = float64_t{0.0};
+            auto total_hi = float64_t{0.0};
+            for (auto i = begin; i < end; ++i) {
+                const auto bits = Intrinsics::detail::bit_cast_memcpy<uint32_t>(data[i]);
+                total_lo += static_cast<float64_t>(widen_lane(lane_lo<H>(bits)));
+                total_hi += static_cast<float64_t>(widen_lane(lane_hi<H>(bits)));
             }
             return {total_lo, total_hi};
         }
@@ -162,13 +218,13 @@ namespace BeanTensor::Tensors::detail {
         switch (t.dtype) {
             case DType::Float32: {
                 const auto* data = static_cast<const float32_t*>(t.data) + t.offset;
-                std::vector<float32_t> partials(IncludedCPUFeatures().threads, 0.0f);
-                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mean_range_scalar<float32_t>(data, b, e); }, t, numel * sizeof(float32_t)));
-                float32_t total = 0.0f;
+                std::vector<float64_t> partials(IncludedCPUFeatures().threads, 0.0);
+                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mean_range_widen(data, b, e); }, t, numel * sizeof(float32_t)));
+                auto total = float64_t{0.0};
                 for (const auto p : partials) {
                     total += p;
                 }
-                *static_cast<float32_t*>(out.data) = total / static_cast<float32_t>(numel);
+                *static_cast<float32_t*>(out.data) = static_cast<float32_t>(total / static_cast<float64_t>(numel));
                 break;
             }
             case DType::Float64: {
@@ -184,56 +240,56 @@ namespace BeanTensor::Tensors::detail {
             }
             case DType::Float16: {
                 const auto* data = static_cast<const float16_t*>(t.data) + t.offset;
-                std::vector<float32_t> partials(IncludedCPUFeatures().threads, 0.0f);
-                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mean_range_half<float16_t>(data, b, e); }, t, numel * sizeof(float16_t)));
-                float32_t total = 0.0f;
+                std::vector<float64_t> partials(IncludedCPUFeatures().threads, 0.0);
+                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mean_range_half_widen<float16_t>(data, b, e); }, t, numel * sizeof(float16_t)));
+                auto total = float64_t{0.0};
                 for (const auto p : partials) {
                     total += p;
                 }
-                *static_cast<float16_t*>(out.data) = narrow_lane<float16_t>(total / static_cast<float32_t>(numel));
+                *static_cast<float16_t*>(out.data) = narrow_lane<float16_t>(static_cast<float32_t>(total / static_cast<float64_t>(numel)));
                 break;
             }
             case DType::BFloat16: {
                 const auto* data = static_cast<const bfloat16_t*>(t.data) + t.offset;
-                std::vector<float32_t> partials(IncludedCPUFeatures().threads, 0.0f);
-                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mean_range_half<bfloat16_t>(data, b, e); }, t, numel * sizeof(bfloat16_t)));
-                float32_t total = 0.0f;
+                std::vector<float64_t> partials(IncludedCPUFeatures().threads, 0.0);
+                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mean_range_half_widen<bfloat16_t>(data, b, e); }, t, numel * sizeof(bfloat16_t)));
+                auto total = float64_t{0.0};
                 for (const auto p : partials) {
                     total += p;
                 }
-                *static_cast<bfloat16_t*>(out.data) = narrow_lane<bfloat16_t>(total / static_cast<float32_t>(numel));
+                *static_cast<bfloat16_t*>(out.data) = narrow_lane<bfloat16_t>(static_cast<float32_t>(total / static_cast<float64_t>(numel)));
                 break;
             }
             case DType::Float16x2: {
                 const auto* data = static_cast<const float16x2_t*>(t.data) + t.offset;
-                std::vector<std::pair<float32_t, float32_t>> partials(IncludedCPUFeatures().threads, {0.0f, 0.0f});
-                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mean_range_packed<float16x2_t>(data, b, e); }, t, numel * sizeof(float16x2_t)));
-                float32_t total_lo = 0.0f;
-                float32_t total_hi = 0.0f;
+                std::vector<std::pair<float64_t, float64_t>> partials(IncludedCPUFeatures().threads, {0.0, 0.0});
+                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mean_range_packed_widen<float16x2_t>(data, b, e); }, t, numel * sizeof(float16x2_t)));
+                auto total_lo = float64_t{0.0};
+                auto total_hi = float64_t{0.0};
                 for (const auto& [p_lo, p_hi] : partials) {
                     total_lo += p_lo;
                     total_hi += p_hi;
                 }
-                const auto n = static_cast<float32_t>(numel);
+                const auto n = static_cast<float64_t>(numel);
                 *static_cast<float16x2_t*>(out.data) = pack_lanes<float16x2_t>(
-                    Intrinsics::detail::bit_cast_memcpy<uint16_t>(narrow_lane<float16_t>(total_lo / n)),
-                    Intrinsics::detail::bit_cast_memcpy<uint16_t>(narrow_lane<float16_t>(total_hi / n)));
+                    Intrinsics::detail::bit_cast_memcpy<uint16_t>(narrow_lane<float16_t>(static_cast<float32_t>(total_lo / n))),
+                    Intrinsics::detail::bit_cast_memcpy<uint16_t>(narrow_lane<float16_t>(static_cast<float32_t>(total_hi / n))));
                 break;
             }
             case DType::BFloat16x2: {
                 const auto* data = static_cast<const bfloat16x2_t*>(t.data) + t.offset;
-                std::vector<std::pair<float32_t, float32_t>> partials(IncludedCPUFeatures().threads, {0.0f, 0.0f});
-                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mean_range_packed<bfloat16x2_t>(data, b, e); }, t, numel * sizeof(bfloat16x2_t)));
-                float32_t total_lo = 0.0f;
-                float32_t total_hi = 0.0f;
+                std::vector<std::pair<float64_t, float64_t>> partials(IncludedCPUFeatures().threads, {0.0, 0.0});
+                drain(launch_reduce(numel, [&](const size_t slot, const size_t b, const size_t e) { partials[slot] = mean_range_packed_widen<bfloat16x2_t>(data, b, e); }, t, numel * sizeof(bfloat16x2_t)));
+                auto total_lo = float64_t{0.0};
+                auto total_hi = float64_t{0.0};
                 for (const auto& [p_lo, p_hi] : partials) {
                     total_lo += p_lo;
                     total_hi += p_hi;
                 }
-                const auto n = static_cast<float32_t>(numel);
+                const auto n = static_cast<float64_t>(numel);
                 *static_cast<bfloat16x2_t*>(out.data) = pack_lanes<bfloat16x2_t>(
-                    Intrinsics::detail::bit_cast_memcpy<uint16_t>(narrow_lane<bfloat16_t>(total_lo / n)),
-                    Intrinsics::detail::bit_cast_memcpy<uint16_t>(narrow_lane<bfloat16_t>(total_hi / n)));
+                    Intrinsics::detail::bit_cast_memcpy<uint16_t>(narrow_lane<bfloat16_t>(static_cast<float32_t>(total_lo / n))),
+                    Intrinsics::detail::bit_cast_memcpy<uint16_t>(narrow_lane<bfloat16_t>(static_cast<float32_t>(total_hi / n))));
                 break;
             }
             case DType::Int8: case DType::UInt8: case DType::Int16: case DType::UInt16:

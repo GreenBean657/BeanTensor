@@ -21,3 +21,5 @@ datasets/
 digits_mlp.bt
 .superpowers
 docs/doxygen/
+tmp/
+tmp

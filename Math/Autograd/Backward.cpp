@@ -196,7 +196,9 @@ namespace BeanTensor::Tensors {
 
     /**
      * Deletes grad (its destructor drains pending workers) and resets it to nullptr;
-     * the next accumulation reallocates it.
+     * the next accumulation reallocates it. Also drops the set_grad_dtype pin
+     * (the pin IS the allocated buffer), so the next backward() allocates in
+     * the grad_dtype that call names; grad->set_zero() keeps the pin.
      * @brief Drop this tensor's accumulated gradient.
      */
     void Tensor::zero_grad() {

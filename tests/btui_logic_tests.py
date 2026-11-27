@@ -832,7 +832,10 @@ class PauseTest(unittest.TestCase):
             time.sleep(0.3)
             self.assertEqual(shared.batches_done, frozen,
                              "loss ring advanced while paused")
-            self.assertEqual(len(shared.losses), frozen)
+            # The ring caps at loss_capacity entries: on a fast runner the
+            # settle window can complete more batches than the ring holds, so
+            # the length tracks frozen only up to the capacity.
+            self.assertEqual(len(shared.losses), min(frozen, shared.loss_capacity))
             shared.set_paused(False)
             self.assertTrue(self._wait_until(lambda: shared.batches_done > frozen),
                             "run did not resume after unpause")

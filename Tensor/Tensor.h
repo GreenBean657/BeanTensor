@@ -817,7 +817,11 @@ namespace BeanTensor::Tensors {
         void backward(DataTypes::DType);
 
         /**
-         * Drop this tensor's accumulated gradient (frees Tensor::grad).
+         * Drop this tensor's accumulated gradient (frees Tensor::grad). The
+         * set_grad_dtype pin lives in the buffer itself, so zero_grad also
+         * drops the pin: the next backward() allocates in the grad_dtype that
+         * call names. (Use grad->set_zero() to keep the pinned buffer and
+         * just zero its contents.)
          * @brief Clear the accumulated gradient.
          */
         void zero_grad();

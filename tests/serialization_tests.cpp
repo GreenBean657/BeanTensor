@@ -10,8 +10,10 @@
  * module type, unsupported version, missing file, unwritable path), the
  * compression end-to-end path (compressed smaller than raw on repetitive
  * data, both paths bit-exact), and a loaded-module training smoke
- * (forward -> softmax_ce -> backward -> adam_step).
- * @version 0.1
+ * (forward -> softmax_ce -> backward -> adam_step), and the grad-dtype pin
+ * round-trip (set_grad_dtype survives a WeightsAndGrads checkpoint and still
+ * governs accumulation after a per-call fp32 backward on the loaded module).
+ * @version 0.2
  * @date 2026-11-05
  */
 #include <algorithm>
@@ -955,6 +957,48 @@ static void test_checkpoint_levels() {
     std::cout << "checkpoint levels ok\n";
 }
 
+static void test_grad_dtype_checkpoint_roundtrip() {
+    // set_grad_dtype pins by allocating the leaf's grad buffer, so the pin
+    // travels inside the checkpoint's "/grad" record: a WeightsAndGrads
+    // save -> load must restore the SAME pinned dtype, and a later
+    // backward() naming a different per-call grad_dtype must still
+    // accumulate into the pinned buffer.
+    Sequential net;
+    net.append("fc", std::make_unique<Linear>(4, 4, DType::Float32, Device::CPU, true, 93));
+    for (auto& param : net.named_parameters()) {
+        param.second->set_grad_dtype(DType::Float64);
+    }
+
+    const auto path = scratch_path("ckpt_graddtype");
+    ser::save(net, path, true, CheckpointLevel::WeightsAndGrads);
+    auto loaded = ser::load(path);
+    const auto orig_params = net.named_parameters();
+    const auto loaded_params = loaded->named_parameters();
+    CHECK(loaded_params.size() == orig_params.size());
+    for (size_t i = 0; i < loaded_params.size(); ++i) {
+        CHECK(loaded_params[i].second->has_grad());
+        CHECK(loaded_params[i].second->grad_dtype() == DType::Float64);
+        CHECK(bit_exact(loaded_params[i].second->gradient(), orig_params[i].second->gradient()));
+    }
+
+    // One per-call fp32 backward: deltas convert INTO the pinned fp64 buffer,
+    // the reload must not lose the pin.
+    Tensor x(std::vector<size_t>{16, 4}, DType::Float32, Device::CPU, false);
+    x.random(-1.0, 1.0, 64);
+    Tensor labels(std::vector<size_t>{16}, DType::Int32, Device::CPU, false);
+    for (int32_t i = 0; i < 16; ++i) {
+        const int32_t cls = i % 4;
+        labels.write_element(static_cast<size_t>(i), &cls, sizeof(int32_t));
+    }
+    auto logits = loaded->forward(x);
+    auto loss = logits.softmax_ce(labels);
+    loss.backward(DType::Float32);
+    for (const auto& param : loaded->named_parameters()) {
+        CHECK(param.second->grad_dtype() == DType::Float64);
+    }
+    std::cout << "grad dtype checkpoint roundtrip ok\n";
+}
+
 static void test_checkpoint_corrupt() {
     Sequential net;
     net.append("fc", std::make_unique<Linear>(4, 4, DType::Float32, Device::CPU, true, 92));
@@ -1189,6 +1233,7 @@ int main() {
     test_public_io_bounds();
     test_midtrain_checkpoint_full();
     test_checkpoint_levels();
+    test_grad_dtype_checkpoint_roundtrip();
     test_checkpoint_corrupt();
     test_restore_invariants();
     test_metadata_records();

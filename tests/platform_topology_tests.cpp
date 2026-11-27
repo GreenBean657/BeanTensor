@@ -856,6 +856,10 @@ static void test_routed_mean() {
     const auto want = ref / static_cast<float64_t>(n);
     CHECK(n > threads * 1024u);
     CHECK(!KeepWorkLocal(in_bytes));
+    // Per-chunk partials and the merge accumulate in fp64, so the fp32 mean
+    // differs from the fp64 reference only by the final quotient's single
+    // fp32 rounding — well inside a fixed 1e-4 relative tolerance on any
+    // machine.
     CHECK(near64(static_cast<float64_t>(avg.at<float32_t>({0})), want, 1e-4 * (1.0 + std::fabs(want))));
     std::cout << ">LLC mean, numel " << n << " (input span " << in_bytes << " B > LLC "
               << LastLevelCacheBytes() << "): unrestricted path, vs fp64 reference\n";

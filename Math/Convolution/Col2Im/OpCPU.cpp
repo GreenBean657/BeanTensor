@@ -15,9 +15,9 @@ namespace BeanTensor::Tensors::detail {
             throw ErrorHandling::DirectFunctionCallOnWrongDataSource("CPU", stringify_device_source(col.device));
         }
         const auto dx_shape = std::vector<size_t>(dx.shape, dx.shape + dx.ndim);
-        const auto x_shape = dx_shape;
+        const auto& x_shape = dx_shape;
         const auto C = x_shape[1];
-        const auto K = size_t{1};
+        constexpr auto K = size_t{1};
         const auto w_shape = std::vector<size_t>{C, R, S, K};
         const auto s = make_conv2d_shape(x_shape, w_shape, stride, padding);
         col2im_dispatch(col, dx, s, stride, padding);
