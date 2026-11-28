@@ -2,8 +2,9 @@
  * @file Conv2d.h
  * @author GreenBean
  * @brief 2-D convolution module: weight {C,R,S,K} plus optional bias {K},
- * He fan-in initialization, and forward = Tensor::conv2d.
- * @version 0.2
+ * He fan-in (default) or Xavier fan-in+fan_out initialization, and forward =
+ * Tensor::conv2d.
+ * @version 0.3
  * @date 2026-11-05
  */
 #pragma once
@@ -14,6 +15,7 @@
 #include <string>
 
 #include "Module/Module.h"
+#include "Module/WeightInit.h"
 #include "Tensor/DTypes.h"
 
 namespace BeanTensor::Modules {
@@ -22,8 +24,10 @@ namespace BeanTensor::Modules {
      * 2-D convolution layer for NCHW inputs. Weight shape is {in_channels,
      * kernel_size, kernel_size, out_channels}; bias is {out_channels} when
      * enabled. Weight initialization is He (Kaiming) uniform with bound
-     * sqrt(6 / (in_channels * kernel_size * kernel_size)), bias is exactly zero.
-     * Built on Tensor::conv2d so CPU and GPU share the same forward/backward.
+     * sqrt(6 / (in_channels * kernel_size * kernel_size)) by default, or
+     * Xavier (Glorot) uniform with bound sqrt(6 / (fan_in + fan_out)) when
+     * WeightInit::Xavier is passed; bias is exactly zero. Built on
+     * Tensor::conv2d so CPU and GPU share the same forward/backward.
      * @brief 2-D convolution layer.
      */
     class Conv2d final : public Module {
@@ -42,13 +46,16 @@ namespace BeanTensor::Modules {
          * @param seed Init seed for the uniform weight fill. When omitted,
          *        weight is filled from the next draw of the process-wide
          *        Generator; the bias is set to zero and consumes no draw.
+         * @param init Weight initialization mode (He uniform on the fan-in by
+         *        default; Xavier uniform on fan_in + fan_out).
          */
         Conv2d(uint32_t in_ch, uint32_t out_ch, uint32_t kernel,
                uint32_t stride = 1, uint32_t padding = 0,
                DataTypes::DType dtype = DataTypes::DType::Float32,
                Tensors::Device device = Tensors::Device::CPU,
                bool bias = true,
-               std::optional<int64_t> seed = std::nullopt);
+               std::optional<int64_t> seed = std::nullopt,
+               WeightInit init = WeightInit::He);
 
         /**
          * NCHW conv2d forward.
@@ -84,5 +91,6 @@ namespace BeanTensor::Modules {
         uint32_t stride_;
         uint32_t padding_;
         bool has_bias_;
+        WeightInit init_;
     };
 }

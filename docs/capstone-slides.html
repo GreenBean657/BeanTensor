@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BeanTensor — Capstone Slides</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --fg: #e6edf3; --dim: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --orange: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    overflow: hidden;
+  }
+  .slide {
+    display: none; width: 100vw; height: 100vh;
+    padding: 6vh 8vw; flex-direction: column; justify-content: center;
+  }
+  .slide.active { display: flex; }
+  h1 { font-size: 3.2rem; margin: 0 0 0.4em; color: var(--accent); }
+  h2 { font-size: 2.2rem; margin: 0 0 0.6em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
+  p, li { font-size: 1.25rem; line-height: 1.5; }
+  ul { padding-left: 1.2em; }
+  li { margin: 0.35em 0; }
+  .dim { color: var(--dim); }
+  .accent { color: var(--accent); }
+  .green { color: var(--green); }
+  .mono { font-family: "Cascadia Code", Consolas, monospace; }
+  table { border-collapse: collapse; font-size: 1.2rem; margin-top: 0.5em; }
+  td, th { border: 1px solid var(--border); padding: 0.45em 0.9em; }
+  th { background: var(--panel); text-align: left; }
+  .footnote { position: absolute; bottom: 4vh; font-size: 0.95rem; color: var(--dim); }
+  #counter {
+    position: fixed; bottom: 2vh; right: 2vw;
+    color: var(--dim); font-size: 1rem;
+  }
+  #hint {
+    position: fixed; bottom: 2vh; left: 2vw;
+    color: var(--dim); font-size: 1rem;
+  }
+  @media print {
+    body { overflow: visible; }
+    .slide { display: flex; page-break-after: always; height: auto; min-height: 100vh; }
+    #counter, #hint { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<section class="slide active">
+  <h1>BeanTensor</h1>
+  <p>A machine-learning framework built from scratch in C++23 —
+     CPU (AVX2 / AVX-512 / BF16), CUDA, and HIP, with zero external
+     ML dependencies.</p>
+  <p class="dim">Capstone walkthrough · November 2026 · GreenBean</p>
+</section>
+
+<section class="slide">
+  <h2>Why build this?</h2>
+  <ul>
+    <li>Every framework hides its machinery behind C++ and CUDA binaries —
+        this one hides <span class="accent">nothing</span>.</li>
+    <li>Goal: a PyTorch-class training stack (autograd, layers, optimizers,
+        data pipeline) where every kernel, every dispatch decision, and every
+        rounding rule is ours and documented.</li>
+    <li>Acceptance bar is empirical: end-to-end MNIST/CNN results must land
+        within <span class="mono">1pp</span> of a pinned PyTorch reference on
+        the same data and hyperparameters.</li>
+  </ul>
+</section>
+
+<section class="slide">
+  <h2>Architecture at a glance</h2>
+  <ul>
+    <li><span class="mono">Tensor</span> core: async error model — ops queue
+        onto a work-stealing thread pool, errors materialize at
+        <span class="mono">sync()</span>.</li>
+    <li>CPU dispatch tiers: scalar → AVX2 → AVX-512/BF16, gated at runtime
+        through one cached CPU-feature probe.</li>
+    <li>Reverse-mode autograd over a Kahn-ordered graph, with a per-call
+        gradient dtype and user-pinnable leaf grad dtypes.</li>
+    <li>GPU backends: CUDA (43 TUs) and hand-mirrored HIP; conversion kernels
+        are bit-exact against the CPU dispatcher by contract.</li>
+    <li>Reduction autotuning: per-device block-size cache with a no-cache =
+        compiled-defaults determinism contract.</li>
+  </ul>
+</section>
+
+<section class="slide">
+  <h2>Feature surface</h2>
+  <ul>
+    <li><b>Layers:</b> Linear, Conv2d, BatchNorm, Max/AvgPool2d, Flatten,
+        Dropout, Relu/Gelu, Sigmoid, Tanh, Softmax — He and Xavier init.</li>
+    <li><b>Training:</b> softmax-CE / MSE / BCE losses, Adam + SGD,
+        grad scaler, train/eval semantics.</li>
+    <li><b>Dtypes:</b> fp64 → fp32 → fp16/bf16 (incl. packed) → full integer
+        ladder, with clamp/flag-exact conversion rules.</li>
+    <li><b>Tooling:</b> versioned <span class="mono">.bt</span> checkpoints
+        (weights/grads/Adam moments, CRC-verified), pybind11 Python bindings,
+        DataLoader + CSV + MNIST ingestion.</li>
+  </ul>
+</section>
+
+<section class="slide">
+  <h2>End-to-end: CNN on MNIST</h2>
+  <p>Two-conv net, Adam, batch 128, 2 epochs, full 60k/10k split
+     (<span class="mono">docs/cnn-results.md</span>):</p>
+  <table>
+    <tr><th>framework</th><th>backend</th><th>test accuracy</th><th>wall</th></tr>
+    <tr><td>BeanTensor</td><td>CPU</td><td class="green"><b>97.78%</b></td><td>56.2 s</td></tr>
+    <tr><td>BeanTensor</td><td>CUDA GPU</td><td>97.32%</td><td>16.3 s</td></tr>
+    <tr><td>PyTorch</td><td>CPU</td><td>98.35%</td><td>78.8 s</td></tr>
+  </table>
+  <p class="dim">Pass bar (≥ PyTorch − 1pp): PASS. BeanTensor CPU outruns
+     PyTorch CPU by 22% wall while landing 0.57pp below its accuracy.</p>
+</section>
+
+<section class="slide">
+  <h2>Op-level vs PyTorch (CPU)</h2>
+  <ul>
+    <li>Median-of-5 benchmark harness wired into the test suite as a smoke
+        test — a family that stops producing rows fails the build.</li>
+    <li>Covers elementwise, GEMM, reductions, losses, conv2d, max-pool,
+        batch-norm — same shapes as the PyTorch comparator
+        (<span class="mono">comparison/bench_pytorch.py</span>).</li>
+    <li>Full published table with repro commands:
+        <span class="mono">docs/benchmarks.md</span>.</li>
+    <li>Gradient parity vs PyTorch (bit-level tolerance analysis) is its own
+        doc: <span class="mono">docs/gradient-parity.md</span>.</li>
+  </ul>
+</section>
+
+<section class="slide">
+  <h2>Engineering discipline</h2>
+  <ul>
+    <li><b>GPU test gate:</b> every GPU-touching test runs through a
+        flock-serialized wrapper — one wedged driver killed a desktop session
+        once; it can never happen twice.</li>
+    <li><b>Pre-push gate:</b> clean tree, one signed commit, agentic-marker
+        audit, SHA-pinned workflows, full CPU matrix green on the exact tree —
+        enforced by a hook, bypass only by declared exception.</li>
+    <li><b>Whole-project TSAN-clean</b>; pool stress/deadlock suites looped,
+        not run once.</li>
+    <li><b>Tests derive from the machine, not the dev box:</b> sizes, thread
+        counts, and tolerances come from runtime detection — a test that
+        passes here and fails on a grader's box is treated as a test defect
+        (two real CI failures were fixed exactly this way).</li>
+  </ul>
+</section>
+
+<section class="slide">
+  <h2>btui — the training TUI</h2>
+  <ul>
+    <li>Standalone stdlib-only curses app (<span class="mono">python/btui.py</span>):
+        keyboard-driven layer-stack editor, data + hyperparameter panels,
+        no code required.</li>
+    <li>Live framed layout: vertical loss graph on a reserved centerline,
+        pool-throughput graph with honest idle semantics, edit-while-running
+        with weight reuse by name + shape.</li>
+    <li>Checkpoint save levels including a share-safe strip; <span class="mono">.bt</span>
+        import restores the embedded training config.</li>
+    <li>Telemetry: VRAM + <b>SM utilization</b> polled at 2 Hz during GPU runs,
+        rendered in the Training box.</li>
+  </ul>
+</section>
+
+<section class="slide">
+  <h2>What the CI failures taught</h2>
+  <ul>
+    <li>A loss-ring assertion assumed a slow dev box; a 2-vCPU runner
+        overflowed the 240-entry window — fixed by asserting the capped
+        invariant.</li>
+    <li>A mean-reduction tolerance was accused of flakiness; measurement
+        showed the real bug: sequential fp32 sums <i>saturate</i> past 2²⁴.
+        Chunk partials now accumulate in fp64 — exact on any host.</li>
+    <li>Both shipped through the gate and ended green — the process caught
+        what the happy path never would.</li>
+  </ul>
+</section>
+
+<section class="slide">
+  <h2>Where it goes next</h2>
+  <ul>
+    <li>Weight-format interop (safetensors export/import) for the
+        HF/PyTorch ecosystem.</li>
+    <li>Streaming data ingestion for datasets that exceed RAM.</li>
+    <li>Windows as a first-class build target alongside Linux (x86_64;
+        ARM stays out of scope).</li>
+    <li>Python API reference docs with runnable examples.</li>
+  </ul>
+</section>
+
+<section class="slide">
+  <h2>Links</h2>
+  <ul class="mono">
+    <li>github.com/GreenBean657/BeanTensor</li>
+    <li>docs/quickstart.md — build &amp; run in minutes</li>
+    <li>docs/architecture.md — the design record</li>
+    <li>docs/benchmarks.md · docs/cnn-results.md · docs/mnist-results.md</li>
+    <li>docs/gradient-parity.md — the PyTorch comparison, quantified</li>
+  </ul>
+</section>
+
+<div id="hint">← → navigate · Home/End jump · works printed</div>
+<div id="counter"></div>
+
+<script>
+  const slides = Array.from(document.querySelectorAll(".slide"));
+  let i = 0;
+  const counter = document.getElementById("counter");
+  function show(n) {
+    i = Math.max(0, Math.min(slides.length - 1, n));
+    slides.forEach((s, k) => s.classList.toggle("active", k === i));
+    counter.textContent = (i + 1) + " / " + slides.length;
+    location.hash = String(i + 1);
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowRight" || e.key === " " || e.key === "PageDown") { show(i + 1); }
+    else if (e.key === "ArrowLeft" || e.key === "PageUp") { show(i - 1); }
+    else if (e.key === "Home") { show(0); }
+    else if (e.key === "End") { show(slides.length - 1); }
+  });
+  document.addEventListener("click", () => show(i + 1));
+  const start = parseInt(location.hash.slice(1), 10);
+  show(Number.isFinite(start) ? start - 1 : 0);
+</script>
+</body>
+</html>

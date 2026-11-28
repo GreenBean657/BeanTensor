@@ -404,6 +404,7 @@ set(CORE_SOURCES
         Module/Module.cpp
         Module/Linear.h
         Module/Linear.cpp
+        Module/WeightInit.h
         Module/BatchNorm.h
         Module/BatchNorm.cpp
         Module/Relu.h

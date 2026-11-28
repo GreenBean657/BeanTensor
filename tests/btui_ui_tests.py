@@ -1861,6 +1861,38 @@ class VramTest(AppTestCase):
             app.shutdown()
 
 
+class GpuUtilTest(AppTestCase):
+    def test_sm_util_line_on_gpu_device_only(self):
+        app = btui.BtuiApp(btui.BufferScreen(34, 110), has_gpu=True)
+        real_mem = btui.bt.gpu_memory
+        real_util = btui._gpu_utilization
+        half_gib = 2 ** 29
+        btui.bt.gpu_memory = lambda: {
+            "total_bytes": 4 * half_gib,
+            "free_bytes": half_gib,
+            "used_bytes": 3 * half_gib,
+        }
+        btui._gpu_utilization = lambda: 42
+        try:
+            app.apply_setting("device", "gpu")
+            app.redraw()
+            self.assertIn("sm: 42%", app.screen.text(), app.screen.text())
+            # A failed probe drops the segment, never the line. The telemetry
+            # poll is throttled (POOL_REFRESH_SECONDS), so rewind its clock
+            # to force a re-poll instead of sleeping.
+            btui._gpu_utilization = lambda: None
+            app._pool_at = 0.0
+            app.redraw()
+            self.assertNotIn("sm:", app.screen.text())
+            app.apply_setting("device", "cpu")
+            app.redraw()
+            self.assertNotIn("sm:", app.screen.text())
+        finally:
+            btui.bt.gpu_memory = real_mem
+            btui._gpu_utilization = real_util
+            app.shutdown()
+
+
 class PauseKeyTest(AppTestCase):
     def test_p_toggle_and_header(self):
         self.app.handle_key("p")

@@ -29,6 +29,7 @@ import collections
 import dataclasses
 import math
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -61,6 +62,25 @@ def probe_gpu() -> bool:
             _GPU_PROBE["available"] = False
         _GPU_PROBE["done"] = True
     return _GPU_PROBE["available"]
+
+
+def _gpu_utilization():
+    """SM utilization percent (0-100) from nvidia-smi, or None when the
+    probe is unavailable or unparseable. Stdlib-only by btui's no-dependency
+    rule: no pynvml, just a bounded subprocess with a 2 s timeout."""
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return int(proc.stdout.strip().splitlines()[0].strip())
+    except (ValueError, IndexError):
+        return None
 
 MNIST_FLAT = "mnist_flat"
 MNIST_NCHW = "mnist_nchw"
@@ -1351,6 +1371,7 @@ class BtuiApp:
         self._pool_deltas = None
         self._pool_spark = collections.deque(maxlen=60)
         self._vram = None
+        self._gpu_util = None
         self._save_path = None
         self._save_level_form = None
         self._detected_key = None
@@ -2122,13 +2143,16 @@ class BtuiApp:
                 if not self._pool_warned:
                     self.log(f"pool_snapshot failed: {exc}", error=True)
                     self._pool_warned = True
-            # VRAM telemetry rides the same 2 Hz poll, only while the run
-            # targets GPU; gpu_memory returns None on CPU builds / failures
-            # by contract, so no try/except.
+            # VRAM + SM-utilization telemetry rides the same 2 Hz poll, only
+            # while the run targets GPU; gpu_memory returns None on CPU
+            # builds / failures by contract, and _gpu_utilization is None on
+            # any probe failure, so no try/except.
             if self.has_gpu and self.data_cfg.device == "gpu":
                 self._vram = bt.gpu_memory()
+                self._gpu_util = _gpu_utilization()
             else:
                 self._vram = None
+                self._gpu_util = None
             self._pool_at = now
 
         snap = self.shared.snapshot()
@@ -2251,6 +2275,8 @@ class BtuiApp:
             gib = 2 ** 30
             counts += (f"  vram: {_fmt6(self._vram['used_bytes'] / gib)}"
                        f"/{_fmt6(self._vram['total_bytes'] / gib)} GiB")
+            if self._gpu_util is not None:
+                counts += f"  sm: {self._gpu_util}%"
         if snap["evaluating"]:
             counts += "  evaluating..."
         self._put(y + 1, x + 1, counts[:inner], "dim")

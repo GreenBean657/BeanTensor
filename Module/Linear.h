@@ -5,7 +5,7 @@
  * optional bias {out_features}, both registered as named parameters
  * ("weight", "bias") on the Module base, and forward = matmul + bias_add
  * following the project's x(m×k)·w(k×n) GEMM convention.
- * @version 0.4
+ * @version 0.5
  * @date 2026-11-05
  */
 #pragma once
@@ -16,6 +16,7 @@
 #include <string>
 
 #include "Module/Module.h"
+#include "Module/WeightInit.h"
 #include "Tensor/DTypes.h"
 
 namespace BeanTensor::Modules {
@@ -25,11 +26,13 @@ namespace BeanTensor::Modules {
      * out_features} so a rank-2 input {m, in_features} matmuls directly;
      * bias is added along the last dimension via Tensor::bias_add. Both
      * parameters are created requires_grad=true on the construction device,
-     * in the construction dtype. Weight is initialized He (Kaiming) uniform:
-     * each element drawn from U[-bound, bound] with bound = sqrt(6 /
-     * in_features), where the fan-in is in_features. Bias is initialized to
-     * exactly zero. When the seed is omitted, weight consumes one draw from
-     * the process-wide generator and bias is zeroed without consuming a draw.
+     * in the construction dtype. Weight is initialized He (Kaiming) uniform
+     * by default: each element drawn from U[-bound, bound] with bound =
+     * sqrt(6 / in_features), where the fan-in is in_features; pass
+     * WeightInit::Xavier for Glorot uniform with bound = sqrt(6 /
+     * (in_features + out_features)). Bias is initialized to exactly zero.
+     * When the seed is omitted, weight consumes one draw from the
+     * process-wide generator and bias is zeroed without consuming a draw.
      * Built on Tensor::random so CPU and GPU produce the same values.
      * @brief Fully connected layer (matmul + bias_add).
      */
@@ -48,12 +51,15 @@ namespace BeanTensor::Modules {
          *        Generator (one draw total); the bias is set to zero and
          *        consumes no draw. When explicit, the weight uses this seed
          *        and the bias is zero.
+         * @param init Weight initialization mode (He uniform on the fan-in by
+         *        default; Xavier uniform on fan-in + fan_out).
          */
         Linear(size_t in_features, size_t out_features,
                DataTypes::DType dtype = DataTypes::DType::Float32,
                Tensors::Device device = Tensors::Device::CPU,
                bool bias = true,
-               std::optional<int64_t> seed = std::nullopt);
+               std::optional<int64_t> seed = std::nullopt,
+               WeightInit init = WeightInit::He);
 
         /**
          * x(m×in)·weight(in×out), then + bias(out) when the layer has one.
@@ -103,5 +109,6 @@ namespace BeanTensor::Modules {
         size_t in_features_;
         size_t out_features_;
         bool has_bias_;
+        WeightInit init_;
     };
 }

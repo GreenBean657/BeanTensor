@@ -868,6 +868,55 @@ class GpuMemoryTest(unittest.TestCase):
             self.assertIsNone(mem)
 
 
+class GpuUtilTest(unittest.TestCase):
+    """_gpu_utilization parses nvidia-smi's CSV probe and maps every failure
+    mode to None: missing binary, timeout, non-zero exit, unparseable or
+    empty output."""
+
+    class _Proc:
+        def __init__(self, returncode, stdout):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    def setUp(self):
+        # btui.subprocess IS the stdlib module; save/restore, never leak.
+        self._real = btui.subprocess.run
+
+    def tearDown(self):
+        btui.subprocess.run = self._real
+
+    def _patch(self, fn):
+        btui.subprocess.run = fn
+
+    def test_parses_first_gpu_percent(self):
+        self._patch(lambda *a, **k: GpuUtilTest._Proc(0, "37\n"))
+        self.assertEqual(btui._gpu_utilization(), 37)
+        # Multi-GPU hosts list one line per device; the dashboard reports
+        # device 0, matching gpu_memory's contract.
+        self._patch(lambda *a, **k: GpuUtilTest._Proc(0, "37\n82\n"))
+        self.assertEqual(btui._gpu_utilization(), 37)
+
+    def test_failure_modes_return_none(self):
+        def missing(*a, **k):
+            raise FileNotFoundError("nvidia-smi")
+        self._patch(missing)
+        self.assertIsNone(btui._gpu_utilization())
+
+        def slow(*a, **k):
+            raise btui.subprocess.TimeoutExpired("nvidia-smi", 2)
+        self._patch(slow)
+        self.assertIsNone(btui._gpu_utilization())
+
+        self._patch(lambda *a, **k: GpuUtilTest._Proc(1, ""))
+        self.assertIsNone(btui._gpu_utilization())
+
+        self._patch(lambda *a, **k: GpuUtilTest._Proc(0, "not-a-number\n"))
+        self.assertIsNone(btui._gpu_utilization())
+
+        self._patch(lambda *a, **k: GpuUtilTest._Proc(0, ""))
+        self.assertIsNone(btui._gpu_utilization())
+
+
 class GilReleaseHeartbeatTest(unittest.TestCase):
     """The blocking bindings (item/evaluate/to_numpy/write_numpy) drop the
     GIL across their sync regions, so a polling thread stays responsive

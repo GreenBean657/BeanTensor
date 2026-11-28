@@ -1,10 +1,9 @@
 /**
  * @file Linear.cpp
  * @author GreenBean
- * @brief Linear layer implementation: He-uniform weight initialization
- * (bound sqrt(6 / in_features)), zero bias, and the matmul + bias_add
- * forward.
- * @version 0.4
+ * @brief Linear layer implementation: He-uniform (default) or Xavier-uniform
+ * weight initialization, zero bias, and the matmul + bias_add forward.
+ * @version 0.5
  * @date 2026-11-05
  */
 #include "Module/Linear.h"
@@ -17,12 +16,15 @@
 namespace BeanTensor::Modules {
 
     Linear::Linear(const size_t in_features, const size_t out_features, const DataTypes::DType dtype,
-                   const Tensors::Device device, const bool bias, const std::optional<int64_t> seed)
-        : in_features_(in_features), out_features_(out_features), has_bias_(bias) {
-        // He (Kaiming) uniform on the fan-in: weight ~ U[-bound, bound],
-        // bound = sqrt(6 / in_features); bias is exactly zero. Built on
-        // Tensor::random so it behaves identically on CPU and GPU.
-        const auto bound = std::sqrt(6.0 / static_cast<float64_t>(in_features));
+                   const Tensors::Device device, const bool bias, const std::optional<int64_t> seed,
+                   const WeightInit init)
+        : in_features_(in_features), out_features_(out_features), has_bias_(bias), init_(init) {
+        // He (Kaiming) uniform on the fan-in by default; Xavier (Glorot)
+        // uniform on fan-in + fan_out when requested. Bias is exactly zero.
+        // Built on Tensor::random so it behaves identically on CPU and GPU.
+        const auto bound = init == WeightInit::He
+            ? std::sqrt(6.0 / static_cast<float64_t>(in_features))
+            : std::sqrt(6.0 / (static_cast<float64_t>(in_features) + static_cast<float64_t>(out_features)));
         auto weight = Tensors::Tensor({in_features, out_features}, dtype, device, true);
         if (seed.has_value()) {
             weight.random(-bound, bound, seed.value());
@@ -72,6 +74,7 @@ namespace BeanTensor::Modules {
             {"in_features", std::to_string(this->in_features_)},
             {"out_features", std::to_string(this->out_features_)},
             {"bias", this->has_bias_ ? "1" : "0"},
+            {"init", weight_init_name(this->init_)},
         };
         return out;
     }
@@ -86,13 +89,18 @@ namespace BeanTensor::Modules {
      * @throws ErrorHandling::CorruptFile a hyperparameter is missing, malformed, or out of range.
      */
     std::unique_ptr<Module> Linear::construct(const ModuleSpec& spec, DataTypes::DType dtype, Tensors::Device device) {
+        // The init key is optional: files written before the mode existed
+        // rebuild with the historical He default.
+        const std::string* init_name = find_hyper(spec, "init");
+        const auto init = init_name == nullptr ? WeightInit::He : weight_init_from_name(*init_name);
         return std::make_unique<Linear>(
             static_cast<size_t>(require_hyper_u64(spec, "in_features")),
             static_cast<size_t>(require_hyper_u64(spec, "out_features")),
             dtype,
             device,
             require_hyper_bool(spec, "bias"),
-            std::nullopt);
+            std::nullopt,
+            init);
     }
 
 }

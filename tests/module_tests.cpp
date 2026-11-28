@@ -1,7 +1,8 @@
 // BeanTensorV5 module tests — framework-free assertion suite.
 // Covers: Module registry (named parameter access, named_parameters
 // flattening, manual gradient access via Tensor::grad), Linear
-// (forward = matmul + bias_add, bias-free variant, init bounds),
+// (forward = matmul + bias_add, bias-free variant, He and Xavier init
+// bounds + determinism + spec round-trip),
 // Sequential (chained forward, empty forward throws EmptyModule, layer injection:
 // append/insert/replace/remove mutate the registry AND forward),
 // mse_loss -> backward -> Module::adam_step training loop (graph tensors
@@ -23,9 +24,11 @@
 #include <vector>
 
 #include "Helpers/Errors.h"
+#include "Module/Conv2d.h"
 #include "Module/Linear.h"
 #include "Random/Generator.h"
 #include "Module/Module.h"
+#include "Module/ModuleSpec.h"
 #include "Module/ModuleStream.h"
 #include "Module/Relu.h"
 #include "Module/Sequential.h"
@@ -38,8 +41,11 @@
 #endif
 
 using BeanTensor::Modules::Linear;
+using BeanTensor::Modules::Conv2d;
 using BeanTensor::Modules::Module;
 using BeanTensor::Modules::Sequential;
+using BeanTensor::Modules::WeightInit;
+using BeanTensor::Modules::find_hyper;
 using BeanTensor::Tensors::Tensor;
 using BeanTensor::Tensors::Device;
 using BeanTensor::float32_t;
@@ -867,6 +873,97 @@ static void test_linear_he_bias_zero() {
     }
 }
 
+static void test_linear_xavier_init() {
+    // Xavier (Glorot) uniform: bound from fan_in + fan_out, tighter than the
+    // He fan-in bound; deterministic under an explicit seed; the mode
+    // round-trips through the .bt spec; an absent init key keeps the He
+    // default so pre-mode files rebuild unchanged.
+    const auto in_f = size_t{64};
+    const auto out_f = size_t{32};
+    const auto xavier_bound = std::sqrt(6.0 / (static_cast<float64_t>(in_f) + static_cast<float64_t>(out_f)));
+    const auto he_bound = std::sqrt(6.0 / static_cast<float64_t>(in_f));
+    CHECK(xavier_bound < he_bound);
+
+    auto lin = Linear(in_f, out_f, DType::Float32, Device::CPU, true, 424242, WeightInit::Xavier);
+    auto& w = lin.parameter("weight");
+    auto max_abs = float64_t{0.0};
+    for (auto i = size_t{0}; i < in_f; ++i) {
+        for (auto j = size_t{0}; j < out_f; ++j) {
+            const auto v = std::fabs(static_cast<float64_t>(w.at<float32_t>({i, j})));
+            CHECK(v <= xavier_bound);
+            max_abs = std::max(max_abs, v);
+        }
+    }
+    CHECK(max_abs > xavier_bound * 0.5); // the fill actually uses the range
+
+    // Same-seed determinism holds under Xavier.
+    auto again = Linear(in_f, out_f, DType::Float32, Device::CPU, true, 424242, WeightInit::Xavier);
+    CHECK(again.parameter("weight").contents_to_string() == w.contents_to_string());
+
+    // spec() records the mode and construct() restores it.
+    auto spec = lin.spec();
+    const auto* init_name = find_hyper(spec, "init");
+    CHECK(init_name != nullptr && *init_name == "xavier");
+    auto rebuilt = Linear::construct(spec, DType::Float32, Device::CPU);
+    auto& rw = rebuilt->parameter("weight");
+    for (auto i = size_t{0}; i < in_f; ++i) {
+        for (auto j = size_t{0}; j < out_f; ++j) {
+            CHECK(std::fabs(static_cast<float64_t>(rw.at<float32_t>({i, j}))) <= xavier_bound);
+        }
+    }
+
+    // Absent init key: the historical He default applies — its wider bound
+    // holds, and a seeded He fill provably exceeds the tighter Xavier bound
+    // somewhere, so passing the Xavier bound here would mean the default
+    // silently became Xavier.
+    auto legacy_spec = spec;
+    std::erase_if(legacy_spec.hyperparameters, [](const auto& kv) { return kv.first == "init"; });
+    auto legacy = Linear::construct(legacy_spec, DType::Float32, Device::CPU);
+    auto& lw = legacy->parameter("weight");
+    auto exceeds_xavier = false;
+    for (auto i = size_t{0}; i < in_f; ++i) {
+        for (auto j = size_t{0}; j < out_f; ++j) {
+            const auto v = std::fabs(static_cast<float64_t>(lw.at<float32_t>({i, j})));
+            CHECK(v <= he_bound);
+            if (v > xavier_bound) {
+                exceeds_xavier = true;
+            }
+        }
+    }
+    CHECK(exceeds_xavier);
+    std::cout << "linear xavier init ok\n";
+}
+
+static void test_conv2d_xavier_init() {
+    // Conv2d Xavier bound uses the receptive-field fans, and the mode
+    // round-trips through the .bt spec.
+    const auto in_ch = uint32_t{8};
+    const auto out_ch = uint32_t{16};
+    const auto k = uint32_t{3};
+    const auto fan_in = static_cast<float64_t>(in_ch) * static_cast<float64_t>(k) * static_cast<float64_t>(k);
+    const auto fan_out = static_cast<float64_t>(out_ch) * static_cast<float64_t>(k) * static_cast<float64_t>(k);
+    const auto xavier_bound = std::sqrt(6.0 / (fan_in + fan_out));
+
+    auto conv = Conv2d(in_ch, out_ch, k, 1, 0, DType::Float32, Device::CPU, true, 777, WeightInit::Xavier);
+    auto& w = conv.parameter("weight");
+    for (auto c = size_t{0}; c < in_ch; ++c) {
+        for (auto r = size_t{0}; r < k; ++r) {
+            for (auto s = size_t{0}; s < k; ++s) {
+                for (auto oc = size_t{0}; oc < out_ch; ++oc) {
+                    CHECK(std::fabs(static_cast<float64_t>(w.at<float32_t>({c, r, s, oc}))) <= xavier_bound);
+                }
+            }
+        }
+    }
+    auto spec = conv.spec();
+    const auto* init_name = find_hyper(spec, "init");
+    CHECK(init_name != nullptr && *init_name == "xavier");
+    auto rebuilt = Conv2d::construct(spec, DType::Float32, Device::CPU);
+    auto& rw = rebuilt->parameter("weight");
+    CHECK(std::fabs(static_cast<float64_t>(rw.at<float32_t>({0, 0, 0, 0}))) <= xavier_bound);
+    std::cout << "conv2d xavier init ok\n";
+}
+
 #if defined(USE_HIP) || defined(USE_CUDA)
 static void test_linear_he_gpu_parity() {
     if (!gpu_available()) {
@@ -945,6 +1042,8 @@ int main() {
     test_linear_he_same_seed();
     test_linear_he_variance_bounds();
     test_linear_he_bias_zero();
+    test_linear_xavier_init();
+    test_conv2d_xavier_init();
 #if defined(USE_HIP) || defined(USE_CUDA)
     if (gpu_available()) {
         test_linear_he_gpu_parity();

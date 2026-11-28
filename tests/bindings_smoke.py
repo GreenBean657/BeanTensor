@@ -1367,7 +1367,7 @@ assert [c["name"] for c in spec_children] == ["0", "1", "2", "3"], (
 )
 assert [c["type"] for c in spec_children] == ["Linear", "Relu", "Dropout", "Linear"]
 lin0_hyper = spec_children[0]["hyperparameters"]
-assert lin0_hyper == {"in_features": "4", "out_features": "8", "bias": "1"}, (
+assert lin0_hyper == {"in_features": "4", "out_features": "8", "bias": "1", "init": "he"}, (
     f"linear hypers: {lin0_hyper}"
 )
 assert spec_children[1]["hyperparameters"] == {}

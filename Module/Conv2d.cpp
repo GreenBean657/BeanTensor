@@ -1,9 +1,9 @@
 /**
  * @file Conv2d.cpp
  * @author GreenBean
- * @brief Conv2d layer implementation: He-uniform weight init, zero bias,
- * and Tensor::conv2d forward.
- * @version 0.2
+ * @brief Conv2d layer implementation: He-uniform (default) or Xavier-uniform
+ * weight init, zero bias, and Tensor::conv2d forward.
+ * @version 0.3
  * @date 2026-11-05
  */
 #include "Module/Conv2d.h"
@@ -19,10 +19,15 @@ namespace BeanTensor::Modules {
     Conv2d::Conv2d(const uint32_t in_ch, const uint32_t out_ch, const uint32_t kernel,
                    const uint32_t stride, const uint32_t padding,
                    const DataTypes::DType dtype, const Tensors::Device device, const bool bias,
-                   const std::optional<int64_t> seed)
-        : in_ch_(in_ch), out_ch_(out_ch), kernel_(kernel), stride_(stride), padding_(padding), has_bias_(bias) {
+                   const std::optional<int64_t> seed, const WeightInit init)
+        : in_ch_(in_ch), out_ch_(out_ch), kernel_(kernel), stride_(stride), padding_(padding), has_bias_(bias), init_(init) {
         const auto fan_in = static_cast<float64_t>(in_ch) * static_cast<float64_t>(kernel) * static_cast<float64_t>(kernel);
-        const auto bound = std::sqrt(6.0 / fan_in);
+        const auto fan_out = static_cast<float64_t>(out_ch) * static_cast<float64_t>(kernel) * static_cast<float64_t>(kernel);
+        // He (Kaiming) uniform on the fan-in by default; Xavier (Glorot)
+        // uniform on fan_in + fan_out when requested.
+        const auto bound = init == WeightInit::He
+            ? std::sqrt(6.0 / fan_in)
+            : std::sqrt(6.0 / (fan_in + fan_out));
         auto weight = Tensors::Tensor(std::vector<size_t>{in_ch, kernel, kernel, out_ch}, dtype, device, true);
         if (seed.has_value()) {
             weight.random(-bound, bound, seed.value());
@@ -59,6 +64,7 @@ namespace BeanTensor::Modules {
             {"stride", std::to_string(this->stride_)},
             {"padding", std::to_string(this->padding_)},
             {"bias", this->has_bias_ ? "1" : "0"},
+            {"init", weight_init_name(this->init_)},
         };
         return out;
     }
@@ -80,6 +86,10 @@ namespace BeanTensor::Modules {
             }
             return static_cast<uint32_t>(v);
         };
+        // The init key is optional: files written before the mode existed
+        // rebuild with the historical He default.
+        const std::string* init_name = find_hyper(spec, "init");
+        const auto init = init_name == nullptr ? WeightInit::He : weight_init_from_name(*init_name);
         return std::make_unique<Conv2d>(
             to_u32("in_channels", spec),
             to_u32("out_channels", spec),
@@ -89,7 +99,8 @@ namespace BeanTensor::Modules {
             dtype,
             device,
             require_hyper_bool(spec, "bias"),
-            std::nullopt);
+            std::nullopt,
+            init);
     }
 
 }
