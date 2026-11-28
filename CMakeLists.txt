@@ -48,9 +48,16 @@ if (USE_CUDA)
     # a one-line-per-function patch adding noexcept(true) to those 6 declarations
     # in the toolkit header (documented in the project build notes); -U_GNU_SOURCE is NOT a
     # viable workaround — it breaks libstdc++'s own headers.
+    # Default arch list (Volta + Ampere). The guard must run BEFORE
+    # project(... LANGUAGES CUDA): enabling CUDA auto-populates
+    # CMAKE_CUDA_ARCHITECTURES (CUDAARCHS env, then GPU detection, then a
+    # toolkit fallback), so a NOT DEFINED check after project() would see the
+    # auto-detected value and the project default would never apply.
+    if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES 70 86)
+    endif()
     project(BeanTensorV5 LANGUAGES CXX CUDA)
     set(CMAKE_CUDA_STANDARD 20)
-    set(CMAKE_CUDA_ARCHITECTURES 70 86)
     if (CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.9)
         message(FATAL_ERROR "CUDA backend requires nvcc >= 12.9 (found ${CMAKE_CUDA_COMPILER_VERSION}). Install the CUDA 12.9 toolkit or build with USE_CUDA=OFF.")
     endif()

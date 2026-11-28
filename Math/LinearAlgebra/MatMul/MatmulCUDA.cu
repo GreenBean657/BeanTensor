@@ -2,13 +2,14 @@
  * @file MatmulCUDA.cu
  * @author GreenBean
  * @brief CUDA backend for matmul.
- * @version 0.1.1
+ * @version 0.1.2
  * @date 2026-10-18
  */
 
 #if defined(USE_CUDA)
 #include <cstdint>
 #include <limits>
+#include <mutex>
 #include <type_traits>
 
 #include <cublas_v2.h>
@@ -37,6 +38,19 @@ namespace BeanTensor::Tensors::detail {
                 return h;
             }();
             return handle;
+        }
+
+        /**
+         * cuBLAS handles are not safe for concurrent host-side use, and
+         * matmul_gpu() enqueues GEMMs onto the global CPU pool, so two pool
+         * workers could otherwise drive the shared handle at once. The lock is
+         * held across every cuBLAS call in this file, never across a wait.
+         * @brief Mutex serializing host-side use of the shared cuBLAS handle.
+         * @return The process-wide handle mutex.
+         */
+        [[nodiscard]] std::mutex& cublas_handle_mutex() {
+            static std::mutex m;
+            return m;
         }
 
         /**
@@ -194,6 +208,7 @@ namespace BeanTensor::Tensors::detail {
         __host__ void launch_gemm_cublas(const void* a_data, const void* b_data, void* c_data,
                                 const size_t batch, const size_t m, const size_t k, const size_t n, const DataTypes::DType dtype) {
             const auto handle = get_cublas_handle();
+            const auto lock = std::lock_guard{cublas_handle_mutex()};
             const auto blas_m = static_cast<int32_t>(n);
             const auto blas_n = static_cast<int32_t>(m);
             const auto blas_k = static_cast<int32_t>(k);
@@ -295,6 +310,7 @@ namespace BeanTensor::Tensors::detail {
             constexpr float32_t alpha = 1.0f;
             constexpr float32_t beta = 0.0f;
             constexpr auto lane_type = std::is_same_v<H, float16_t> ? CUDA_R_16F : CUDA_R_16BF;
+            const auto lock = std::lock_guard{cublas_handle_mutex()};
             CUBLAS_CHECK_ERROR(cublasGemmStridedBatchedEx(get_cublas_handle(), CUBLAS_OP_N, CUBLAS_OP_N,
                                                           static_cast<int32_t>(n), static_cast<int32_t>(m), static_cast<int32_t>(k), &alpha,
                                                           b_lanes, lane_type, static_cast<int32_t>(n), static_cast<int64_t>(k * n),
