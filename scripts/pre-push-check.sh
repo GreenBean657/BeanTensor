@@ -13,7 +13,8 @@
 #   D. workflow lint        — any workflow touched in the range must declare a
 #                             permissions: block and pin every action to a full
 #                             commit SHA (GitHub repo policy)
-#   E. tests on the tree    — full CPU ctest + platform loop + gated HIP run
+#   E. tests on the tree    — full CPU ctest (bindings ON: the same 46 entries
+#                             CI runs) + platform loop + gated HIP run
 #                             (any test failure refuses the push outright)
 # Bypass for a deliberate exception: BEANTENSOR_SKIP_PREPUSH=1 (the hook warns).
 set -uo pipefail
@@ -108,9 +109,11 @@ fi
 # ---- E. tests on the exact tree ----
 phase "E. test matrix"
 BUILD=scratch/build-verify-fresh
-if [[ ! -f "$BUILD/CMakeCache.txt" ]]; then
-    cmake -S . -B "$BUILD" -DUSE_HIP=OFF -DUSE_CUDA=OFF -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1
-fi
+# Unconditional configure: an existing cache from an older flag set must not
+# silently narrow the matrix (BUILD_PYTHON_BINDINGS=ON makes ctest register
+# the Python suites — btui_logic/btui_ui/bindings_smoke — that CI runs but a
+# bindings-off build skips). Configure is idempotent on an unchanged tree.
+cmake -S . -B "$BUILD" -DUSE_HIP=OFF -DUSE_CUDA=OFF -DBUILD_TESTING=ON -DBUILD_PYTHON_BINDINGS=ON -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1
 BUILD_LOG="$BUILD/pre-push-build.log"
 BUILD_OK=1
 cmake --build "$BUILD" -j "$JOBS" >"$BUILD_LOG" 2>&1 || BUILD_OK=0
